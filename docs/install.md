@@ -6,7 +6,7 @@
 
 - Windows 10 / 11，64 位；CPU 是 Intel 或 AMD 的 x86_64。
 - 显卡支持 Vulkan（独立显卡或较新的集成显卡）。
-- AUTO-MAS：推荐 `v5.7.0-beta.6` 或更新。v5.7.0-beta.5 起支持 MAA 和全部 MFW 脚本，更早的版本见 Release 说明。
+- AUTO-MAS：推荐 `v5.7.0` 或更新。v5.7.0-beta.5 起支持 MAA 和全部 MFW 脚本，更早的版本见 Release 说明。
 - 找一块空间大的 NTFS 盘：
   - 补全组件时要约 6.5 GB 可用，装完以后组件和模拟器本体共占约 5 GB；
   - 每台实例第一次开机时，所在的盘要有 10 GB 以上可用；
