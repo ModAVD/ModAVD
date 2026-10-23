@@ -2,6 +2,7 @@
 
 下面以 `37.2.10-mas32` 为例。其他版本要使用对应版本的仓库清单和补丁，不能把不同版本的源码和二进制混用。
 对应源码总包在 [mas32 Release](https://github.com/ModAVD/ModAVD/releases/tag/v37.2.10-mas32)，其中 `SOURCES.txt` 说明每个源码文件的来源和用途。
+从 33.0.0 起版本号写成 `<N>.0.<P>`（tag `v33.0.0`），N 就是构建号 mas-N：清单仍叫 `manifest-masN.xml`，补丁目录仍按 masN 命名。
 
 ## 环境
 

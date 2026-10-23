@@ -7,6 +7,100 @@ import re
 import subprocess
 import sys
 
+# Release notes from 33.0.0 on: a one-line machine-readable comment first, then the announcement that is
+# synced to MirrorChyan and shown by AUTO-MAS, then this separator, then GitHub-only details.
+MACHINE_PREFIX = "<!-- modavd: "
+SEPARATOR = "<!-- modavd:github-only -->"
+CATEGORIES = ("新增", "变更", "修复", "移除", "说明")
+MACHINE_VERSIONS = 10
+MAX_ANNOUNCEMENT_CHARS = 4000
+MAX_MACHINE_CHARS = 8000
+MANIFEST = "modavd-manifest.json"
+
+
+def version_key(value):
+    m = re.fullmatch(r"v([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value if isinstance(value, str) else "")
+    if not m:
+        raise ValueError(f"Version must look like v33.0.0: {value!r}")
+    return tuple(int(x) for x in m.groups())
+
+
+def check_min_automas(value):
+    if value is not None and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta)\.[0-9]+)?", value if isinstance(value, str) else ""):
+        raise ValueError(f"min_automas must be null or like 5.7.0 / 5.7.0-beta.5: {value!r}")
+
+
+def check_changes(changes):
+    """{"v33.0.0": {"修复": ["…"]}}: known categories, one-line items that cannot end an HTML comment."""
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("changes must be a non-empty object")
+    for version, groups in changes.items():
+        version_key(version)
+        if not isinstance(groups, dict) or not groups or any(c not in CATEGORIES for c in groups):
+            raise ValueError(f"{version}: categories must be among {CATEGORIES}")
+        for items in groups.values():
+            if not isinstance(items, list) or not items:
+                raise ValueError(f"{version}: each category needs at least one item")
+            for item in items:
+                if not isinstance(item, str) or not item.strip() or "\n" in item or "\r" in item or "--" in item:
+                    raise ValueError(f"{version}: items must be non-empty single lines without '--': {item!r}")
+
+
+def machine_line(data):
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if "--" in text:
+        raise ValueError("Machine-readable line must not contain '--'")
+    return MACHINE_PREFIX + text + " -->"
+
+
+def check_announcement(text, version=None, build=None):
+    """Machine line, separator and announcement size of 33.0.0+ release notes."""
+    lines = text.splitlines()
+    m = re.fullmatch(re.escape(MACHINE_PREFIX) + r"(\{.*\}) -->", lines[0] if lines else "")
+    if not m or len(lines[0]) > MAX_MACHINE_CHARS or "--" in m[1]:
+        raise ValueError("First line must be a single machine-readable <!-- modavd: {...} --> comment")
+    data = json.loads(m[1])
+    if set(data) != {"version", "build", "upstream", "min_automas", "changes"}:
+        raise ValueError("Machine line needs exactly version/build/upstream/min_automas/changes")
+    key = version_key(data["version"])
+    if data["build"] != key[0] or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(data["upstream"])):
+        raise ValueError("Machine line build/upstream invalid")
+    check_min_automas(data["min_automas"])
+    check_changes(data["changes"])
+    keys = [version_key(v) for v in data["changes"]]
+    if keys[0] != key or keys != sorted(set(keys), reverse=True) or len(keys) > MACHINE_VERSIONS:
+        raise ValueError(f"changes must start with this version, newest first, at most {MACHINE_VERSIONS} versions")
+    if (version is not None and data["version"] != version) or (build is not None and data["build"] != build):
+        raise ValueError("Machine line version/build differ from this release")
+    if lines.count(SEPARATOR) != 1:
+        raise ValueError(f"Separator line {SEPARATOR} must appear exactly once")
+    upper = "\n".join(lines[1:lines.index(SEPARATOR)])
+    if len(upper) > MAX_ANNOUNCEMENT_CHARS:
+        raise ValueError(f"Announcement above the separator is {len(upper)} chars; keep it within {MAX_ANNOUNCEMENT_CHARS}")
+    if re.search(r"[0-9a-f]{64}", upper):
+        raise ValueError("Checksums belong below the separator")
+    return data
+
+
+def check_manifest(tree):
+    """modavd-manifest.json lists every other file of the package with its size and SHA-256."""
+    tree = Path(tree)
+    data = json.loads((tree / MANIFEST).read_text(encoding="utf-8"))
+    if data.get("schema") != 1 or set(data) != {"schema", "version", "build", "upstream", "min_automas", "files"}:
+        raise ValueError("Manifest fields differ from schema 1")
+    if version_key(data["version"])[0] != data["build"]:
+        raise ValueError("Manifest build differs from version")
+    check_min_automas(data["min_automas"])
+    actual = {}
+    for p in tree.rglob("*"):
+        rel = p.relative_to(tree).as_posix()
+        if p.is_file() and rel != MANIFEST:
+            with open(p, "rb") as f:
+                actual[rel] = {"size": p.stat().st_size, "sha256": hashlib.file_digest(f, "sha256").hexdigest()}
+    if data["files"] != actual:
+        raise ValueError("Manifest file list differs from the package")
+    return data
+
 
 def git(repo, *args):
     result = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "core.longpaths=true", "-C", str(repo), *map(str, args)],
@@ -65,6 +159,11 @@ def metadata(root):
         raise ValueError("No release notes")
     for path in notes:
         # Historical releases each keep their own original published checksums.
+        text = path.read_text(encoding="utf-8-sig")
+        if text.startswith(MACHINE_PREFIX):
+            data = check_announcement(text)
+            if path.stem != data["version"][1:]:
+                raise ValueError(f"{path.name}: file name differs from version {data['version']}")
         assets = json.loads(path.with_suffix(".assets.json").read_text(encoding="utf-8"))
         check_notes(path, path.with_suffix(".SHA256SUMS.txt"), {name: a["bytes"] for name, a in assets.items()}, path.with_suffix(".sources.SHA256SUMS.txt"))
         # The size manifest and both checksum files must also agree, independently of notes.
