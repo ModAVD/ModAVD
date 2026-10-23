@@ -1,0 +1,73 @@
+From 263d61ef6fd6882eb6d13accd2c438c6194e0e5e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:39:26 +0200
+Subject: [PATCH 43/57] media/cuda: return textures of undelivered frames to
+ the pool
+
+MediaCudaVideoHelper::deInit() cleared mSavedDecodedFrames without
+returning their textures. In GPU texture mode every saved frame owns a
+Y/UV texture pair taken from MediaTexturePool. Once the frame is
+dropped nothing refers to the pair any more, and the pool's
+cleanUpTextures() only deletes pairs that are back in the pool, so the
+textures stay allocated until the GL share group goes away.
+
+The list is usually empty when deInit() runs. The H.264, HEVC and
+VP8/VP9 decoders call fetchAllFrames() after every decode and flush,
+which moves the frames into their MediaSnapshotHelper, and the H.264
+and HEVC decoders hand those textures back to the pool when they are
+reset or destroyed. Frames are left in the list only if the helper is
+destroyed inside a decode call, before fetchAllFrames() has run. The
+H.264 and HEVC decoders do that during their trial period: they check
+good() after every packet and fall back to FFmpeg once it turns false.
+HandleVideoSequence() makes it false when a new sequence has a format
+or size the GPU cannot decode, and any picture that the parser
+displays in that same cuvidParseVideoData() call is still in the list
+when try_decode() destroys the helper.
+
+Give the textures back to the pool before clearing the list; the pool
+frees them in its next cleanUpTextures() (on the next reset or when the
+decoder is destroyed).
+
+Test: 150 CUDA decode sessions killed mid-stream: GPU local usage and
+      whole-card usage stay flat, as they do without this change. In
+      about 50 more sessions killed during unpaced decode a debugger
+      counted 110 deInit() calls, none of which found a frame in the
+      list. The new loop was reviewed, not exercised: a stream that
+      switches to a format the GPU cannot decode has not been tried.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Id27d72337f748f107b76f51c414260220f3fe7ee
+---
+ .../emulation/MediaCudaVideoHelper.cpp        | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp b/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
+index d2bfe8932..bd68a677f 100644
+--- a/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
++++ b/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
+@@ -67,7 +67,24 @@ MediaCudaVideoHelper::~MediaCudaVideoHelper() {
+ void MediaCudaVideoHelper::deInit() {
+     CUDA_DPRINT("deInit calling");
+ 
+-    mSavedDecodedFrames.clear();
++    {
++        std::lock_guard<std::mutex> g(mFrameLock);
++        // Frames that were decoded but never fetched by the guest still hold
++        // a pair of textures taken from the pool. Nothing else references
++        // them, so dropping the frames would leak the textures until the
++        // whole GL share group goes away. Hand them back so the pool frees
++        // them in its next cleanUpTextures().
++        if (mTexturePool != nullptr) {
++            for (const auto& frame : mSavedDecodedFrames) {
++                if (frame.texture.size() >= 2 && frame.texture[0] > 0 &&
++                    frame.texture[1] > 0) {
++                    mTexturePool->putTextureFrame(
++                            TextureFrame{frame.texture[0], frame.texture[1]});
++                }
++            }
++        }
++        mSavedDecodedFrames.clear();
++    }
+     if (mCudaContext != nullptr) {
+         NVDEC_API_CALL(cuCtxPushCurrent(mCudaContext));
+         if (mCudaParser != nullptr) {

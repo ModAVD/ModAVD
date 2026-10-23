@@ -1,0 +1,54 @@
+From de4896f8f2b756a708a2f693a826100caeee5f37 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 12:51:50 +0200
+Subject: [PATCH 19/57] main-loop: poll every slirp socket on Windows, not just
+ the first 128
+
+os_host_main_loop_wait() copied the slirp poll set into a fixed
+WSAPOLLFD fds[128]; pollfds_fill() stopped at the end of the array and
+pollfds_poll() reported no events for everything after it. slirp adds
+new sockets at the head of its lists, so once more than 128 sockets
+existed it was the older, long-lived connections that silently stopped
+being serviced.
+
+This is easy to hit: on Windows every guest ICMP echo to an outside
+host becomes its own UDP socket, and a game that traceroutes its server
+(~3200 echoes in 10 s) pushed its KCP/UDP session past slot 128; the
+session then saw no more inbound packets and reconnected every ~30 s.
+More than 128 concurrent TCP connections starve the same way.
+
+Size the array from gpollfds->len instead, growing it as needed.
+WSAPoll() has no FD_SETSIZE-style limit on the number of entries.
+
+Change-Id: I6b33b6fb53b45bc431a9cd15ed838602cf75f826
+---
+ util/main-loop.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/util/main-loop.c b/util/main-loop.c
+index eba10f73d..7a10a9eea 100644
+--- a/util/main-loop.c
++++ b/util/main-loop.c
+@@ -444,9 +444,20 @@ static int os_host_main_loop_wait(int64_t timeout)
+         return ret;
+     }
+ 
+-    WSAPOLLFD fds[128];
++    /*
++     * One WSAPOLLFD per slirp socket. A fixed-size array silently skipped
++     * every socket past its end, and since slirp puts new sockets at the head
++     * of its lists, older connections were the ones that stopped being polled.
++     * WSAPoll() itself has no FD_SETSIZE-style limit.
++     */
++    static WSAPOLLFD *fds;
++    static guint fds_size;
+     int polled_count = 0;
+-    nfds = pollfds_fill(gpollfds, fds, ARRAY_SIZE(fds), &polled_count);
++    if (fds_size < gpollfds->len) {
++        fds_size = MAX(gpollfds->len, fds_size * 2);
++        fds = g_renew(WSAPOLLFD, fds, fds_size);
++    }
++    nfds = pollfds_fill(gpollfds, fds, gpollfds->len, &polled_count);
+     if (polled_count > 0) {
+         qemu_mutex_unlock_iothread();
+         poll_ret = WSAPoll(fds, nfds, 0);

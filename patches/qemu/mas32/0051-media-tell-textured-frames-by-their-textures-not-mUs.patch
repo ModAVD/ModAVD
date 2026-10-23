@@ -1,0 +1,100 @@
+From 4a50a1567cdadc757de69f7c2a9263ca87d8ceae Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 20:50:58 +0200
+Subject: [PATCH 51/57] media: tell textured frames by their textures, not
+ mUseGpuTexture
+
+The H.264 and HEVC decoders render a frame from its Y/UV textures in
+getImage(), and return the textures of the frames still queued to the
+pool in destroyH264Context() and destroyHevcContext(), only while
+mUseGpuTexture is set. try_decode() clears it when it falls back to
+FFmpeg during the trial period (createAndInitSoftVideoHelper() sets it
+to false), but frames that the CUDA decoder decoded into textures
+before the switch may still be queued in the MediaSnapshotHelper. Such
+a frame has a texture pair and no bytes. After the switch getImage()
+passes its empty data(), a null pointer, to renderToHostColorBuffer()
+instead of rendering the textures, and as no swap hands a pair back,
+the frame's pair leaks; on destroy the pair is skipped and leaks as
+well.
+
+Decide by the frame instead: a frame that carries a texture pair is
+rendered from it and its pair is returned, whatever mUseGpuTexture
+says now. Frames decoded into a byte buffer carry no texture names or
+zeros and take the same path as before; check the size of the texture
+vector too, since it may be empty for them.
+
+With the guest's goldfish H.264 component the window is small: it
+fetched every queued frame after each decode in our runs, so the queue
+is normally empty when the next decode makes try_decode() switch.
+
+Test: CUDA H.264 decoder in GPU texture mode, 120-frame 1080p guest
+      session. A debugger cleared mUseGpuTexture before the first
+      getImage(), as the fallback does, while the later frames still
+      came with textures: without this change none of their pairs was
+      handed back and each was "rendered" from a null pointer; with it
+      118 pairs came back through the swap, as frames are rendered from
+      their textures.
+Test: a real fallback, forced by making good() return false in the
+      middle of a session, played on with FFmpeg to the last frame. The
+      queue was empty at that moment, as at every H.264 destroy we
+      watched, so the destroy path was reviewed, not exercised.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: If847f9d9fc58572ceb3f1a08222d5a23eadd610a
+---
+ .../src/android/emulation/MediaH264DecoderGeneric.cpp     | 8 ++++++--
+ .../src/android/emulation/MediaHevcDecoderGeneric.cpp     | 8 ++++++--
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
+index 155e8559f..9c4398078 100644
+--- a/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
+@@ -231,7 +231,9 @@ void MediaH264DecoderGeneric::destroyH264Context() {
+         if (!pFrame) {
+             break;
+         }
+-        if (mUseGpuTexture && pFrame->texture[0] > 0 &&
++        // Look at the frame, not at mUseGpuTexture: frames decoded to
++        // textures before try_decode() switched to FFmpeg still hold a pair.
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
+             pFrame->texture[1] > 0) {
+             mRenderer.putTextureFrame(
+                     TextureFrame{pFrame->texture[0], pFrame->texture[1]});
+@@ -378,7 +380,9 @@ void MediaH264DecoderGeneric::getImage(void* ptr) {
+ 
+     bool needToCopyToGuest = true;
+     if (mParser.version() == 200) {
+-        if (mUseGpuTexture && pFrame->texture[0] > 0 &&
++        // A frame decoded to textures has no bytes, even when try_decode()
++        // has since switched to FFmpeg and turned mUseGpuTexture off.
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
+             pFrame->texture[1] > 0) {
+             H264_DPRINT(
+                     "calling rendering to host side color buffer with id %d "
+diff --git a/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
+index 68c75d64f..6a2e4ce1a 100644
+--- a/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
+@@ -254,7 +254,9 @@ void MediaHevcDecoderGeneric::destroyHevcContext() {
+         if (!pFrame) {
+             break;
+         }
+-        if (mUseGpuTexture && pFrame->texture[0] > 0 &&
++        // Look at the frame, not at mUseGpuTexture: frames decoded to
++        // textures before try_decode() switched to FFmpeg still hold a pair.
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
+             pFrame->texture[1] > 0) {
+             mRenderer.putTextureFrame(
+                     TextureFrame{pFrame->texture[0], pFrame->texture[1]});
+@@ -430,7 +432,9 @@ void MediaHevcDecoderGeneric::getImage(void* ptr) {
+ 
+     bool needToCopyToGuest = true;
+     if (mParser.version() >= 200) {
+-        if (mUseGpuTexture && pFrame->texture[0] > 0 &&
++        // A frame decoded to textures has no bytes, even when try_decode()
++        // has since switched to FFmpeg and turned mUseGpuTexture off.
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
+             pFrame->texture[1] > 0) {
+             HEVC_DPRINT(
+                     "calling rendering to host side color buffer with id %d "

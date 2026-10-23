@@ -18,7 +18,7 @@
 2. 把新的 Release 包解压到一个临时文件夹。
 3. 删掉旧文件夹里的 `sdk\emulator\`，把新包里的 `sdk\emulator\` 放进去。
 4. 把新包根目录下的其他文件和文件夹（见上表）覆盖到旧文件夹里。
-5. 打开 `sdk\emulator\source.properties`，确认 `Pkg.BuildId` 是新版本号（例如 `mas-30`）。
+5. 打开 `sdk\emulator\source.properties`，确认 `Pkg.BuildId` 是新版本号（例如 `mas-32`）。
 6. AUTO-MAS 里不用重新添加，照常开机即可。
 
 ## 从内测包升级

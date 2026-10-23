@@ -1,0 +1,51 @@
+From 1d7228a04c6ee589a844c67459fc3dceb209eb8c Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 14:53:16 +0200
+Subject: [PATCH 04/57] emulator-check: build without the DISM API
+
+dismapi.h / dismapi.lib come with the Windows ADK, not the Windows SDK.
+emu-windows-libs.cmake already tolerates a missing DISM API (dismapi::dismapi
+becomes empty), but main-emulator-check.cpp still included dismapi.h
+unconditionally, so a build with only the Windows SDK failed. Include it
+only when available; otherwise -accel-check style commands that need DISM
+(check/enable/disable WHPX feature) report that they are unavailable.
+
+Change-Id: I61c2cf547453576f0165feb2da536d11d21d55d0
+---
+ android/emulator-check/main-emulator-check.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/android/emulator-check/main-emulator-check.cpp b/android/emulator-check/main-emulator-check.cpp
+index 846890bec..f8d4c9809 100644
+--- a/android/emulator-check/main-emulator-check.cpp
++++ b/android/emulator-check/main-emulator-check.cpp
+@@ -20,7 +20,12 @@
+ #include <utility>
+ #ifdef _WIN32
+ #include <windows.h>
++// The DISM API ships with the Windows ADK, not the Windows SDK; without it the
++// whpx feature commands just report that they are unavailable.
++#if __has_include(<dismapi.h>)
+ #include <dismapi.h>
++#define HAVE_DISMAPI 1
++#endif
+ #endif
+ 
+ #include "aemu/base/Optional.h"
+@@ -217,7 +222,15 @@ static CommandReturn getDesktopEnv() {
+     return std::make_pair(name.empty() ? kGenericError : 0, name);
+ }
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(HAVE_DISMAPI)
++static CommandReturn dismUnavailable() {
++    return std::make_pair(kGenericError,
++                          "emulator-check was built without the DISM API (Windows ADK).");
++}
++static CommandReturn checkWHPX() { return dismUnavailable(); }
++static CommandReturn enableWHPX() { return dismUnavailable(); }
++static CommandReturn disableWHPX() { return dismUnavailable(); }
++#elif defined(_WIN32)
+ static CommandReturn dismOpen(DismSession *session) {
+     HRESULT hr;
+ 

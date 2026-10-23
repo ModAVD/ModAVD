@@ -1,0 +1,58 @@
+From 4c1769ada9d6c0ad1f81c23e9f77b507c5920ffc Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:40:25 +0200
+Subject: [PATCH 45/57] MAS local: drop the upload wording from crashreport's
+ help
+
+Not for upstream, follows "MAS local: never upload crash reports".
+
+crashreport -h still said "List, upload and examine emulator related
+crashdumps" and listed -u as "Upload local crash report(s) to
+https://clients2.google.com/cr/report". This build never uploads: -u
+only prints that it refuses. Say that the reports stay on the machine,
+leave -u out of the option list (it still refuses when given) and drop
+the now unused CRASHURL definition from this file.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I8dc36e0407e3e51d24ff98eb3e7a8b0c6fc9d4e6
+---
+ .../src/android/crashreport/CrashUploadTool.cpp      | 12 ++----------
+ 1 file changed, 2 insertions(+), 10 deletions(-)
+
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp b/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
+index 9b32ba318..1d8603cc2 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
+@@ -91,12 +91,6 @@ using google_breakpad::MinidumpThreadList;
+ using google_breakpad::ProcessState;
+ using google_breakpad::SimpleSymbolSupplier;
+ 
+-#ifdef NDEBUG
+-#define CRASHURL "https://clients2.google.com/cr/report"
+-#else
+-#define CRASHURL "https://clients2.google.com/cr/staging_report"
+-#endif
+-
+ #ifdef _WIN32
+ #define standard_out std::wcout
+ #define standard_err std::wcerr
+@@ -241,7 +235,8 @@ static void Usage(int argc, const char* argv[], bool error) {
+     fprintf(error ? stderr : stdout,
+             "Usage: %s [options] \n"
+             "\n"
+-            "List, upload and examine emulator related crashdumps.\n"
++            "List and examine emulator related crashdumps. They stay on this\n"
++            "machine: this build never uploads crash reports.\n"
+             "The database can be found here:\n",
+             argv[0]);
+ 
+@@ -257,9 +252,6 @@ static void Usage(int argc, const char* argv[], bool error) {
+             "\n"
+             "  -l                                      List local crash "
+             "reports\n"
+-            "  -u                                      Upload local "
+-            "crash report(s) to " CRASHURL
+-            "\n"
+             "  -e                                      Erase local crash "
+             "report(s)\n"
+             "  -d  <minidump-file> [symbol-path ...]   Process the given "

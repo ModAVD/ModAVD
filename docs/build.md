@@ -1,7 +1,7 @@
 # 从源码构建 ModAVD
 
-下面以 `37.2.10-mas30` 为例。其他版本要使用对应版本的仓库清单和补丁，不能把不同版本的源码和二进制混用。
-对应源码总包在 [mas30 Release](https://github.com/ModAVD/ModAVD/releases/tag/v37.2.10-mas30)，其中 `SOURCES.txt` 说明每个源码文件的来源和用途。
+下面以 `37.2.10-mas32` 为例。其他版本要使用对应版本的仓库清单和补丁，不能把不同版本的源码和二进制混用。
+对应源码总包在 [mas32 Release](https://github.com/ModAVD/ModAVD/releases/tag/v37.2.10-mas32)，其中 `SOURCES.txt` 说明每个源码文件的来源和用途。
 
 ## 环境
 
@@ -25,18 +25,18 @@ $env:GIT_CONFIG_VALUE_2 = 'true'
 
 ## 获取确切版本
 
-先克隆本仓库并检出含有 mas30 清单副本的资料快照。mas30 的早期 Release 标签不含 `manifests/`，使用该标签时可从源码总包取得相同的两份清单。记下本仓库目录的绝对位置：
+先克隆本仓库并检出该版本的 Release 标签。mas30 的 Release 标签早于 `manifests/`，构建 mas30 时可以检出 mas32 的标签，里面同样有 mas30 的清单和补丁。记下本仓库目录的绝对位置：
 
 ```powershell
 git clone https://github.com/ModAVD/ModAVD.git
 Set-Location ModAVD
-git checkout 5b3f16ee16af22158e5eae4c98f08f0447219d33
+git checkout v37.2.10-mas32
 $modavd = (Get-Location).Path
 ```
 
-两份清单在 `manifests/`，源码总包中也有相同文件：
+清单在 `manifests/`，源码总包中也有相同文件：
 
-- `manifest-mas30.xml` 记录编译时的完整目标提交。
+- `manifest-mas32.xml` 记录编译时的完整目标提交（每个版本一份 `manifest-<版本>.xml`）。
 - `manifest-aosp-base.xml` 把三个补丁仓库换成 AOSP 公开基准，其余项目保持相同。
 
 **不能直接对目标清单做 repo sync**：其中 qemu、gfxstream、Crashpad 的三个本地提交不在 AOSP 服务器上。
@@ -64,13 +64,13 @@ if ($LASTEXITCODE) { throw 'repo sync failed' }
 
 ```powershell
 $series = @(
-    @{ Repo = 'external/qemu'; Patches = 'qemu/fixq30' },
+    @{ Repo = 'external/qemu'; Patches = 'qemu/mas32' },
     @{ Repo = 'hardware/google/gfxstream'; Patches = 'gfxstream/fixq28' },
     @{ Repo = 'external/crashpad'; Patches = 'crashpad/module-version22' }
 )
 foreach ($s in $series) {
     $repo = Join-Path $src $s.Repo
-    git -C $repo switch -c modavd-mas30
+    git -C $repo switch -c modavd-mas32
     if ($LASTEXITCODE) { throw "branch failed: $($s.Repo)" }
     $patches = @(Get-ChildItem (Join-Path "$modavd/patches" $s.Patches) -Filter '*.patch' |
         Sort-Object Name | ForEach-Object FullName)
@@ -82,9 +82,9 @@ foreach ($s in $series) {
 补丁的作者已统一。回放会产生不同的提交编号，应比较源码树，而不是要求本地提交编号等于目标清单里的私有提交。
 `git -C <仓库> rev-parse 'HEAD^{tree}'` 应与下表相同（当前仓库的 `patches/series.json` 也记录这些树）：
 
-| 仓库 | mas30 目标树 |
+| 仓库 | mas32 目标树 |
 | --- | --- |
-| qemu | `b02675308b3373b734ca980a1492e0efe24c4970` |
+| qemu | `14505793ebc210a4894f2993ed1566f6476b2761` |
 | gfxstream | `b8c3158178d65ac36139eb29944df3045fe3d608` |
 | Crashpad | `0a3c056231f5257034514ae8d83192de388351f0` |
 
@@ -110,7 +110,7 @@ if ($LASTEXITCODE) { throw 'build failed' }
 ```
 
 可直接使用的模拟器目录位于 `$out/distribution/emulator/`，发行归档位于 `$dist/`。
-安装成自己的 SDK 时，完整复制 `emulator/`，并将其中 `source.properties` 的 `Pkg.BuildId` 设为相应构建号，例如 `mas-30`。
+安装成自己的 SDK 时，完整复制 `emulator/`，并将其中 `source.properties` 的 `Pkg.BuildId` 设为相应构建号，例如 `mas-32`。
 这里构建的是模拟器程序；adb、系统镜像、实例和游戏数据分别管理。
 
 这套流程使用 manifest 固定的 AOSP 预编译依赖。需要修改、重编或重新链接 Qt、GLib 等第三方库时，源码总包中有对应源码、补丁和构建文件，按 `SOURCES.txt` 以及主包 `LICENSES/NOTICE.txt` 的项目说明处理。

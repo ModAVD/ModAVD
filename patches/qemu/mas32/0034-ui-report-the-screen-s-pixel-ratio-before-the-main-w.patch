@@ -1,0 +1,50 @@
+From 71f7739a1599733961b8e7f02d0fa5c24e4bd70e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 21:19:55 +0200
+Subject: [PATCH 34/57] ui: report the screen's pixel ratio before the main
+ window exists
+
+skin_window_create() samples the device pixel ratio before the first
+showWindow(), when the top-level container has no QWindow yet, and
+slot_getDevicePixelRatio() answered 1.0 then. The first native GL subwindow
+was therefore created at the logical display size in device pixels: on a
+150% monitor it covered only the top-left 2/3 of a 1272x720 window. With the
+Vulkan swapchain nothing is presented into it before the guest's first
+frame, so that part kept the grey skin background (0x808080) painted just
+before it appeared while the rest of the window was repainted black. The
+kEventScreenChanged queued by the constructor later re-reads the ratio and
+recreates the subwindow at full size, which is why guest frames fill the
+window.
+
+Without a QWindow, fall back to QWidget::screen() (the screen the container
+is about to appear on, else the primary screen) so the first subwindow gets
+the right size.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Iad6e5885b0ad0c5b9595a143600f78a0fad04c7c
+---
+ .../src/android/skin/qt/emulator-qt-window.cpp        | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index ba88402db..78110f656 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -2175,8 +2175,15 @@ void EmulatorQtWindow::slot_fill(SkinSurface* s,
+ void EmulatorQtWindow::slot_getDevicePixelRatio(double* out_dpr,
+                                                 QSemaphore* semaphore) {
+     QSemaphoreReleaser semReleaser(semaphore);
+-    auto screen = window()->windowHandle() ? window()->windowHandle()->screen()
+-                                           : nullptr;
++    // skin_window_create() asks for the ratio before the first showWindow(),
++    // when the top-level window has no QWindow yet. Answering 1.0 there made
++    // the first native GL subwindow logical-size in device pixels (2/3 of the
++    // display area at 150%), so until the guest's first frame only that
++    // top-left part kept the skin background. Use the screen the window is
++    // about to be shown on instead; QWidget::screen() falls back to the
++    // primary screen.
++    QWindow* handle = window()->windowHandle();
++    QScreen* screen = handle ? handle->screen() : window()->screen();
+     *out_dpr = screen ? screen->devicePixelRatio() : 1.0;
+ }
+ 

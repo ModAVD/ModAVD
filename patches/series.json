@@ -1,6 +1,15 @@
 [
   {
     "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
+    "dir": "qemu/mas32",
+    "head": "bc694d86d778732785a75364479fc03fad0250bc",
+    "repo": "external/qemu",
+    "upstream": "platform/external/qemu",
+    "count": 57,
+    "tree": "14505793ebc210a4894f2993ed1566f6476b2761"
+  },
+  {
+    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
     "dir": "qemu/fixq30",
     "head": "5aedc70819651ef386cef810afa6c2be3c028467",
     "repo": "external/qemu",

@@ -1,0 +1,88 @@
+From 2a7035987f973e3226e54c077b71fcfce8f8e126 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 22:29:48 +0200
+Subject: [PATCH 27/57] ui: lean side toolbar (power, volume,
+ back/home/overview) by default
+
+These instances run unattended for automation; the user asked for a side
+toolbar with only power, volume up/down and the three navigation keys.
+Hide every other tool-window button (screenshot, zoom, rotate, extended
+controls, ...) and keep the rotation buttons hidden when the guest asks to
+show them. The layout is SetFixedSize, so the toolbar shrinks to fit.
+Set ANDROID_EMU_FULL_TOOLBAR=1 to get the full toolbar back.
+
+Change-Id: Ic98ee504dab70cd6d2834c29b5ec2edc11037ab1
+---
+ .../src/android/skin/qt/tool-window.cpp       | 35 +++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index fd5f77388..7539bc2c6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -14,9 +14,11 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <unistd.h>
++#include <algorithm>
+ #include <cassert>
+ #include <chrono>
+ #include <istream>
++#include <iterator>
+ #include <memory>
+ #include <string>
+ #include <string_view>
+@@ -202,6 +204,16 @@ namespace proto = android_studio;
+ namespace fc = android::featurecontrol;
+ namespace xr_service = android::xr::xr_service;
+ 
++// Instances here run unattended for automation, so the side toolbar keeps only
++// power, volume and the three navigation keys. ANDROID_EMU_FULL_TOOLBAR=1 shows
++// the full toolbar again.
++static bool leanToolbar() {
++    static const bool lean =
++            System::get()->getEnvironmentVariable("ANDROID_EMU_FULL_TOOLBAR") !=
++            "1";
++    return lean;
++}
++
+ template <typename T>
+ ToolWindow::WindowHolder<T>::WindowHolder(ToolWindow* tw,
+                                           OnCreatedCallback onCreated)
+@@ -642,6 +654,26 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         mToolsUi->right_hand_button->setHidden(true);
+     }
+ 
++    if (leanToolbar()) {
++        // Hide everything else; the kept buttons stay as the AVD flavour
++        // left them (all_apps_button stands in for home with
++        // AllAppsForHomeTray). The layout is SetFixedSize, so the toolbar
++        // shrinks to the remaining buttons.
++        const QPushButton* keep[] = {
++                mToolsUi->close_button,       mToolsUi->minimize_button,
++                mToolsUi->power_button,       mToolsUi->volume_up_button,
++                mToolsUi->volume_down_button, mToolsUi->back_button,
++                mToolsUi->home_button,        mToolsUi->all_apps_button,
++                mToolsUi->overview_button,
++        };
++        for (QPushButton* button : findChildren<QPushButton*>()) {
++            if (std::find(std::begin(keep), std::end(keep), button) ==
++                std::end(keep)) {
++                button->setHidden(true);
++            }
++        }
++    }
++
+     sToolWindow = this;
+     skin_winsys_touch_qt_extended_virtual_sensors();
+ 
+@@ -2449,6 +2481,9 @@ void ToolWindow::hideRotationButton(bool hide) {
+                 AVD_DESKTOP) {
+         // already hide, do not bother its settings
+         return;
++    } else if (leanToolbar()) {
++        // rotation buttons stay hidden in the lean toolbar
++        return;
+     } else {
+         mToolsUi->prev_layout_button->setHidden(hide);
+         mToolsUi->next_layout_button->setHidden(hide);

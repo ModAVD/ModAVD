@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ModAVD mas-30（Pkg.BuildId=mas-30，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-10-17 生成。
+<!-- ModAVD mas-32（Pkg.BuildId=mas-32，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-10-23 生成。
      manifest 源：https://android.googlesource.com/platform/manifest 分支 emu-main-dev（repo init 时 depth=1）。
-     revision 全部是 AOSP emu-main-dev 上的公开提交；qemu / gfxstream / crashpad 在此基础上按 patches/ 回放补丁得到 mas-30 的源码。
+     revision 全部是 AOSP emu-main-dev 上的公开提交；qemu / gfxstream / crashpad 在此基础上按 patches/ 回放补丁得到 mas-32 的源码。
 -->
 <manifest>
   <remote name="aosp" fetch="https://android.googlesource.com/" review="https://android-review.googlesource.com/"/>
@@ -18,7 +18,7 @@
   <project name="platform/external/astc-codec" path="external/astc-codec" revision="17ae36822a8084f45ae51f9031e81f8318254f33" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/boringssl" path="external/boringssl" revision="54ed1d5a4e7cdacd82f95a0aec1e89a488db84e6" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
   <project name="platform/external/c-ares" path="external/cares" revision="42cf8dee534419f1826f474d2f5fd67ac94a1706" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
-  <!-- external/crashpad：AOSP 基准 dd7db6790d73210abaef36a04f2a2bd52cf22b89，本地分支 mas/module-version22 = 基准 + 1 个提交，HEAD 377d2d398368c38d43f4ecbca084c89a68c10530 -->
+  <!-- external/crashpad：AOSP 基准 dd7db6790d73210abaef36a04f2a2bd52cf22b89，补丁系列 patches/crashpad/mas32 = 基准 + 1 个提交，HEAD 377d2d398368c38d43f4ecbca084c89a68c10530 -->
   <project name="platform/external/crashpad" path="external/crashpad" revision="dd7db6790d73210abaef36a04f2a2bd52cf22b89" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
   <project name="platform/external/curl" path="external/curl" revision="1da4b04273638c8afe6f88bd7a7ccfb693640773" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/deqp" path="external/deqp" revision="f39b329be1bd88a6e358a9ee15d0d09e10865921" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
@@ -42,7 +42,7 @@
   <project name="platform/external/nasm" path="external/nasm" revision="645e4f02c622ba67eb754000cc00c9db8be31f85" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/perfetto" path="external/perfetto" revision="37518c39e3db120322359090db3d54f6ac100078" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/protobuf" path="external/protobuf" revision="623d88a75a0b17ad2cc4be8fa79c3b97e7384a40" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
-  <!-- external/qemu：AOSP 基准 f0c183f1cc7456ecd6f3607f2f47893768ae4334，本地分支 mas/fixq30 = 基准 + 55 个提交，HEAD 5aedc70819651ef386cef810afa6c2be3c028467 -->
+  <!-- external/qemu：AOSP 基准 f0c183f1cc7456ecd6f3607f2f47893768ae4334，补丁系列 patches/qemu/mas32 = 基准 + 57 个提交，HEAD bc694d86d778732785a75364479fc03fad0250bc -->
   <project name="platform/external/qemu" path="external/qemu" revision="f0c183f1cc7456ecd6f3607f2f47893768ae4334" upstream="emu-main-dev" dest-branch="emu-main-dev">
     <copyfile src="android/vscode/emu.code-workspace" dest="emu.code-workspace"/>
     <linkfile src="toplevel.MODULE.bazel" dest="MODULE.bazel"/>
@@ -57,7 +57,7 @@
   <project name="platform/external/wpa_supplicant_8" path="external/wpa_supplicant_8" revision="db64ab725acee6991a7ee9746d960731cca0b563" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/zlib" path="external/zlib" revision="5a4f1701693dff36e495d13dd14b70e15abe0d01" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/hardware/google/aemu" path="hardware/google/aemu" revision="b556b00ac5fffde13c5cbad1b659c528832f9da6" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="pdk"/>
-  <!-- hardware/google/gfxstream：AOSP 基准 04d0287b04f72d908c621a919fa2ea5c563b1a66，本地分支 mas/fixq28 = 基准 + 22 个提交，HEAD d027890c4799a8537ce1e981fec784a99a269ade -->
+  <!-- hardware/google/gfxstream：AOSP 基准 04d0287b04f72d908c621a919fa2ea5c563b1a66，补丁系列 patches/gfxstream/mas32 = 基准 + 22 个提交，HEAD d027890c4799a8537ce1e981fec784a99a269ade -->
   <project name="platform/hardware/google/gfxstream" path="hardware/google/gfxstream" revision="04d0287b04f72d908c621a919fa2ea5c563b1a66" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="pdk"/>
   <project name="platform/prebuilts/android-emulator-build/archive" path="prebuilts/android-emulator-build/archive" revision="9b0bdade8b09267282fb901d21219ab6af013c60" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
   <project name="platform/prebuilts/android-emulator-build/common" path="prebuilts/android-emulator-build/common" revision="77441b3b04746081afbd0aa6f360b6704da58cc2" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>

@@ -1,0 +1,58 @@
+From 14ce0300b6b139934fa37e78f625a25dd1865e57 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 03:20:06 +0200
+Subject: [PATCH 16/57] main-loop: do not report POLLHUP / POLLERR as urgent
+ data on Windows
+
+pollfds_poll() maps WSAPoll's POLLERR and POLLHUP to G_IO_PRI as well as
+G_IO_IN. When a host peer closes a connection while slirp still has
+unread data, WSAPoll returns POLLHUP | POLLRDNORM, so slirp takes the
+G_IO_PRI branch first and calls sorecvoob(). That reads the pending
+data as if it were out-of-band and points the urgent pointer at the end
+of the chunk; the guest (tcp_stdurg = 0) then removes the byte before
+the urgent pointer from the stream. Guest downloads that end with the
+server closing the connection silently lose bytes.
+
+Report G_IO_PRI only for POLLPRI / POLLRDBAND. POLLERR / POLLHUP stay
+mapped to G_IO_IN, so slirp reads the remaining data and then sees EOF
+or the error through the normal soread() path. The netsim libslirp
+driver has the same mapping and gets the same change.
+
+Change-Id: I07cc6dc45d3d03feff1aebc1e372729095d59a0c
+---
+ android-qemu2-glue/netsim/libslirp_driver.cpp | 5 ++++-
+ util/main-loop.c                              | 5 ++++-
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/android-qemu2-glue/netsim/libslirp_driver.cpp b/android-qemu2-glue/netsim/libslirp_driver.cpp
+index 4c40f676d..a79e72dd4 100644
+--- a/android-qemu2-glue/netsim/libslirp_driver.cpp
++++ b/android-qemu2-glue/netsim/libslirp_driver.cpp
+@@ -112,7 +112,10 @@ static void pollfds_poll(GArray* pollfds, const WSAPOLLFD* fds) {
+             if (fds[i].revents & POLLWRNORM) {
+                 revents |= G_IO_OUT;
+             }
+-            if (fds[i].revents & (POLLERR | POLLHUP | POLLPRI | POLLRDBAND)) {
++            // Only real out-of-band data is G_IO_PRI: libslirp answers it with
++            // sorecvoob(), which marks the data as urgent for the guest.
++            // POLLERR / POLLHUP are already reported as G_IO_IN above.
++            if (fds[i].revents & (POLLPRI | POLLRDBAND)) {
+                 revents |= G_IO_PRI;
+             }
+         }
+diff --git a/util/main-loop.c b/util/main-loop.c
+index 9f0541562..eba10f73d 100644
+--- a/util/main-loop.c
++++ b/util/main-loop.c
+@@ -409,7 +409,10 @@ static void pollfds_poll(GArray *pollfds, const WSAPOLLFD fds[], int fds_count)
+             if (fds[i].revents & POLLWRNORM) {
+                 revents |= G_IO_OUT;
+             }
+-            if (fds[i].revents & (POLLERR | POLLHUP | POLLPRI | POLLRDBAND)) {
++            /* Only real out-of-band data is G_IO_PRI: slirp answers G_IO_PRI
++             * with sorecvoob(), which marks the data as urgent for the guest.
++             * POLLERR / POLLHUP are already reported as G_IO_IN above. */
++            if (fds[i].revents & (POLLPRI | POLLRDBAND)) {
+                 revents |= G_IO_PRI;
+             }
+         }

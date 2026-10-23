@@ -1,0 +1,124 @@
+From 207ab99c01195e830efafb3ac19c53a8c06665b2 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 04:00:00 +0200
+Subject: [PATCH 17/57] whpx: suspend partition time while the VM is stopped
+
+The guest TSC is the partition's time, which the hypervisor keeps
+running while QEMU has the VM stopped (pause, savevm, loadvm). Every
+other guest clock stops then: QEMU_CLOCK_VIRTUAL, and with it the HPET,
+the PIT and the emulated local APIC timer, is frozen by
+cpu_disable_ticks(). Once the TSC is usable as a clocksource, a Linux
+guest compares the two after the VM resumes, sees the TSC ahead by the
+length of the stop and its clocksource watchdog drops the TSC:
+
+  clocksource: timekeeping watchdog on CPU3: Marking clocksource 'tsc'
+  as unstable because the skew is too large:
+  clocksource: 'hpet' wd_nsec: 209273800 ...
+  clocksource: 'tsc' cs_nsec: 2435948464 ...
+  clocksource: Switched to clocksource hpet
+
+savevm has the same problem once more inside the snapshot: the TSC is
+read by cpu_synchronize_all_states() in
+qemu_savevm_state_complete_precopy(), after the RAM has been written,
+so the saved TSC is ahead of the saved virtual clock by the time the
+RAM took, and every load of that snapshot repeats the jump.
+
+Suspend the partition's time in a VM change state handler when the VM
+stops and resume it when the VM starts again, so the TSC stands still
+together with the virtual clock, and the TSC saved by savevm is the one
+from the moment the VM stopped. whpx_set_tsc() already suspends the
+time on reset and loadvm; the explicit resume replaces the implicit one
+of the first WHvRunVirtualProcessor() call.
+
+Both functions are resolved with GetProcAddress() like
+WHvSuspendPartitionTime() before (Windows 10 1903 and later); without
+them the behaviour is unchanged. KVM does the equivalent in
+kvmclock_vm_state_change(): it reads all TSCs and the kvmclock when the
+VM stops and sets the kvmclock back when it resumes. Upstream QEMU has
+no counterpart for WHPX; it keeps a migration blocker there, so savevm
+is not possible and only pause is affected.
+
+Guest time now stands still while the VM is paused, as it already did
+for guests on the HPET (the default so far, see the previous change).
+
+Test: TODO, not built yet (plan: TSC.md section 10.5). To fill in:
+pause 2/10/30/90 s, snapshot save and load keep clocksource tsc on
+API 34 google_apis x86_64, Windows 11 + WHPX, 4 vCPUs.
+
+Change-Id: Ifaeff86cbbc73fbb7a46cb4951604cf1fd00861d
+---
+ target/i386/whp-dispatch.h |  1 +
+ target/i386/whpx-all.c     | 41 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/target/i386/whp-dispatch.h b/target/i386/whp-dispatch.h
+index 0a8d6d193..a4ed6ad89 100644
+--- a/target/i386/whp-dispatch.h
++++ b/target/i386/whp-dispatch.h
+@@ -46,6 +46,7 @@ typedef int WINBOOL;
+  */
+ #define LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(X) \
+   X(HRESULT, WHvSuspendPartitionTime, (WHV_PARTITION_HANDLE Partition)) \
++  X(HRESULT, WHvResumePartitionTime, (WHV_PARTITION_HANDLE Partition)) \
+ 
+ 
+ #define LIST_WINHVEMULATION_FUNCTIONS(X) \
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index f79cd8c90..95649bb4e 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -1414,6 +1414,45 @@ static void whpx_cpu_update_state(void *opaque, int running, RunState state)
+     }
+ }
+ 
++/*
++ * The partition's time (the guest TSC) keeps running while the VM is
++ * stopped, but QEMU_CLOCK_VIRTUAL, which drives the HPET, the PIT and the
++ * emulated local APIC timer, does not. A guest on the TSC clocksource then
++ * sees the TSC jump ahead of every other clock by the length of the stop
++ * (pause, savevm) and its clocksource watchdog drops the TSC. savevm also
++ * reads the TSC only after the RAM has been written, so a snapshot carries
++ * a TSC that is ahead of its own virtual clock and loadvm repeats the jump.
++ * Stop the partition's time together with the virtual clock; the TSC read
++ * for savevm is then the value at the moment the VM stopped.
++ */
++static void whpx_vm_state_change(void *opaque, int running, RunState state)
++{
++    struct whpx_state *whpx = &whpx_global;
++    HRESULT hr;
++
++    if (!running) {
++        if (whp_dispatch.WHvSuspendPartitionTime) {
++            hr = whp_dispatch.WHvSuspendPartitionTime(whpx->partition);
++            if (FAILED(hr)) {
++                warn_report("WHPX: Failed to suspend partition time,"
++                            " hr=%08lx", hr);
++            }
++        }
++    } else if (whp_dispatch.WHvResumePartitionTime) {
++        /*
++         * Time is suspended here: by the handler above, or by
++         * whpx_set_tsc() on the initial reset and on loadvm. Without
++         * WHvResumePartitionTime the first WHvRunVirtualProcessor call
++         * resumes it.
++         */
++        hr = whp_dispatch.WHvResumePartitionTime(whpx->partition);
++        if (FAILED(hr)) {
++            warn_report("WHPX: Failed to resume partition time,"
++                        " hr=%08lx", hr);
++        }
++    }
++}
++
+ static void do_whpx_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
+ {
+     whpx_get_registers(cpu);
+@@ -2074,6 +2113,8 @@ static int whpx_accel_init(MachineState *ms)
+ 
+     whpx_memory_init();
+ 
++    qemu_add_vm_change_state_handler(whpx_vm_state_change, NULL);
++
+     cpu_interrupt_handler = whpx_handle_interrupt;
+ 
+     printf("Windows Hypervisor Platform accelerator is operational\n");

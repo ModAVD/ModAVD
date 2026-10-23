@@ -1,0 +1,43 @@
+From bc694d86d778732785a75364479fc03fad0250bc Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 21 Oct 2026 16:15:44 +0200
+Subject: [PATCH 57/57] file-win32: bounce only requests up to 64 KiB
+
+With a 64 MiB limit, 1 MiB synchronous guest writes got 15-20% slower:
+copying the request cost more than the 255 calls it saved. Small
+multi-element requests are where the bounce helps (16 KiB fsync'd writes
+got 10-20% faster), so limit it to 64 KiB and keep the per-element loop
+for anything larger.
+
+Change-Id: Ie43747c95dda71bd6d96c93d942383c2a7d72834
+---
+ block/file-win32.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/block/file-win32.c b/block/file-win32.c
+index 9edef330a..f460872a0 100644
+--- a/block/file-win32.c
++++ b/block/file-win32.c
+@@ -70,14 +70,15 @@ typedef struct BDRVRawState {
+ } BDRVRawState;
+ 
+ /*
+- * MAS: a guest request usually arrives with one iovec per guest page (256 of
+- * them for 1 MiB), and one WriteFile/ReadFile per element made large
+- * transfers about twice as slow as on other Windows emulators. Requests with
+- * more than one element up to this size go through a single bounce buffer
+- * instead; larger ones, or when the buffer cannot be allocated, keep the
+- * per-element loop.
++ * MAS: a guest request usually arrives with one iovec per guest page, and the
++ * per-element loop below issues one WriteFile/ReadFile per element. Small
++ * multi-element requests (up to this size) go through a single bounce buffer
++ * instead: a 16 KiB fsync'd guest write then costs one call, not four, and in
++ * the guest such writes got 10-20% faster. Larger ones keep the loop: for
++ * 1 MiB the copy cost more than it saved (1 MiB guest writes got 15-20%
++ * slower with a 64 MiB limit).
+  */
+-#define RAW_WIN32_BOUNCE_MAX (64 * 1024 * 1024)
++#define RAW_WIN32_BOUNCE_MAX (64 * 1024)
+ 
+ static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+ {

@@ -1,0 +1,94 @@
+From 8c7774c1be529ac1b37af2adfaae9116cf9a2ef1 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:11 +0200
+Subject: [PATCH 05/57] grpc: reject unusable MMAP screenshot handles instead
+ of reading back into a stray buffer
+
+Patch: 0001-grpc-mmap-reject-bad-handles.diff
+
+Change-Id: Ib551e97904b9fc7bbe4e969e07533fb378282d29
+---
+ .../emulation/control/EmulatorService.cpp     | 20 ++++++++++++++++++-
+ .../base/memory/SharedMemory_win32.cpp        | 19 +++++++++++++++---
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp b/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
+index d11ea56b5..ddff348c3 100644
+--- a/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
++++ b/android/android-grpc/services/emulator-controller/server/src/android/emulation/control/EmulatorService.cpp
+@@ -1092,8 +1092,26 @@ public:
+             return Status::CANCELLED;
+         }
+ 
++        // MAS: reject MMAP handles that cannot name a mapping before doing any
++        // work. Official 37.1.11 lacked the isOpen()/isMapped() check below and
++        // read the framebuffer into an unrelated heap block for a bare Windows
++        // path ("C:\...") or "file:///C%3A/..." -> heap overflow, the emulator
++        // froze or died without a log.
++        if (request->transport().channel() == ImageTransport::MMAP) {
++            const std::string& handle = request->transport().handle();
++            const bool isFileUri = handle.rfind("file://", 0) == 0;
++            if (handle.empty() ||
++                (!isFileUri &&
++                 handle.find_first_of("\\/:") != std::string::npos)) {
++                return Status(::grpc::StatusCode::INVALID_ARGUMENT,
++                              "MMAP handle must be a file:///C:/... URI or a "
++                              "plain shared memory name, got: " +
++                                      handle);
++            }
++        }
++
+         std::shared_ptr<SharedMemory> shm;
+-        uint8_t* pixels;
++        uint8_t* pixels = nullptr;
+         size_t cPixels = 0;
+         bool isPNG = request->format() ==
+                      ImageFormat_ImgFormat::ImageFormat_ImgFormat_PNG;
+diff --git a/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp b/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
+index fe501cda5..dae91022e 100644
+--- a/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
++++ b/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
+@@ -25,13 +25,19 @@ SharedMemory::SharedMemory(const std::string& name, size_t size) : mSize(size) {
+     if (name.find(kFileUri, 0) == 0) {
+         // Convert URI to path using win32 api.
+         const Win32UnicodeString srcUri(name);
+-        WCHAR path[MAX_PATH];
++        WCHAR path[MAX_PATH] = {0};
+         DWORD cPath = MAX_PATH;
+         auto HR = PathCreateFromUrlW(srcUri.c_str(), path, &cPath, NULL);
+-        assert(HR == S_OK);
++        mShareType = ShareType::FILE_BACKED;
++        if (HR != S_OK) {
++            // MAS: the assert that used to be here is compiled out in release
++            // builds, so an unparsable URI continued with an uninitialized
++            // |path|. Leave mName empty; openInternal() rejects it.
++            mName.clear();
++            return;
++        }
+         const Win32UnicodeString destPath(path);
+         mName = PathUtils::recompose(PathUtils::decompose(destPath.toString()));
+-        mShareType = ShareType::FILE_BACKED;
+     } else {
+         mShareType = ShareType::SHARED_MEMORY;
+         mName = "SHM_" + name;
+@@ -58,6 +64,10 @@ int SharedMemory::openInternal(AccessMode access, bool doMapping) {
+     if (mCreate) {
+         return EEXIST;
+     }
++    if (mName.empty()) {
++        // MAS: file:// URI that PathCreateFromUrlW could not convert.
++        return -ERROR_INVALID_NAME;
++    }
+     LARGE_INTEGER memory;
+     memory.QuadPart = (LONGLONG)mSize;
+ 
+@@ -86,6 +96,9 @@ int SharedMemory::openInternal(AccessMode access, bool doMapping) {
+                             FILE_FLAG_RANDOM_ACCESS, NULL);
+         if (mFile == INVALID_HANDLE_VALUE) {
+             int err = -GetLastError();
++            // MAS: don't hand INVALID_HANDLE_VALUE (== the current-process
++            // pseudo handle) to CloseHandle() in close().
++            mFile = invalidHandle();
+             close();
+             return err;
+         }
