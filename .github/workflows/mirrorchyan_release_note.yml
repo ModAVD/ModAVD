@@ -1,0 +1,46 @@
+name: mirrorchyan_release_note
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        default: ''
+        required: false
+        type: string
+  release:
+    types: [published, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  mirrorchyan:
+    if: ${{ github.repository_owner == 'ModAVD' }}
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Read release announcement
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          args=(--repo ModAVD/ModAVD --json tagName,body)
+          if [[ -n "$RELEASE_TAG" ]]; then
+            args=("$RELEASE_TAG" "${args[@]}")
+          fi
+          # RELEASING.md keeps detailed checksums and source inventories on GitHub.
+          data=$(gh release view "${args[@]}" --jq '{tag: .tagName, note: ((.body // "") | split("<!-- modavd:github-only -->")[0])} | tojson')
+          echo "data=$data" >> "$GITHUB_OUTPUT"
+
+      - uses: MirrorChyan/release-note-action@v1
+        with:
+          mirrorchyan_rid: ModAVD
+          version_name: ${{ fromJSON(steps.release.outputs.data).tag }}
+          release_note: ${{ fromJSON(steps.release.outputs.data).note }}
+
+          owner: ModAVD
+          repo: ModAVD
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          upload_token: ${{ secrets.MirrorChyanUploadToken }}
