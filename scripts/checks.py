@@ -173,7 +173,9 @@ def metadata(root):
             if path.stem != data["version"][1:]:
                 raise ValueError(f"{path.name}: file name differs from version {data['version']}")
         assets = json.loads(path.with_suffix(".assets.json").read_text(encoding="utf-8"))
-        check_notes(path, path.with_suffix(".SHA256SUMS.txt"), {name: a["bytes"] for name, a in assets.items()}, path.with_suffix(".sources.SHA256SUMS.txt"))
+        # Since 0.32.1 the notes list only the two ZIPs; source members stay in <version>.sources.SHA256SUMS.txt.
+        source_rows = None if text.startswith(MACHINE_PREFIX) else path.with_suffix(".sources.SHA256SUMS.txt")
+        check_notes(path, path.with_suffix(".SHA256SUMS.txt"), {name: a["bytes"] for name, a in assets.items()}, source_rows)
         # The size manifest and both checksum files must also agree, independently of notes.
         lines = path.with_suffix(".SHA256SUMS.txt").read_text().splitlines() + path.with_suffix(".sources.SHA256SUMS.txt").read_text().splitlines()
         hashes = dict((line.split("  ")[1], line.split("  ")[0]) for line in lines)
