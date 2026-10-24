@@ -5,9 +5,9 @@
 
 ## 版本号
 
-从 33.0.0 起，版本号是 `<N>.0.<P>`：N 是构建号（`source.properties` 的 `Pkg.BuildId=mas-N`），P 是不重编、只重新打包的次数。
-tag 是 `v<N>.0.<P>`，标题是 `ModAVD mas-<N>（<N>.0.<P>）`；基于哪个上游 Emulator 版本写在 Release 说明第一句。
-mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变。
+从 0.32.1 起，版本号是 `0.<N>.<P>`：0 表示内测阶段，N 是构建号（`source.properties` 的 `Pkg.BuildId=mas-N`），P 是不重编、只重新打包的次数。
+tag 是 `v0.<N>.<P>`，标题是 `ModAVD mas-<N>（0.<N>.<P>）`；Release 说明第一句写明基于的 Google AOSP Android Emulator 版本。
+mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.32.1` 是 mas32 原样重新打包成新格式。
 
 ## 发版前
 
@@ -27,16 +27,16 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录>
 ```
 
 1. **组包**：依据已审核的文件政策复制 SDK、桌面 APK、组件下载/问题收集脚本、说明与许可证，最后写 `modavd-manifest.json`（版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，以及其余每个文件的大小和 SHA-256）。SDK 文件集改变时先复核政策；不在原 SDK 上删除文件。
-2. **两个 ZIP**：主包 `ModAVD-34.0.0-win-x64.zip`，顶层为 `ModAVD-34.0.0-win-x64/`；更新包 `ModAVD-34.0.0-win-x64-update.zip` 是同样的文件、没有顶层目录，给程序更新用。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。
-3. **验证两个包**：逐文件 SHA-256 与组包目录一致，排除文件不在包内，顶层、条目路径和编码全部通过，清单与包里的文件一一对应。
+2. **主包 ZIP**：`ModAVD-0.34.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录（Mirror 酱按路径比文件，外层文件夹带版本号会让增量等于全量）。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。
+3. **验证主包**：逐文件 SHA-256 与组包目录一致，排除文件不在包内，条目直接从包根开始（带外层文件夹就报错），路径和编码全部通过，清单与包里的文件一一对应。
 4. **补丁**：从构建快照记录的提交导出，作者为 `qiyinxi <qiyinxi@foxmail.com>`，提交说明无联合作者尾注。在独立临时仓库用 `git am --keep-cr` 回放，每个提交的源码树与原提交相同。
-5. **源码总包与清单**：没变的源码文件逐个验哈希后复用，只给变化的源项目重新归档。用 `7z a -tzip -mx0 -mcu=on` 生成和平台无关的 `ModAVD-34.0.0-sources.zip`，顶层目录同名；包括对应源码、`SOURCES.txt`、两份 manifest 和包内的 `SHA256SUMS.txt`。清单同时同步到本仓库 `manifests/`，不再分别上传附件。
-6. **两层校验表**：包内那份只列逐个源码文件，排除自身；外层 `SHA256SUMS.txt` **只列主包、更新包和源码总包这三行**。
-7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、最近 10 版的改动摘要）；接着是更新公告（更新内容、怎么更新、AUTO-MAS 版本、已知问题）；然后一行 `<!-- modavd:github-only -->`；以下是回归结果、三个附件的字节数和 SHA-256、源码包内容表。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
+5. **源码总包与清单**：没变的源码文件逐个验哈希后复用，只给变化的源项目重新归档。用 `7z a -tzip -mx0 -mcu=on` 生成和平台无关的 `ModAVD-0.34.0-sources.zip`，外层文件夹同名；包括对应源码、`SOURCES.txt`、两份 manifest 和包内的 `SHA256SUMS.txt`。清单同时同步到本仓库 `manifests/`，不再分别上传附件。
+6. **两层校验表**：包内那份只列逐个源码文件，排除自身；外层 `SHA256SUMS.txt` **只列主包和源码总包这两行**。
+7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、最近 10 版的改动摘要）；接着是更新公告（更新内容、怎么更新、AUTO-MAS 版本、已知问题）；然后一行 `<!-- modavd:github-only -->`；以下是回归结果、两个 ZIP 的字节数和 SHA-256、源码包内容表。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
 8. **隐私**：主包、补丁、全部源码成员及发布元数据均须通过；同一规则也在仓库 CI 中运行。新命中要核对来源，白名单固定具体文件/内容，不按姓氏全局放行。报告必须是 0 失败。
 
 - [ ] 将本次补丁系列和 `BASE.md`、`series.json`、manifest，以及生成的 Release 说明纳入待审核的发版提交；核对 `series.json` 中的基准、数量和树。
-- [ ] 在 `release/` 一起保存 `<版本>.md`、`<版本>.SHA256SUMS.txt`（外层）、`<版本>.sources.SHA256SUMS.txt`（包内）和 `<版本>.assets.json`（字节数与摘要），`<版本>` 不带 `v`，例如 `34.0.0.md`。后者来自包装输出的 `release-assets.json`，不要从旧版手工抄数字。
+- [ ] 在 `release/` 一起保存 `<版本>.md`、`<版本>.SHA256SUMS.txt`（外层）、`<版本>.sources.SHA256SUMS.txt`（包内）和 `<版本>.assets.json`（字节数与摘要），`<版本>` 不带 `v`，例如 `0.34.0.md`。后者来自包装输出的 `release-assets.json`，不要从旧版手工抄数字。
 - [ ] 在维护仓库修改共享的 `checks.py`、`privacy.py`、白名单时，同步公开仓库 `scripts/` 的同名文件。`privacy-private-rules.json`（带真名、私人邮箱、主机名、本机目录的规则）只留在维护仓库，绝不复制过来。
 - [ ] CI 补丁回放、一致性与隐私检查全部通过。需要本地复验时，使用下一节的同一组命令。
 
@@ -48,7 +48,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录>
 pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Force -DraftRelease
 ```
 
-- [ ] 草稿附件**恰好四个**：主包 ZIP、更新包 ZIP、源码总包 ZIP、外层 `SHA256SUMS.txt`。
+- [ ] 草稿附件**恰好三个**：主包 ZIP、源码总包 ZIP、外层 `SHA256SUMS.txt`。
 - [ ] **人工过目草稿后再发布**：目标标签/提交、版本号、两层校验表、附件字节数与摘要、源码对应关系、许可证、隐私报告、issue 链接、升级说明和分隔行以上的公告均正确。
 - [ ] 经维护者确认后通过 GitHub 页面发布；自动脚本只创建草稿，不发布、不改仓库设置。
 - [ ] 发布后要改公告（例如补一条已知问题）就直接编辑 Release；分隔行和第一行机读注释不要删。

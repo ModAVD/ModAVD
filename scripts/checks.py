@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 
-# Release notes from 33.0.0 on: a one-line machine-readable comment first, then the announcement that is
+# Release notes from 0.32.1 on: a one-line machine-readable comment first, then the announcement that is
 # synced to MirrorChyan and shown by AUTO-MAS, then this separator, then GitHub-only details.
 MACHINE_PREFIX = "<!-- modavd: "
 SEPARATOR = "<!-- modavd:github-only -->"
@@ -19,10 +19,16 @@ MANIFEST = "modavd-manifest.json"
 
 
 def version_key(value):
-    m = re.fullmatch(r"v([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value if isinstance(value, str) else "")
+    """v0.<N>.<P>: stage (0 while in testing), build N (Pkg.BuildId mas-N), repack count P."""
+    m = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value if isinstance(value, str) else "")
     if not m:
-        raise ValueError(f"Version must look like v33.0.0: {value!r}")
+        raise ValueError(f"Version must look like v0.33.0: {value!r}")
     return tuple(int(x) for x in m.groups())
+
+
+def build_of(value):
+    """The build number N of v0.<N>.<P>."""
+    return version_key(value)[1]
 
 
 def check_min_automas(value):
@@ -31,7 +37,7 @@ def check_min_automas(value):
 
 
 def check_changes(changes):
-    """{"v33.0.0": {"修复": ["…"]}}: known categories, one-line items that cannot end an HTML comment."""
+    """{"v0.33.0": {"修复": ["…"]}}: known categories, one-line items that cannot end an HTML comment."""
     if not isinstance(changes, dict) or not changes:
         raise ValueError("changes must be a non-empty object")
     for version, groups in changes.items():
@@ -54,7 +60,7 @@ def machine_line(data):
 
 
 def check_announcement(text, version=None, build=None):
-    """Machine line, separator and announcement size of 33.0.0+ release notes."""
+    """Machine line, separator and announcement size of 0.32.1+ release notes."""
     lines = text.splitlines()
     m = re.fullmatch(re.escape(MACHINE_PREFIX) + r"(\{.*\}) -->", lines[0] if lines else "")
     if not m or len(lines[0]) > MAX_MACHINE_CHARS or "--" in m[1]:
@@ -63,7 +69,7 @@ def check_announcement(text, version=None, build=None):
     if set(data) != {"version", "build", "upstream", "min_automas", "changes"}:
         raise ValueError("Machine line needs exactly version/build/upstream/min_automas/changes")
     key = version_key(data["version"])
-    if data["build"] != key[0] or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(data["upstream"])):
+    if data["build"] != key[1] or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(data["upstream"])):
         raise ValueError("Machine line build/upstream invalid")
     check_min_automas(data["min_automas"])
     check_changes(data["changes"])
@@ -88,7 +94,7 @@ def check_manifest(tree):
     data = json.loads((tree / MANIFEST).read_text(encoding="utf-8"))
     if data.get("schema") != 1 or set(data) != {"schema", "version", "build", "upstream", "platform", "min_automas", "files"}:
         raise ValueError("Manifest fields differ from schema 1")
-    if version_key(data["version"])[0] != data["build"]:
+    if build_of(data["version"]) != data["build"]:
         raise ValueError("Manifest build differs from version")
     if not re.fullmatch(r"(?:win|linux)-(?:x64|arm64)", str(data["platform"])):
         raise ValueError(f"Manifest platform invalid: {data['platform']!r}")
