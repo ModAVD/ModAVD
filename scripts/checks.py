@@ -86,10 +86,12 @@ def check_manifest(tree):
     """modavd-manifest.json lists every other file of the package with its size and SHA-256."""
     tree = Path(tree)
     data = json.loads((tree / MANIFEST).read_text(encoding="utf-8"))
-    if data.get("schema") != 1 or set(data) != {"schema", "version", "build", "upstream", "min_automas", "files"}:
+    if data.get("schema") != 1 or set(data) != {"schema", "version", "build", "upstream", "platform", "min_automas", "files"}:
         raise ValueError("Manifest fields differ from schema 1")
     if version_key(data["version"])[0] != data["build"]:
         raise ValueError("Manifest build differs from version")
+    if not re.fullmatch(r"(?:win|linux)-(?:x64|arm64)", str(data["platform"])):
+        raise ValueError(f"Manifest platform invalid: {data['platform']!r}")
     check_min_automas(data["min_automas"])
     actual = {}
     for p in tree.rglob("*"):
