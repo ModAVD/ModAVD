@@ -24,7 +24,7 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 - 「回放后的树」一栏是分支头提交的编号，它本身不在公开服务器上；回放后每个提交的树（`git rev-parse HEAD^{tree}`）与原分支逐个相同。
 - qemu 补丁里有 CRLF 文件（`whp-dispatch.h` 等），`git am` 必须带 `--keep-cr`。
 - 标题以 `MAS local:` / `MAS experiment:` 开头的是只给本项目用的改动（诊断日志、零外连、崩溃转储只留本机等），其余多为通用修复。
-- 补丁作者统一写作 `qiyinxi <qiyinxi@foxmail.com>`；有 AI 辅助的提交保留 `Assisted-by:` 一行。
+- 补丁作者统一写作 `qiyinxi <qiyinxi@foxmail.com>`。
 
 ## qemu 补丁的许可证
 
