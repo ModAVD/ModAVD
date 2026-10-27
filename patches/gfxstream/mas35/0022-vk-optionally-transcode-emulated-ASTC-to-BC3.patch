@@ -1,0 +1,39 @@
+From d027890c4799a8537ce1e981fec784a99a269ade Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Fri, 16 Oct 2026 01:19:49 +0200
+Subject: [PATCH 22/23] vk: optionally transcode emulated ASTC to BC3
+
+ANDROID_EMU_VK_ASTC_BC3=1 (off by default) selects the existing NewBc3
+GPU decoder, so emulated ASTC images are decompressed into BC3 instead
+of RGBA8: a quarter of the decompressed texture memory. Meant for games
+that stream many ASTC textures on hosts without native ASTC.
+---
+ host/vulkan/vk_common_operations.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 77c66734..41d6c55b 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -37,6 +37,7 @@
+ #include "gfxstream/synchronization/Lock.h"
+ #include "gfxstream/system/System.h"
+ #include "render-utils/Renderer.h"
++#include "emulated_textures/gpu_decompression_pipeline.h"
+ #include "vk_decoder_global_state.h"
+ #include "vk_emulated_physical_device_memory.h"
+ #include "vk_format_utils.h"
+@@ -1719,6 +1720,13 @@ void VkEmulation::initFeatures(Features features) {
+     mUseCreateResourcesWithRequirements = features.createResourceWithRequirements;
+     mGuestRenderDoc = std::move(features.guestRenderDoc);
+     mAstcLdrEmulationMode = features.astcLdrEmulationMode;
++    // MAS (Endfield, 10-16), off by default: ANDROID_EMU_VK_ASTC_BC3=1 makes the GPU ASTC
++    // emulation transcode into BC3 instead of RGBA8, a quarter of the decompressed texture memory
++    // (the emulated image keeps the raw ASTC blocks next to it either way).
++    if (gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ASTC_BC3") == "1") {
++        GpuDecompressionPipelineManager::setAstcDecoder(AstcDecoder::NewBc3);
++        GFXSTREAM_INFO("MAS: GPU ASTC emulation decodes to BC3 (ANDROID_EMU_VK_ASTC_BC3)");
++    }
+     mEnableEtc2Emulation = features.enableEtc2Emulation;
+     mEnableYcbcrEmulation = features.enableYcbcrEmulation;
+     mGuestVulkanOnly = features.guestVulkanOnly;

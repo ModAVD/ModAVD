@@ -1,0 +1,207 @@
+From 253064b68dd0139c7a97e6b25fbc3807fd966928 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 5 Oct 2026 18:59:43 +0200
+Subject: [PATCH 15/23] gl: do not abort when the YUV conversion program fails
+ to build
+
+YUVConverter::createYUVGLShader() treats a failed compile or link as
+fatal. A transient failure, for example the color buffer helper context
+not being current on the calling thread, therefore takes down the whole
+emulator, and the message carries an uninitialized info log because the
+query never wrote to the buffer.
+
+Log the failure together with the calling thread and the current EGL
+context, release the shaders, and skip this conversion. mProgram stays
+0, so the next update re-runs init() and retries.
+
+Since that retry runs on every update, i.e. up to once per frame, a
+persistent failure would log two errors per frame. Log the first failure
+of a run and then every 300th one, and log once when the program is
+finally built.
+
+Test: a debugger makes createYUVGLShader() fail for 54 s during CUDA
+      decode: 2541 failures on 4 threads gave 19 error lines, one per
+      new converter, no abort, and the converters built their program
+      once the failures stopped.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Ic21375b43f760284e44e42ed0862291c511bd938
+---
+ host/gl/yuv_converter.cpp | 67 +++++++++++++++++++++++++++++++--------
+ host/gl/yuv_converter.h   | 11 +++++--
+ 2 files changed, 63 insertions(+), 15 deletions(-)
+
+diff --git a/host/gl/yuv_converter.cpp b/host/gl/yuv_converter.cpp
+index a5481a48..5ac4bc07 100644
+--- a/host/gl/yuv_converter.cpp
++++ b/host/gl/yuv_converter.cpp
+@@ -22,9 +22,11 @@
+ #include <string>
+ 
+ #include "OpenGLESDispatch/DispatchTables.h"
++#include "OpenGLESDispatch/EGLDispatch.h"
+ #include "gfxstream/host/guest_operations.h"
+ #include "gfxstream/common/logging.h"
+ #include "gfxstream/host/renderer_operations.h"
++#include "gfxstream/threads/Thread.h"
+ 
+ namespace gfxstream {
+ namespace host {
+@@ -402,10 +404,15 @@ bool YUVConverter::checkAndUpdateColorAspectsChanged(void* metadata) {
+     return needToUpdateConversionShader;
+ }
+ 
+-void YUVConverter::createYUVGLShader() {
++bool YUVConverter::shouldLogInitFailure() const {
++    // mInitFailures does not count the attempt in progress yet.
++    return mInitFailures == 0 || (mInitFailures + 1) % kInitFailureLogInterval == 0;
++}
++
++bool YUVConverter::createYUVGLShader() {
+     // P010 needs uint samplers.
+     if (mFormat == GfxstreamFormat::P010 && !mHasGlsl3Support) {
+-        return;
++        return true;
+     }
+ 
+     static const char kVertShader[] = R"(
+@@ -590,7 +597,7 @@ void main(void) {
+         }
+         default: {
+             GFXSTREAM_FATAL("%s: invalid format:%d", __FUNCTION__, mFormat);
+-            return;
++            return false;
+         }
+     }
+ 
+@@ -620,15 +627,24 @@ void main(void) {
+     s_gles2.glCompileShader(vertShader);
+     s_gles2.glCompileShader(fragShader);
+ 
++    // Failing to build the program is not fatal: the caller skips this
++    // conversion and retries on the next one, as mProgram stays 0.
+     for (GLuint shader : {vertShader, fragShader}) {
+         GLint status = GL_FALSE;
+         s_gles2.glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+         if (status == GL_FALSE) {
+-            GLchar error[1024];
++            GLchar error[1024] = {};
+             s_gles2.glGetShaderInfoLog(shader, sizeof(error), nullptr, &error[0]);
+-            GFXSTREAM_FATAL("Failed to compile YUV conversion shader: %s", error);
+-            s_gles2.glDeleteShader(shader);
+-            return;
++            if (shouldLogInitFailure()) {
++                GFXSTREAM_ERROR(
++                    "Failed to compile YUV conversion shader %u on thread %lu with EGL context "
++                    "%p: %s",
++                    shader, gfxstream::base::getCurrentThreadId(), s_egl.eglGetCurrentContext(),
++                    error);
++            }
++            s_gles2.glDeleteShader(vertShader);
++            s_gles2.glDeleteShader(fragShader);
++            return false;
+         }
+     }
+ 
+@@ -640,12 +656,19 @@ void main(void) {
+     GLint status = GL_FALSE;
+     s_gles2.glGetProgramiv(mProgram, GL_LINK_STATUS, &status);
+     if (status == GL_FALSE) {
+-        GLchar error[1024];
++        GLchar error[1024] = {};
+         s_gles2.glGetProgramInfoLog(mProgram, sizeof(error), 0, &error[0]);
+-        GFXSTREAM_FATAL("Failed to link YUV conversion program: %s", error);
++        if (shouldLogInitFailure()) {
++            GFXSTREAM_ERROR(
++                "Failed to link YUV conversion program %u on thread %lu with EGL context %p: %s",
++                mProgram, gfxstream::base::getCurrentThreadId(), s_egl.eglGetCurrentContext(),
++                error);
++        }
+         s_gles2.glDeleteProgram(mProgram);
++        s_gles2.glDeleteShader(vertShader);
++        s_gles2.glDeleteShader(fragShader);
+         mProgram = 0;
+-        return;
++        return false;
+     }
+ 
+     mUniformLocYWidthCutoff = s_gles2.glGetUniformLocation(mProgram, "uYWidthCutoff");
+@@ -658,6 +681,7 @@ void main(void) {
+ 
+     s_gles2.glDeleteShader(vertShader);
+     s_gles2.glDeleteShader(fragShader);
++    return true;
+ }
+ 
+ void YUVConverter::createYUVGLFullscreenQuad() {
+@@ -730,7 +754,7 @@ YUVConverter::YUVConverter(int width, int height, GfxstreamFormat format)
+       mFormat(format),
+       mColorBufferFormat(format) {}
+ 
+-void YUVConverter::init(int width, int height, GfxstreamFormat format) {
++bool YUVConverter::init(int width, int height, GfxstreamFormat format) {
+     uint32_t yWidth, yHeight = 0, yOffsetBytes, yStridePixels = 0, yStrideBytes;
+     uint32_t uWidth, uHeight = 0, uOffsetBytes, uStridePixels = 0, uStrideBytes;
+     uint32_t vWidth, vHeight = 0, vOffsetBytes, vStridePixels = 0, vStrideBytes;
+@@ -762,8 +786,11 @@ void YUVConverter::init(int width, int height, GfxstreamFormat format) {
+     get_gfxstream_gles_version(&glesMajor, &glesMinor);
+     mHasGlsl3Support = glesMajor >= 3;
+ 
+-    createYUVGLShader();
++    if (!createYUVGLShader()) {
++        return false;
++    }
+     createYUVGLFullscreenQuad();
++    return true;
+ }
+ 
+ void YUVConverter::saveGLState() {
+@@ -866,7 +893,21 @@ void YUVConverter::drawConvertFromFormat(GfxstreamFormat format, int x, int y, i
+             mFormat = format;
+             reset();
+         }
+-        init(width, height, mFormat);
++        if (!init(width, height, mFormat)) {
++            if (shouldLogInitFailure()) {
++                GFXSTREAM_ERROR(
++                    "Skipping YUV conversion of a %dx%d update, will retry on the next one "
++                    "(failure %u in a row, logged every %u)",
++                    width, height, mInitFailures + 1, kInitFailureLogInterval);
++            }
++            ++mInitFailures;
++            restoreGLState();
++            return;
++        }
++        if (mInitFailures > 0) {
++            GFXSTREAM_INFO("YUV conversion program built after %u failed attempts", mInitFailures);
++            mInitFailures = 0;
++        }
+     }
+ 
+     if (mFormat == GfxstreamFormat::P010 && !mHasGlsl3Support) {
+diff --git a/host/gl/yuv_converter.h b/host/gl/yuv_converter.h
+index b1d8d3c3..4accac6d 100644
+--- a/host/gl/yuv_converter.h
++++ b/host/gl/yuv_converter.h
+@@ -78,12 +78,19 @@ class YUVConverter {
+                                YuvPlane plane,
+                                GLuint* outTextureName);
+ private:
+-    void init(int w, int h, GfxstreamFormat format);
++    bool init(int w, int h, GfxstreamFormat format);
+     void reset();
+ 
+-    void createYUVGLShader();
++    bool createYUVGLShader();
+     void createYUVGLFullscreenQuad();
+ 
++    // A failed init() is retried on the next update, i.e. up to once per
++    // frame. Log the first failure of a run and then only every
++    // kInitFailureLogInterval-th one.
++    static constexpr uint32_t kInitFailureLogInterval = 300;
++    uint32_t mInitFailures = 0;  // consecutive failed init() calls
++    bool shouldLogInitFailure() const;
++
+     // For dealing with n-pixel-aligned buffers
+     void updateCutoffs(float yWidth, float yStridePixels,
+                        float uvWidth, float uvStridePixels);

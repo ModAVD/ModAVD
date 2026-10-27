@@ -1,0 +1,33 @@
+From 923f326563ece5b1c63f01247bccf098720334a9 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 19:11:28 +0200
+Subject: [PATCH 04/23] framebuffer: do not log per frame when GL emulation is
+ absent (GuestAngle)
+
+ensureReadbackWorker() runs for every posted frame; in Vulkan-only mode it
+logged "GL/EGL emulation not enabled" ~100 times/s (~25 MB/h per instance).
+All callers already handle a null ReadbackWorker since 807569a.
+
+Patch: 0005-gfxstream-quiet-readback-worker-without-gl.diff
+
+Change-Id: Ibab3b0325e52840d8a1cba6e559f8e7c0696e5d5
+---
+ host/frame_buffer.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 33443e79..7517aa26 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -2819,7 +2819,10 @@ void FrameBuffer::Impl::flushReadPipeline(int displayId) {
+ void FrameBuffer::Impl::ensureReadbackWorker() {
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     if (!m_readbackWorker) {
+-        ENSURE_GL_EMULATION_VOID();
++        // MAS: Vulkan-only (GuestAngle) has no GL emulation and therefore no ReadbackWorker; every
++        // caller handles null (patch 0004). This runs once per posted frame, so do not log here
++        // (ENSURE_GL_EMULATION_VOID printed ~100 ERROR lines/s).
++        if (!m_emulationGl) return;
+         m_readbackWorker = m_emulationGl->getReadbackWorker();
+     }
+ #endif

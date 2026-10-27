@@ -1,0 +1,149 @@
+From 5c5a487b764c6358ca3710e84ee70a7157ef6cf9 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 5 Oct 2026 21:14:44 +0200
+Subject: [PATCH 14/23] egl: do not report a failed wglMakeCurrent() as success
+
+WglDisplay::makeCurrent() retries wglMakeCurrent() while it fails with
+no error code (a hibernation workaround), but its loop also stops on the
+first failure that does set an error, and then returns true because the
+retry counter has not run out. A real failure, for example ERROR_BUSY
+(0xaa) when the context is current on another thread, is therefore
+reported as success. eglMakeCurrent() records the context as current for
+the thread while Windows left no context current, so every later GL call
+on that thread silently does nothing: glCreateShader() returns 0 and
+glGetShaderiv() / glGetShaderInfoLog() leave their outputs untouched.
+
+Only retry the error-less failure and return false for any other one.
+A failed release still counts as done, as wglMakeCurrent() leaves no
+context current after a failure.
+
+Returning the failure alone would leave a stale state behind:
+eglMakeCurrent() returns EGL_BAD_ACCESS but keeps the previous context
+recorded as current, although wglMakeCurrent() made it not current. A
+caller that restores the previous context afterwards, such as
+DisplaySurfaceGlContextHelper::teardownContext(), then finds nothing to
+restore, and the thread's later GL calls still go nowhere. So when the
+native bind fails, release the previous context explicitly and record
+that the thread has no current context. EGL and the native state then
+agree, and the next eglMakeCurrent() of the previous context binds it
+again.
+
+The release is done for every back end, not only WGL. GLX and CGL keep
+the previous context current when a bind fails, which is also what the
+EGL specification describes for a failed eglMakeCurrent(), so there the
+release is a change rather than a confirmation. The outcome is the same
+on every back end, though: the thread has no current context, EGL
+records exactly that, and a caller that restores the previous context,
+like teardownContext(), binds it again. eglMakeCurrent() cannot know
+whether the native failure kept the old context, and keeping it on
+Windows would take another native bind that can fail the same way, so
+one well-defined state after a failure is simpler and safer.
+
+EglContext::~EglContext() asserted that binding the context for its
+cleanup succeeds. That bind can now report a real failure, so log it
+instead of asserting.
+
+Test: a debugger makes wglMakeCurrent() fail with a context that is
+      current on another thread (the ERROR_BUSY case) while the calling
+      thread has its own context current: eglMakeCurrent() fails, the
+      release follows, and teardownContext() binds the thread's
+      previous context again (wglMakeCurrent() returns 1); the thread's
+      later binds work. Tested on Windows only.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I18cb2bd84169a71844177afc7d171cd16cafd6bd
+---
+ host/gl/glestranslator/egl/egl_context.cpp    | 12 +++++++---
+ host/gl/glestranslator/egl/egl_imp.cpp        | 12 ++++++++++
+ host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 22 +++++++++++++------
+ 3 files changed, 36 insertions(+), 10 deletions(-)
+
+diff --git a/host/gl/glestranslator/egl/egl_context.cpp b/host/gl/glestranslator/egl/egl_context.cpp
+index e80eb78b..f1a13c76 100644
+--- a/host/gl/glestranslator/egl/egl_context.cpp
++++ b/host/gl/glestranslator/egl/egl_context.cpp
+@@ -19,6 +19,7 @@
+ #include "egl_os_api.h"
+ #include "egl_pbuffer_surface.h"
+ #include "thread_info.h"
++#include "gfxstream/common/logging.h"
+ 
+ #include <common/gles_context.h>
+ #include <memory>
+@@ -129,9 +130,14 @@ EglContext::~EglContext()
+                 m_config->nativeFormat(), &pbInfo);
+         assert(pb);
+         if (pb) {
+-            const bool res = m_dpy->nativeType()->makeCurrent(pb, pb, m_native.get());
+-            assert(res);
+-            (void)res;
++            // This can fail for real, e.g. with ERROR_BUSY on Windows while
++            // the context is current on another thread. Do not assert: the
++            // GL objects are then not released through this context, but
++            // the native context itself is still destroyed.
++            if (!m_dpy->nativeType()->makeCurrent(pb, pb, m_native.get())) {
++                GFXSTREAM_ERROR("Failed to make EGL context %p current to destroy it",
++                                this);
++            }
+             pbSurface->setNativePbuffer(pb);
+         }
+     }
+diff --git a/host/gl/glestranslator/egl/egl_imp.cpp b/host/gl/glestranslator/egl/egl_imp.cpp
+index 5d590558..7dffb9b4 100644
+--- a/host/gl/glestranslator/egl/egl_imp.cpp
++++ b/host/gl/glestranslator/egl/egl_imp.cpp
+@@ -1166,6 +1166,18 @@ EGLAPI EGLBoolean EGLAPIENTRY eglMakeCurrent(EGLDisplay display,
+                         newReadPtr->native(),
+                         newDrawPtr->native(),
+                         newCtx->nativeType())) {
++                // The previous context cannot be assumed to be current any
++                // more: wglMakeCurrent() makes the current context not
++                // current when it fails. Release it explicitly and record
++                // that this thread has no current context, so that EGL agrees
++                // with the native state and a later eglMakeCurrent() of the
++                // previous context really binds it again.
++                if (prevCtx.get()) {
++                    dpy->nativeType()->makeCurrent(NULL, NULL, NULL);
++                    thread->updateInfo(ContextPtr(), dpy, NULL, ShareGroupPtr(),
++                                       dpy->getManager(prevCtx->version()));
++                    prevCtx->setSurfaces(SurfacePtr(), SurfacePtr());
++                }
+                 RETURN_ERROR(EGL_FALSE,EGL_BAD_ACCESS);
+             }
+             //TODO: handle the following errors
+diff --git a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+index 0bc1db38..fbb5502c 100644
+--- a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
++++ b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+@@ -1153,16 +1153,24 @@ public:
+             //           && GetLastError()==0) Sleep(16);
+             //
+ 
++            // Only that error-less failure is retried. A failure with an error
++            // code, e.g. ERROR_BUSY because the context is current on another
++            // thread, must be reported: the caller would otherwise record the
++            // context as current while none is, and its GL calls would go
++            // nowhere. A failed release leaves no context current either, so
++            // it still counts as done.
+             int count = 100;
+-            while (!dispatch->wglMakeCurrent(hdcDraw, hdcContext)
+-                   && --count > 0
+-                   && !GetLastError()) {
++            while (!dispatch->wglMakeCurrent(hdcDraw, hdcContext)) {
++                const DWORD error = GetLastError();
++                if (!hdcContext) {
++                    break;
++                }
++                if (error != 0 || --count <= 0) {
++                    D("Error: wglMakeCurrent() failed, error %lu\n", error);
++                    return false;
++                }
+                 Sleep(16);
+             }
+-            if (count <= 0) {
+-                D("Error: wglMakeCurrent() failed, error %d\n", (int)GetLastError());
+-                return false;
+-            }
+             ret = true;
+         } else if (!dispatch->wglMakeContextCurrent) {
+             return false;

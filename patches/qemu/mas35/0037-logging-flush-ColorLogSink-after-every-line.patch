@@ -1,0 +1,126 @@
+From dcc76099087d90a28dc4f338f800bf2c835c0926 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 5 Oct 2026 19:08:56 +0200
+Subject: [PATCH 37/60] logging: flush ColorLogSink after every line
+
+Since "Fix log fragmentation in stdout/stderr" (Change-Id
+Ibb89fb29c9f9624d47d349437146eee9fd019ed4) stdout and stderr are fully
+buffered with a 4 KiB buffer on Windows; the MSVC CRT has no line
+buffering (_IOLBF behaves like _IOFBF). ColorLogSink writes every
+emulator log line, including gfxstream messages routed through
+gfxstreamLoggingCallback(), to std::cout and never flushes it.
+
+When stdout is a file or a pipe this means:
+- lines show up in 4 KiB bursts, so a consumer tailing the output sees
+  nothing new after "Boot completed" (QemuMiscPipe flushes there) until
+  4 KiB accumulate or the emulator exits;
+- a LOG(FATAL) / GFXSTREAM_FATAL message is lost: absl calls
+  FlushLogSinks() and then abort(), ColorLogSink has no Flush()
+  override, and abort() does not flush stdio. The process dies (or
+  hangs in the crash handler) with the reason still in the CRT buffer.
+
+Flush the stream after each line and implement LogSink::Flush(). The
+line is already assembled into one string, so this is still a single
+write per line and keeps the fix for fragmented lines.
+
+Test: android-emu-base-logging_unittests (new FlushesEachLine)
+Test: emulator.exe -no-window ... > out.log 2> err.log; post-boot lines
+      appear in out.log while the emulator is running; a forced
+      GFXSTREAM_FATAL leaves the FATAL line in out.log
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Iee79c0717831c698ec6b20c7e10574c50d3f6f23
+---
+ .../android/base/logging/ColorLogSink.h       |  8 +++++
+ .../src/android/base/logging/ColorLogSink.cpp | 14 ++++++++
+ .../base/logging/StudioLogSink_unittest.cpp   | 34 +++++++++++++++++++
+ 3 files changed, 56 insertions(+)
+
+diff --git a/android/emu/base/logging/include/android/base/logging/ColorLogSink.h b/android/emu/base/logging/include/android/base/logging/ColorLogSink.h
+index bc8819050..b0c5e3bd1 100644
+--- a/android/emu/base/logging/include/android/base/logging/ColorLogSink.h
++++ b/android/emu/base/logging/include/android/base/logging/ColorLogSink.h
+@@ -43,6 +43,14 @@ public:
+      */
+     void Send(const absl::LogEntry& entry) override;
+ 
++    /**
++     * @brief Flushes the output stream.
++     *
++     * Abseil calls this through absl::FlushLogSinks() before it aborts on a
++     * FATAL message.
++     */
++    void Flush() override;
++
+     /**
+      * @brief Ansi color used for a given severity.
+      *
+diff --git a/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp b/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
+index 454be12d8..f12ab1d06 100644
+--- a/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
++++ b/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
+@@ -101,6 +101,20 @@ void ColorLogSink::Send(const absl::LogEntry& entry) {
+     }
+ 
+     *mOutputStream << line;
++
++    // Push the line out now. On Windows stdout/stderr are fully buffered
++    // (see os_set_line_buffering() in os-win32.c), so without this the most
++    // recent lines sit in the CRT buffer until 4 KiB have accumulated. When
++    // the process then dies through abort() or a crash handler, neither of
++    // which flushes stdio, those lines are lost, including the FATAL message
++    // that explains the abort. The line was built as one string above, so
++    // this is still a single write per line and does not bring back the
++    // fragmentation that the buffering was introduced to avoid.
++    mOutputStream->flush();
++}
++
++void ColorLogSink::Flush() {
++    mOutputStream->flush();
+ }
+ 
+ std::string_view ColorLogSink::Color(absl::LogSeverity severity) const {
+diff --git a/android/emu/base/logging/test/android/base/logging/StudioLogSink_unittest.cpp b/android/emu/base/logging/test/android/base/logging/StudioLogSink_unittest.cpp
+index 45669bd70..c8365b0bd 100644
+--- a/android/emu/base/logging/test/android/base/logging/StudioLogSink_unittest.cpp
++++ b/android/emu/base/logging/test/android/base/logging/StudioLogSink_unittest.cpp
+@@ -70,4 +70,38 @@ TEST_F(LogSinkTest, LogsFatal) {
+     // Note: EXPECT_DEATH on windows captures additional data, as long as we see FATAL and Goodbye
+     EXPECT_DEATH(EXIT_WITH_FATAL_MESSAGE("%s", "Goodbye!"), ".*FATAL.*Goodbye!.*");
+ }
++
++namespace {
++// Records how often the stream was flushed and how much had been written by
++// the last flush.
++class FlushCountingBuf : public std::stringbuf {
++public:
++    int syncs = 0;
++    size_t bytesAtLastSync = 0;
++
++protected:
++    int sync() override {
++        ++syncs;
++        bytesAtLastSync = str().size();
++        return std::stringbuf::sync();
++    }
++};
++}  // namespace
++
++TEST_F(LogSinkTest, FlushesEachLine) {
++    FlushCountingBuf buf;
++    std::ostream out(&buf);
++    studio_sink()->SetOutputStream(&out);
++
++    USER_MESSAGE(INFO) << "first";
++    EXPECT_EQ(buf.syncs, 1);
++    EXPECT_EQ(buf.bytesAtLastSync, buf.str().size());
++
++    USER_MESSAGE(WARNING) << "second";
++    EXPECT_EQ(buf.syncs, 2);
++    EXPECT_EQ(buf.bytesAtLastSync, buf.str().size());
++
++    // |out| goes away at the end of this scope.
++    studio_sink()->SetOutputStream(&std::cout);
++}
+ }  // namespace android::base
+\ No newline at end of file

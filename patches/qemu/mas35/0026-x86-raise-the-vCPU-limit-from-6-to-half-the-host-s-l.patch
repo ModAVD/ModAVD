@@ -1,0 +1,57 @@
+From 48429ec0459cba73e17cccdd8ea526c110b5c0da Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 21:47:46 +0200
+Subject: [PATCH 26/60] x86: raise the vCPU limit from 6 to half the host's
+ logical processors
+
+"-cores 8" on a 16-core / 32-thread host is cut to 6 with "Emulator does
+not support more than 6 cores". The fixed limit dates from the HAXM era;
+with WHPX nothing below it depends on it: the partition is created with
+ProcessorCount = smp_cpus, every per-vCPU call uses cpu_index, the
+hypervisor-emulated local APIC passes the IOAPIC / MSI destination
+through unchanged (physical mode reaches all 255 APIC IDs), the pc
+machine allows 255 CPUs, CpuUsage has 112 vCPU slots and -cores is
+already validated up to 64.
+
+The limit is now half the host's logical processors (one vCPU per
+physical core on SMT hosts, so vCPU threads do not compete with the
+render / main-loop threads or with their own hyperthread siblings), at
+most 16 and never below the old 6, so small hosts keep today's
+behaviour. The warning names the actual limit.
+
+Change-Id: Iefcca07cc1ccdd482b33276e564509c2f30ea14e
+---
+ android-qemu2-glue/main.cpp | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
+index 340bd6414..eb22e5699 100644
+--- a/android-qemu2-glue/main.cpp
++++ b/android-qemu2-glue/main.cpp
+@@ -2807,11 +2807,22 @@ extern "C" int main(int argc, char** argv) {
+     }
+ #endif
+ 
+-    if (hw->hw_cpu_ncore > 6) {
++    // MAS: the old fixed limit of 6 vCPUs is raised to half the host's
++    // logical processors (one vCPU per physical core on SMT hosts), at most
++    // 16 and never below the old 6.
++    int maxCores = System::get()->getCpuCoreCount() / 2;
++    if (maxCores > 16) {
++        maxCores = 16;
++    }
++    if (maxCores < 6) {
++        maxCores = 6;
++    }
++    if (hw->hw_cpu_ncore > maxCores) {
+         dwarning(
+-                "Emulator does not support more than 6 cores. Number of cores "
+-                "set to 6");
+-        hw->hw_cpu_ncore = 6;
++                "Emulator does not support more than %d cores on this host. "
++                "Number of cores set to %d",
++                maxCores, maxCores);
++        hw->hw_cpu_ncore = maxCores;
+     }
+ #endif  // !TARGET_X86_64 && !TARGET_I386
+ 

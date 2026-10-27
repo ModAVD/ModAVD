@@ -1,0 +1,177 @@
+From b89df80682e7a7a49c7b3bd6639a8d0d6019851d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 17:51:29 +0200
+Subject: [PATCH 06/23] host: Fix post callback readback without GL emulation
+
+With GuestVulkanOnly (the Android Emulator's -feature GuestAngle),
+FrameBuffer does not create EmulationGl, so ensureReadbackWorker()
+never obtains a ReadbackWorker. Registering a post callback (used by
+the emulator's screen recording, WebRTC and video sharing, e.g.
+`screenrecord webrtc start` or -share-vid) then crashes the emulator:
+setPostCallback() queues ReadbackCmd::Init and sendReadbackWorkerCmd()
+calls m_readbackWorker->init() on a null pointer on the readback
+thread. If the fault does not end the process, the setPostCallback()
+caller keeps holding the FrameBuffer lock while it waits forever for
+the AddRecordDisplay command. GetPixels, AddRecordDisplay,
+DelRecordDisplay and flushReadPipeline() dereference the same null
+pointer.
+ensureReadbackWorker() only logs "GL/EGL emulation not enabled." and
+returns, so the fault follows right after that log line.
+
+postImpl() already skipped the missing worker in its synchronous
+branch, but still passed a buffer that was never written to the
+callback.
+
+Without a ReadbackWorker:
+- postImpl() reads the posted ColorBuffer with
+  ColorBuffer::readToBytes(), the same Vulkan path rcReadColorBuffer
+  uses, converts it to the requested RGBA/BGRA order and makes alpha
+  opaque for RGBX. If the buffer cannot be read (unsupported format or
+  size) the callback is skipped instead of reporting stale data.
+- sendReadbackWorkerCmd() treats Init/AddRecordDisplay/
+  DelRecordDisplay as no-ops and serves GetPixels from the last frame;
+  a lock keeps GetPixels from reading while postImpl() writes.
+- flushReadPipeline() does nothing: every frame is already delivered
+  synchronously, there is no pipeline to flush.
+- ensureReadbackWorker() returns without logging. It runs for every
+  posted frame, and once post callbacks work the error log fired about
+  100 times per second.
+
+Test: TODO -feature GuestAngle, `screenrecord webrtc start`: no crash,
+      shared-memory frames match `adb exec-out screencap`
+Test: TODO default GLES mode: post callback output unchanged
+Change-Id: Iae8f13f49628ad2e72554b54bce01829bc82cfea
+---
+ host/frame_buffer.cpp | 89 ++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 88 insertions(+), 1 deletion(-)
+
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index be726e60..f455cb2a 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -923,6 +923,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
+     };
+     std::map<uint32_t, onPost> m_onPost;
+     ReadbackWorker* m_readbackWorker = nullptr;
++    // Serializes access to m_onPost[].img when there is no ReadbackWorker.
++    gfxstream::base::Lock m_readbackWithoutWorkerLock;
+     gfxstream::base::WorkerThread<Readback> m_readbackThread;
+     std::atomic_bool m_readbackThreadStarted = false;
+ 
+@@ -1581,8 +1583,62 @@ FrameBuffer::Impl::~Impl() {
+     }
+ }
+ 
++// Synchronously reads |cb| into |img| for a post callback when there is no ReadbackWorker, i.e.
++// when GL emulation is not initialized (GuestVulkanOnly). The output matches what
++// ReadbackWorker::doNextReadbackSync() produces: |width| x |height| 32-bit pixels, rows in the
++// same order as ColorBuffer::readToBytes(), RGBA or BGRA byte order depending on |readBgra|, and
++// opaque alpha for formats without alpha. Only 32-bit RGBA/RGBX/BGRA color buffers of the
++// requested size are handled. Returns false if |img| was not updated.
++static bool readbackColorBufferWithoutWorker(ColorBuffer* cb, unsigned char* img, uint32_t width,
++                                             uint32_t height, bool readBgra) {
++    if (!cb || !img || cb->getWidth() != width || cb->getHeight() != height) {
++        return false;
++    }
++    const GfxstreamFormat format = cb->getFormat();
++    const bool srcBgra = format == GfxstreamFormat::B8G8R8A8_UNORM;
++    const bool srcNoAlpha = format == GfxstreamFormat::R8G8B8X8_UNORM;
++    if (!srcBgra && !srcNoAlpha && format != GfxstreamFormat::R8G8B8A8_UNORM) {
++        return false;
++    }
++    const uint64_t size = 4ull * width * height;
++    cb->readToBytes(0, 0, static_cast<int>(width), static_cast<int>(height), format, img, size);
++    const bool swapRedBlue = srcBgra != readBgra;
++    if (swapRedBlue || srcNoAlpha) {
++        for (uint64_t i = 0; i < size; i += 4) {
++            if (swapRedBlue) {
++                std::swap(img[i], img[i + 2]);
++            }
++            if (srcNoAlpha) {
++                img[i + 3] = 0xff;
++            }
++        }
++    }
++    return true;
++}
++
+ WorkerProcessingResult FrameBuffer::Impl::sendReadbackWorkerCmd(const Readback& readback) {
+     ensureReadbackWorker();
++    if (!m_readbackWorker) {
++        // No GL emulation (GuestVulkanOnly): postImpl() reads each posted frame synchronously
++        // into m_onPost[displayId].img, so there is nothing to set up and GetPixels copies the
++        // last frame.
++        switch (readback.cmd) {
++            case ReadbackCmd::GetPixels: {
++                AutoLock lock(m_readbackWithoutWorkerLock);
++                const auto it = m_onPost.find(readback.displayId);
++                if (it != m_onPost.end() && it->second.img && readback.pixelsOut) {
++                    const uint64_t available = 4ull * it->second.width * it->second.height;
++                    memcpy(readback.pixelsOut, it->second.img,
++                           std::min<uint64_t>(readback.bytes, available));
++                }
++                return WorkerProcessingResult::Continue;
++            }
++            case ReadbackCmd::Exit:
++                return WorkerProcessingResult::Stop;
++            default:
++                return WorkerProcessingResult::Continue;
++        }
++    }
+     switch (readback.cmd) {
+     case ReadbackCmd::Init:
+         m_readbackWorker->init();
+@@ -2713,6 +2769,28 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
+                 if (m_readbackWorker) {
+                     m_readbackWorker->doNextReadbackSync(cb.get(), iter.second.img,
+                                                          iter.second.readBgra);
++                } else {
++                    // No GL emulation (GuestVulkanOnly): read the posted color buffer through
++                    // ColorBuffer::readToBytes(), the same path as rcReadColorBuffer.
++                    bool updated = false;
++                    {
++                        AutoLock readbackLock(m_readbackWithoutWorkerLock);
++                        updated = readbackColorBufferWithoutWorker(
++                            cb.get(), iter.second.img, iter.second.width, iter.second.height,
++                            iter.second.readBgra);
++                    }
++                    if (!updated) {
++                        // Do not report a stale (or never written) buffer as a new frame.
++                        static std::atomic<bool> sLoggedUnsupported{false};
++                        if (!sLoggedUnsupported.exchange(true)) {
++                            GFXSTREAM_ERROR(
++                                "Display %u: cannot read back ColorBuffer %ux%u %s without GL "
++                                "emulation, skipping post callbacks.",
++                                iter.first, cb->getWidth(), cb->getHeight(),
++                                ToString(cb->getFormat()).c_str());
++                        }
++                        continue;
++                    }
+                 }
+                 doPostCallback(iter.second.img, iter.first);
+             }
+@@ -2755,6 +2833,11 @@ void FrameBuffer::Impl::flushReadPipeline(int displayId) {
+     }
+ 
+     ensureReadbackWorker();
++    if (!m_readbackWorker) {
++        // Without a ReadbackWorker every post is read back synchronously and its callback has
++        // already delivered the latest frame; there is no pipeline to flush.
++        return;
++    }
+ 
+     const auto status = m_readbackWorker->flushPipeline(displayId);
+     if (status == ReadbackWorker::FlushResult::OK_READY_FOR_READ) {
+@@ -2765,7 +2848,11 @@ void FrameBuffer::Impl::flushReadPipeline(int displayId) {
+ void FrameBuffer::Impl::ensureReadbackWorker() {
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     if (!m_readbackWorker) {
+-        ENSURE_GL_EMULATION_VOID();
++        // Without GL emulation (GuestVulkanOnly) there is no ReadbackWorker and callers fall back
++        // to synchronous readback. This runs for every posted frame, so do not log here.
++        if (!m_emulationGl) {
++            return;
++        }
+         m_readbackWorker = m_emulationGl->getReadbackWorker();
+     }
+ #endif

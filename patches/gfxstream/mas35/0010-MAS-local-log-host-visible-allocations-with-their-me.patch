@@ -1,0 +1,37 @@
+From 5c8f3985409f19149c731bb4808bb55af68f08ca Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 20:18:20 +0200
+Subject: [PATCH 10/23] MAS local: log host-visible allocations with their
+ memory types
+
+Not for upstream. Logs the first 300 host-visible vkAllocateMemory calls
+(VkDevice, guest and host memory type index, flags, size) to see which type
+Star Rail maps for its uploads (plan P2.6).
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I74f7da9f11e122b619adf24effa43cb8a1008632
+---
+ host/vulkan/vk_decoder_global_state.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 67b293e5..bcfa1151 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -6649,6 +6649,16 @@ class VkDecoderGlobalState::Impl {
+         //  * For complete correctness, we may need "getGuestOsLogic" logic somewhere in
+         //    the future.
+         const bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
++        // MAS local diagnostic (not for upstream): which memory types a guest maps (plan P2.6).
++        if (hostVisible) {
++            static std::atomic<uint32_t> sLoggedAllocs{0};
++            if (sLoggedAllocs.fetch_add(1) < 300) {
++                GFXSTREAM_INFO("MAS: host-visible alloc VkDevice:%p guest type %u -> host type %u flags 0x%x size %llu",
++                               device, pAllocateInfo->memoryTypeIndex, localAllocInfo.memoryTypeIndex,
++                               memoryPropertyFlags,
++                               (unsigned long long)localAllocInfo.allocationSize);
++            }
++        }
+         bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
+         const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
+ 

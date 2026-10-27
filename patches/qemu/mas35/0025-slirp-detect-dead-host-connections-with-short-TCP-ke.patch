@@ -1,0 +1,135 @@
+From 134f95caa153f28dcf06835e95e34fde5acca287 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 19:47:20 +0200
+Subject: [PATCH 25/60] slirp: detect dead host connections with short TCP
+ keepalive
+
+A guest TCP connection is proxied through a host socket, and only that
+host socket talks to the peer. When the peer, or something on the path,
+silently stops answering, the host socket stays ESTABLISHED with nothing
+to send and nothing arriving, and slirp never learns about it: the guest
+keeps an open connection that will never deliver another byte.
+
+Seen with a game CDN that black-holes a small share of its connections
+(0.5-1.2% of 1 MB range requests, from the host just as often as from the
+guest) after the first 64-300 KB. The host's FIN on such a connection is
+never ACKed either, so the flow is dead, not slow. The game gives up on
+its own timeout and retries while the old request still holds the
+temporary file, and the two writers then corrupt each other's download
+(sharing violations, MD5 mismatches, failed renames).
+
+Enable keepalive on the host socket of every outbound guest connection
+(3 s idle, 1 s interval, 5 probes: a dead flow is failed about 8 s after
+its last received segment). A live peer answers the probes however long
+it stays quiet, so slow or idle connections are not affected. On Windows
+the failure surfaces as WSAECONNRESET, soread() drops the connection and
+the guest gets a RST. Also reset rather than FIN the guest connection when
+the host stack reports ETIMEDOUT, ENETRESET or ECONNABORTED, so a
+connection the host gave up on never looks like a complete response.
+
+ANDROID_EMU_SLIRP_TCP_KEEPALIVE=<idle>,<intvl>,<cnt> overrides the
+timers; "0" turns keepalive off.
+
+Change-Id: I750065fee2f8ef96ffabcb770f034c5418b8681d
+---
+ slirp/socket.c   | 10 ++++++++-
+ slirp/tcp_subr.c | 57 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 66 insertions(+), 1 deletion(-)
+
+diff --git a/slirp/socket.c b/slirp/socket.c
+index 8eae9229a..c432d7536 100644
+--- a/slirp/socket.c
++++ b/slirp/socket.c
+@@ -227,8 +227,16 @@ soread(struct socket *so)
+ 			DEBUG_MISC((dfd, " --- soread() disconnected, nn = %d, errno = %d-%s\n", nn, errno,strerror(errno)));
+ 			sofcantrcvmore(so);
+ 
++			/*
++			 * A connection the host stack gave up on (keepalive or
++			 * retransmission timeout) is dead, not closed: reset the
++			 * guest's side instead of sending a FIN, which would make a
++			 * truncated response look complete.
++			 */
+ 			if (err == ECONNRESET || err == ECONNREFUSED
+-			    || err == ENOTCONN || err == EPIPE) {
++			    || err == ENOTCONN || err == EPIPE
++			    || err == ETIMEDOUT || err == ENETRESET
++			    || err == ECONNABORTED) {
+ 				tcp_drop(sototcpcb(so), err);
+ 			} else {
+ 				tcp_sockclosed(sototcpcb(so));
+diff --git a/slirp/tcp_subr.c b/slirp/tcp_subr.c
+index e211b5f04..e05554fd1 100644
+--- a/slirp/tcp_subr.c
++++ b/slirp/tcp_subr.c
+@@ -426,6 +426,62 @@ static int socket_fallback(struct sockaddr_storage * addr, unsigned short type)
+     return s;
+ }
+ 
++/*
++ * Turn on TCP keepalive, with short timers, on the host socket of a guest
++ * connection.
++ *
++ * Every guest connection is proxied through a host socket, and that host
++ * socket is what talks to the peer. When the peer (or something on the path)
++ * silently stops answering, the host socket stays ESTABLISHED with nothing to
++ * send and nothing arriving, and nothing ever tells slirp: the guest keeps an
++ * open connection that will never deliver another byte. Applications then
++ * give up on their own timeout and retry while the old request is still
++ * pending. Seen with a CDN that black-holes about 0.5% of its connections
++ * after the first 64-300 KB: our FIN is never ACKed either.
++ *
++ * With keepalive the host stack probes such a connection once it has been
++ * idle for `idle` seconds and fails it after `cnt` unanswered probes sent
++ * `intvl` seconds apart. soread() then sees the error and the guest gets a
++ * RST. A peer that is alive answers the probes however long it stays quiet,
++ * so slow or idle connections are not affected.
++ *
++ * ANDROID_EMU_SLIRP_TCP_KEEPALIVE=<idle>,<intvl>,<cnt> overrides the timers;
++ * "0" turns keepalive off.
++ */
++static void tcp_set_keepalive(int s)
++{
++    static int idle = -1, intvl, cnt;
++    int opt = 1;
++
++    if (idle < 0) {
++        const char *env = getenv("ANDROID_EMU_SLIRP_TCP_KEEPALIVE");
++        int a, b, c, n;
++
++        idle = 3;
++        intvl = 1;
++        cnt = 5;
++        if (env) {
++            n = sscanf(env, "%d,%d,%d", &a, &b, &c);
++            if (n >= 1 && a <= 0) {
++                idle = 0;
++            } else if (n == 3 && a > 0 && b > 0 && c > 0) {
++                idle = a;
++                intvl = b;
++                cnt = c;
++            }
++        }
++    }
++    if (!idle) {
++        return;
++    }
++    qemu_setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
++#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
++    qemu_setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
++    qemu_setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
++    qemu_setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
++#endif
++}
++
+ /*
+  * Connect to a host on the Internet
+  * Called by tcp_input
+@@ -466,6 +522,7 @@ int tcp_fconnect(struct socket *so, unsigned short af)
+     qemu_setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(opt));
+ 	opt = 1;
+ 	qemu_setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
++	tcp_set_keepalive(s);
+ 
+ 	/* We don't care what port we get */
+     ret = connect(s, (struct sockaddr *)&addr, sockaddr_size(&addr));

@@ -1,0 +1,97 @@
+From a1a2b60d891ec39a8df124835e6e0fe86eb2ecc9 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:39:24 +0200
+Subject: [PATCH 40/60] os-win32: stop fully buffering stderr
+
+"Fix log fragmentation in stdout/stderr" (Change-Id
+Ibb89fb29c9f9624d47d349437146eee9fd019ed4) gave stderr a 4 KiB buffer
+on Windows, where _IOLBF is the same as _IOFBF. Everything written to
+stderr now stays in memory until 4 KiB accumulate or the process exits
+normally: error_report() and warn_report(), plain fprintf(stderr)
+calls in qemu, gfxstream and the media decoders, and FFmpeg's default
+av_log() callback. abort() and the crashpad handler do not flush
+stdio, so whatever was written to stderr just before a crash is lost,
+and a reader on a pipe or a file sees nothing while the emulator runs.
+
+The fragmentation that change fixed came from setbuf(stderr, NULL).
+The UCRT gives stdout and stderr a temporary buffer for the duration
+of a stdio call only if the stream has no buffer of its own, and
+_IONBF counts as one, so every character went out in its own write.
+stderr as the CRT sets it up gets the temporary buffer on every call,
+console or not, and the buffer is flushed before the call returns:
+one write per fprintf(), fputs() or fwrite(), and nothing kept.
+
+Stop calling setvbuf() on stderr on Windows. Also skip the _IONBF
+setvbuf() that qemu_set_log() applies when -d logs to stderr, which
+would otherwise bring back the byte-at-a-time writes. stdout keeps its
+4 KiB buffer.
+
+Text written by one stdio call still arrives in one piece. A message
+printed with several calls, such as an error_report(), may now arrive
+in a few writes instead of one.
+
+Test: emulator.exe -no-window ... > out.log 2> err.log; info_report()
+      lines and a periodic fprintf(stderr) line appear in err.log
+      while the emulator is running (before: only at exit)
+Test: the console "crash" command: err.log still has every line that
+      was written before the crash (before: the last 528 bytes, four
+      lines including the info_report() ones, were lost)
+Test: WriteFile() traced in a debugger: each fprintf(stderr) line is
+      one write of the whole line, no 1-byte writes; the same with
+      -qemu -d guest_errors,unimp and no -D (log on stderr)
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I9d4fde9201c4ce6d4830f58030645ba133f0bbc2
+---
+ os-win32.c | 15 ++++++++++++++-
+ util/log.c | 10 ++++++++--
+ 2 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/os-win32.c b/os-win32.c
+index 12226ac56..d746ca9be 100644
+--- a/os-win32.c
++++ b/os-win32.c
+@@ -120,8 +120,21 @@ char *os_find_datadir(void)
+ 
+ void os_set_line_buffering(void)
+ {
++    /* The Windows CRT has no line buffering; _IOLBF means _IOFBF. */
+     setvbuf(stdout, NULL, _IOFBF, 4096);
+-    setvbuf(stderr, NULL, _IOFBF, 4096);
++
++    /*
++     * Leave stderr as the CRT sets it up. A stderr without a buffer of its
++     * own gets a temporary buffer for the duration of each stdio call,
++     * which is flushed before the call returns: every fprintf(), fputs()
++     * or fwrite() becomes one write, and nothing is held back.
++     *
++     * Any setvbuf() call on stderr is worse. _IONBF turns the temporary
++     * buffer off and writes one byte at a time. _IOFBF keeps up to 4 KiB
++     * of error output in memory: it shows up late, and is lost when the
++     * process aborts or crashes, because neither abort() nor the crash
++     * handler flushes stdio.
++     */
+ }
+ 
+ /*
+diff --git a/util/log.c b/util/log.c
+index 96f30dd21..838f8d5e4 100644
+--- a/util/log.c
++++ b/util/log.c
+@@ -86,8 +86,14 @@ void qemu_set_log(int log_flags)
+             setvbuf(qemu_logfile, logfile_buf, _IOLBF, sizeof(logfile_buf));
+         } else {
+ #if defined(_WIN32)
+-            /* Win32 doesn't support line-buffering, so use unbuffered output. */
+-            setvbuf(qemu_logfile, NULL, _IONBF, 0);
++            /*
++             * Win32 doesn't support line-buffering, so use unbuffered
++             * output. stderr already writes once per call when left
++             * alone, see os_set_line_buffering().
++             */
++            if (qemu_logfile != stderr) {
++                setvbuf(qemu_logfile, NULL, _IONBF, 0);
++            }
+ #else
+             setvbuf(qemu_logfile, NULL, _IOLBF, 0);
+ #endif

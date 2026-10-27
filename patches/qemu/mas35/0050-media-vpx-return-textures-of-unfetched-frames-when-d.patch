@@ -1,0 +1,77 @@
+From dbf9bb3e26e6fe3b66ad1851d705244a3d221c7e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 20:50:57 +0200
+Subject: [PATCH 50/60] media/vpx: return textures of unfetched frames when
+ destroying
+
+In GPU texture mode (the CUDA decoder with
+ANDROID_EMU_MEDIA_DECODER_CUDA_VPX=1 and the host GLES renderer) every
+decoded VP8/VP9 frame holds a Y/UV texture pair taken from the
+decoder's MediaTexturePool. fetchAllFrames() moves the frames into
+mSnapshotHelper after every decode. When the guest fetches a frame,
+getImage() swaps its pair into the color buffer and puts the pair that
+comes back into the pool. Frames that the guest has not fetched when
+it destroys the decoder are dropped together with mSnapshotHelper, and
+their pairs with them: the pool's cleanUpTextures(), which
+~MediaHostRenderer() runs, only deletes pairs that are back in the
+pool, so these textures stay allocated until the GL share group goes
+away.
+
+The H.264 and HEVC decoders hand such textures back in
+destroyH264Context() and destroyHevcContext(); destroyVpxContext()
+only deinitializes the video helper. Do the same there: return the
+pairs of the frames still queued and let the pool delete them.
+
+The guest's goldfish VPX component fetches at most one frame after
+each decode, and none when it cannot get an output buffer, so frames
+are left over when it is released after such a failed fetch, or
+between a decode and its fetch, for example when the app that decodes
+is killed.
+
+Test: Windows 11 host, NVIDIA GPU, -gpu host,
+      ANDROID_EMU_MEDIA_DECODER_CUDA_VPX=1; a guest decodes a 1080p VP9
+      clip with c2.goldfish.vp9.decoder to an ImageReader, stops taking
+      output after 30 frames and exits without releasing the codec.
+      Without this change every destroyVpxContext() a debugger watched
+      found a frame with textures still queued and returned nothing,
+      and the process GPU local usage grew by about 3.4 MB, one pair,
+      per session (318 to 533 MB from session 5 to 75); with it, the
+      queued pairs (1 to 3 per session) went back to the pool and local
+      usage stayed at 294-304 MB over 100 sessions. H.264 sessions of
+      the same kind leave nothing queued and stayed flat either way.
+Test: decodes killed after 1 s left 0 to 2 textured frames queued;
+      without this change none came back, with it all of them did.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I9345f28624cf93fdfd26a694fc32e0f97c643730
+---
+ .../android/emulation/MediaVpxDecoderGeneric.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+index ca4f4b20b..74dd899bb 100644
+--- a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+@@ -359,6 +359,22 @@ void MediaVpxDecoderGeneric::flush(void* ptr) {
+ 
+ void MediaVpxDecoderGeneric::destroyVpxContext(void* ptr) {
+     VPX_DPRINT("calling destroy context");
++    // Frames decoded to GPU textures that the guest has not fetched yet still
++    // hold a Y/UV texture pair from the pool. Hand the pairs back, as the
++    // H.264 and HEVC decoders do, so that the pool deletes them; dropping the
++    // frames would leak the textures. Frames decoded in software carry no
++    // texture names.
++    while (MediaSnapshotState::FrameInfo* pFrame =
++                   mSnapshotHelper.frontFrame()) {
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
++            pFrame->texture[1] > 0) {
++            mRenderer.putTextureFrame(
++                    TextureFrame{pFrame->texture[0], pFrame->texture[1]});
++        }
++        mSnapshotHelper.discardFrontFrame();
++    }
++    mRenderer.cleanUpTextures();
++
+     if (mVideoHelper != nullptr) {
+         mVideoHelper->deInit();
+         mVideoHelper.reset(nullptr);

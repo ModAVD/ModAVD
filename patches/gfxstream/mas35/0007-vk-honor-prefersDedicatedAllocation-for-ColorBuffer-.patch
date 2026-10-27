@@ -1,0 +1,59 @@
+From 1812013ae7ac516c9a24672e6686128fde0113fb Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 28 Sep 2026 00:56:52 +0200
+Subject: [PATCH 07/23] vk: honor prefersDedicatedAllocation for ColorBuffer
+ memory
+
+ColorBuffer memory is exported and bound again in the guests' VkDevices
+(ANB swapchain images, AHB imports). With GuestVulkanOnly (-feature
+GuestAngle) on NVIDIA / Windows, a few percent of non-dedicated
+ColorBuffers never show what a guest device rendered into them when
+they are read through VkEmulation's device (readColorBufferToBytes,
+CompositorVk): the result is all zero, i.e. isolated black frames in
+the host window, in the screencap shared memory, in adb screencap and in
+screenrecord, while other guest devices still see the content. The
+driver reports prefersDedicatedAllocation (not requires) for these
+images; allocating them dedicated removes the black buffers
+(GPU->CPU readback probe: 13/472 broken buffers before, 0/640 after).
+
+ANDROID_EMU_VK_IGNORE_PREFERRED_DEDICATED=1 restores the old behavior.
+
+Change-Id: Iebb3f298bd444eb9507797fb4704b1cc2c2d46b8
+---
+ host/vulkan/vk_common_operations.cpp | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 23f41e01..77c66734 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -3119,7 +3119,28 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height,
+         VkImageMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+                                             nullptr, infoPtr->image};
+         vk->vkGetImageMemoryRequirements2KHR(mDevice, &info, &reqs);
+-        useDedicated = dedicated_reqs.requiresDedicatedAllocation;
++        // Also honor prefersDedicatedAllocation. ColorBuffer memory is exported and bound again
++        // in the guests' VkDevices (ANB swapchain images, AHB imports). Observed with
++        // GuestVulkanOnly on NVIDIA (Windows): with non-dedicated memory a few percent of the
++        // ColorBuffers never show what a guest device rendered into them when read through this
++        // VkDevice (readback, composition): all zero, i.e. black frames on screen, in screenshots
++        // and in the screencap shared memory, while other guest devices see the content.
++        // ANDROID_EMU_VK_IGNORE_PREFERRED_DEDICATED=1 restores the old behavior.
++        static const bool sIgnorePreferred =
++            gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_IGNORE_PREFERRED_DEDICATED") ==
++            "1";
++        useDedicated = dedicated_reqs.requiresDedicatedAllocation ||
++                       (dedicated_reqs.prefersDedicatedAllocation && !sIgnorePreferred);
++        // mMutex is held here.
++        static bool sLoggedPreferred = false;
++        if (dedicated_reqs.prefersDedicatedAllocation && !dedicated_reqs.requiresDedicatedAllocation &&
++            !sLoggedPreferred) {
++            sLoggedPreferred = true;
++            GFXSTREAM_INFO("ColorBuffer %u (%ux%u %s): driver prefers a dedicated allocation, %s",
++                           colorBufferHandle, width, height, string_VkFormat(vkFormat),
++                           sIgnorePreferred ? "ignored (ANDROID_EMU_VK_IGNORE_PREFERRED_DEDICATED=1)"
++                                            : "using one");
++        }
+         infoPtr->imageMemReqs = reqs.memoryRequirements;
+     } else {
+         vk->vkGetImageMemoryRequirements(mDevice, infoPtr->image, &infoPtr->imageMemReqs);

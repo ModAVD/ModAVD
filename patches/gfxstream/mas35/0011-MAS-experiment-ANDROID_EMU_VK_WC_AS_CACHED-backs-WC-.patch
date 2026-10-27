@@ -1,0 +1,61 @@
+From b9f7ca82f2033265f57c22beb83159bf80a95c8c Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 20:28:57 +0200
+Subject: [PATCH 11/23] MAS experiment: ANDROID_EMU_VK_WC_AS_CACHED backs WC
+ host-visible memory with a cached type
+
+Not for upstream as is. With ANDROID_EMU_VK_WC_AS_CACHED=1, a guest
+allocation from a host-visible, uncached, non-device-local type (NVIDIA's
+write-combined system memory, type 2) is made from a host-cached coherent
+type on the same heap instead (type 3). Imports, blobs and allocations
+dedicated to an image keep their type. Star Rail allocates its upload
+memory from type 2 and its copy loop into that mapping takes a third of the
+render thread (plan P2.6); this checks whether the memory type is why.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Ided52862b2d2266413bc5ba50ed0a9885ea23b68
+---
+ host/vulkan/vk_decoder_global_state.cpp | 30 +++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index bcfa1151..76294d2e 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -6617,6 +6617,36 @@ class VkDecoderGlobalState::Impl {
+             localAllocInfo.memoryTypeIndex = hostMemoryInfo.index;
+             memoryPropertyFlags = hostMemoryInfo.memoryType.propertyFlags;
+ 
++            // MAS experiment (plan P2.6), ANDROID_EMU_VK_WC_AS_CACHED=1: back guest allocations of
++            // a host-visible, uncached, non-device-local type (NVIDIA's write-combined system
++            // memory) with a host-cached coherent type on the same heap. The guest writes its
++            // uploads straight into this memory through the address space mapping; with the
++            // write-combined type that copy loop takes a third of Star Rail's render thread.
++            static const bool sWcAsCached =
++                gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_WC_AS_CACHED") == "1";
++            constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                                                              VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++            if (sWcAsCached && (memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++                !(memoryPropertyFlags & (VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
++                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) &&
++                !importCbInfoPtr && !importBufferInfoPtr && !createBlobInfoPtr &&
++                !(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE)) {
++                for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i) {
++                    const auto candidate =
++                        physicalDeviceInfo->memoryPropertiesHelper
++                            ->getHostMemoryInfoFromHostMemoryTypeIndex(i);
++                    if (!candidate) break;
++                    if (candidate->memoryType.heapIndex == hostMemoryInfo.memoryType.heapIndex &&
++                        (candidate->memoryType.propertyFlags & kCachedCoherent) == kCachedCoherent &&
++                        !(candidate->memoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
++                        localAllocInfo.memoryTypeIndex = candidate->index;
++                        memoryPropertyFlags = candidate->memoryType.propertyFlags;
++                        break;
++                    }
++                }
++            }
++
+             auto virtioGpuContextIdOpt = getContextIdForDeviceLocked(device);
+             if (!virtioGpuContextIdOpt) {
+                 GFXSTREAM_ERROR("VkDevice:%p missing context id for vkAllocateMemory().");

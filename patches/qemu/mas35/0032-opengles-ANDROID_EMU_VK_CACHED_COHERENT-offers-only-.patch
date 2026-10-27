@@ -1,0 +1,45 @@
+From c75ea7064ddbfc082572a30c0ffe2ec6c96034b3 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 19:45:23 +0200
+Subject: [PATCH 32/60] opengles: ANDROID_EMU_VK_CACHED_COHERENT offers only
+ cached memory as coherent
+
+Experiment for the Star Rail render thread (plan P2.6): with
+ANDROID_EMU_VK_CACHED_COHERENT=1 enable gfxstream's
+VulkanDisableCoherentMemoryAndEmulate, so a guest asking for
+HOST_VISIBLE|HOST_COHERENT memory gets the host's HOST_CACHED type instead of
+NVIDIA's write-combined one. The game's copy loop into that mapping (42% of
+UnityGfxDeviceW in Vulkan mode, libc memcpy 30% under ANGLE) should drop.
+Default behaviour is unchanged.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I3e6f98cd5a9f730a66b39457132c22f2afcadcde
+---
+ android/android-emu/android/opengles.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/android/android-emu/android/opengles.cpp b/android/android-emu/android/opengles.cpp
+index bc4fc1111..65ccdd166 100644
+--- a/android/android-emu/android/opengles.cpp
++++ b/android/android-emu/android/opengles.cpp
+@@ -464,6 +464,20 @@ static int startOpenglesRendererImpl(
+         android::featurecontrol::makeReadOnly(aemuFeature);
+     }
+ 
++    // MAS: ANDROID_EMU_VK_CACHED_COHERENT=1 offers the guest only host-cached memory types as
++    // coherent. Without it a game (or ANGLE) mapping HOST_COHERENT memory gets the host's
++    // write-combined type on NVIDIA, and its uploads through that mapping take a third of the
++    // render thread under WHPX.
++    if (const char* env = getenv("ANDROID_EMU_VK_CACHED_COHERENT")) {
++        if (env[0] == '1') {
++            gfxstreamFeatures.VulkanDisableCoherentMemoryAndEmulate.setEnabled(true);
++            absl::StrAppend(&reportGfxstreamFeatures,
++                            gfxstreamFeatures.VulkanDisableCoherentMemoryAndEmulate.getName(), ", ");
++            dinfo("Vulkan: only host-cached memory is coherent for the guest "
++                  "(ANDROID_EMU_VK_CACHED_COHERENT)");
++        }
++    }
++
+     std::string maxGuestVulkan = "1.3";
+     if (const char* env = getenv("ANDROID_EMU_VK_ENABLE_1_4")) {
+         // Allow force-enabling with env variable for tests

@@ -1,0 +1,202 @@
+{
+  "ModAVD-0.35.0-win-x64.zip": {
+    "bytes": 281536289,
+    "sha256": "a93e9c35b6baa6d8838fc53b5937e36e24b632d08e0869f1747c913eb39b5430"
+  },
+  "ModAVD-0.35.0-sources.zip": {
+    "bytes": 829637443,
+    "sha256": "97cb21272969c3de88695ffd0c70bf99ad9e3481292ba5c4e3a8b460315a4320"
+  },
+  "build-bazel-862d0ec34f27-glib-2.82.2.bcr.5.aemu.tar.xz": {
+    "bytes": 28696,
+    "sha256": "54184dcc00f0d19d381a100e4f58c3c1adce008367ba37df76acf0f3fa1e936e"
+  },
+  "build-bazel-862d0ec34f27.tar.xz": {
+    "bytes": 309548,
+    "sha256": "a52e33edb47422eded635d425e1b2d3185a95f32bca3bd13123c05d583ffbddd"
+  },
+  "device-google-cuttlefish-e14cb71de2fd.tar.xz": {
+    "bytes": 2044196,
+    "sha256": "f8b141900afe4f9e50058c751adb679fb7054333c21d78daa41e8a01cf22d753"
+  },
+  "external-abseil-cpp-000dabbd0c98.tar.xz": {
+    "bytes": 1519640,
+    "sha256": "ccf5ae29b193d8970436e585d63bfb6518d5ec7c2fd45ba0f3679f004729f7fb"
+  },
+  "external-boringssl-54ed1d5a4e7c.tar.xz": {
+    "bytes": 40579424,
+    "sha256": "cdc313cff02d7d05e117b9f0f379a7ab27b1ecab2c28ca89e26b1dfc1a7e6524"
+  },
+  "external-cares-42cf8dee5344.tar.xz": {
+    "bytes": 844204,
+    "sha256": "2d14ec7550ff192835a00fdbdddc1127eada9e57b45beeff8017aa3d5bb9748f"
+  },
+  "external-crashpad-377d2d398368.tar.xz": {
+    "bytes": 1313828,
+    "sha256": "a4d72faad524b7864308af4ecbcfcccaf7eae7a7b9239df9879a3249801cb0ae"
+  },
+  "external-curl-1da4b0427363.tar.xz": {
+    "bytes": 2397368,
+    "sha256": "c2f451d8e4eb0dbfd582a59523ffc4931043af194a49adc5e6af0d31d2c01700"
+  },
+  "external-dtc-793ba05b3773.tar.xz": {
+    "bytes": 178448,
+    "sha256": "ac9f879b6a985fca19da9d5d86aee6bfe80b919f31ab25d1daf388e61b1c7bb8"
+  },
+  "external-glib-9f3ee561eee2.tar.xz": {
+    "bytes": 5367248,
+    "sha256": "4524a069c8ee9d711919f857b5a753aa0352ee6d7d12a768e0c6e9b8b025036e"
+  },
+  "external-google-breakpad-5f320a2fd0f8.tar.xz": {
+    "bytes": 3374148,
+    "sha256": "d6e4b215a19edf62bbc1410de49b8b5a3667ec9f2309d14f8f06f6361b5fe794"
+  },
+  "external-grpc-fea7de5acfa2.tar.xz": {
+    "bytes": 12391976,
+    "sha256": "b31f6509cb1f3aaa2b8141b08d89cf3f8d5a0264fdda027f2a8d86cd3349f6ac"
+  },
+  "external-libpng-7b1535de9846.tar.xz": {
+    "bytes": 1077340,
+    "sha256": "75f6c9bc8c571201554fd8355611a165b006df46c42f454ac9c451fe49bf0151"
+  },
+  "external-libusb-23f123a3f531.tar.xz": {
+    "bytes": 278220,
+    "sha256": "034fb0e5dd4648d2b1039bd910def1de6b35ae4b52e4eef5e222b95cd220903b"
+  },
+  "external-lz4-1733cd0bd466.tar.xz": {
+    "bytes": 270592,
+    "sha256": "5c884c8a61a6255a354fee1e1a72fb754f153599e2c898e00c6f93dcca53e082"
+  },
+  "external-perfetto-37518c39e3db.tar.xz": {
+    "bytes": 9596176,
+    "sha256": "d0d3367a5a26667fd4b4176c09d5da1d06b6cb7c61b3d4b42c534b2b573dc9e9"
+  },
+  "external-protobuf-623d88a75a0b.tar.xz": {
+    "bytes": 5295460,
+    "sha256": "561d48f8e9701139e756fcb7296b21a1dd7f6f0cae90adaad99d38b2597af956"
+  },
+  "external-qemu-a1e36334f096.tar.xz": {
+    "bytes": 47851552,
+    "sha256": "cd8a0e2427fdfde3d50f928fac71a3adb7e92d0cb8f84dda7690e3b92a05b343"
+  },
+  "external-regex-re2-3b76205b4a5a.tar.xz": {
+    "bytes": 294628,
+    "sha256": "b1c932063fde38c1a6eaba0d85d6f372bf01b233664b04b6a0ad55463d694cbf"
+  },
+  "external-tink-f416fdeb6d1e.tar.xz": {
+    "bytes": 680588,
+    "sha256": "32be91205479ba22fa1cd68319409c96c156cc5cbb7ca8dadfe53e68a56c02c2"
+  },
+  "external-tinyobjloader-d16a940067fb.tar.xz": {
+    "bytes": 842176,
+    "sha256": "df0ec94b9e6ae8c65e8ecd4e076602ce400908ec9dc8014ad798ecd16fb84b9f"
+  },
+  "external-webrtc-34c5ae008bf8.tar.xz": {
+    "bytes": 111209624,
+    "sha256": "e2bd74f91d150103363c66a360fbc8f034958ba9db63cd354beec0941efd67b9"
+  },
+  "external-wpa_supplicant_8-db64ab725ace.tar.xz": {
+    "bytes": 2359788,
+    "sha256": "a8ef76fec92ba05c15146e6fe61f1fef37d0b3466d124a98e47500d410ccaf6d"
+  },
+  "external-zlib-5a4f1701693d.tar.xz": {
+    "bytes": 399336,
+    "sha256": "483877ad5714788f1c47fd8185f8f74b52dccf83626b96ba8fdac266d8f3becf"
+  },
+  "ffmpeg-4.4.2.tar.gz": {
+    "bytes": 14361233,
+    "sha256": "3e0ec15ac91e42c48f19e21065ff9048ab77dc8358acc585504a052608a47b3c"
+  },
+  "glib-2.82.2.tar.xz": {
+    "bytes": 5555528,
+    "sha256": "ab45f5a323048b1659ee0fbda5cecd94b099ab3e4b9abf26ae06aeb3e781fd63"
+  },
+  "hardware-google-aemu-b556b00ac5ff.tar.xz": {
+    "bytes": 796852,
+    "sha256": "3544fdd2f1171bc9d82e61a0b37164efc5084e3b1eda558b5dc01bef4bc51c41"
+  },
+  "hardware-google-gfxstream-28437bb6c4b3.tar.xz": {
+    "bytes": 4649732,
+    "sha256": "8ed4d3446e5d0cbe1b39b0dbea861c763256222a806a0d325f11049c69b8bef3"
+  },
+  "libvpx-v1.11.0.tar.gz": {
+    "bytes": 5337765,
+    "sha256": "235e783f3d68ca25d2aa7d58c65622f53f8f892542f6c52c4ac253aa2ce8b0f9"
+  },
+  "libvpx-v1.12.0.tar.xz": {
+    "bytes": 4287724,
+    "sha256": "39215a033cf1327e1b51297f26dfd34e3403948e8f3b0dc017540827fcadb7f0"
+  },
+  "libxml2-2.9.2.tar.gz": {
+    "bytes": 5444991,
+    "sha256": "5178c30b151d044aefb1b08bf54c3003a0ac55c59c866763997529d60770d5bc"
+  },
+  "manifest-aosp-base.xml": {
+    "bytes": 13590,
+    "sha256": "d8291cdbd3c5b4d617a6f3f7d9685427b4f15f842ad3bbd6b4e757bee34276a1"
+  },
+  "manifest-mas35.xml": {
+    "bytes": 13640,
+    "sha256": "4bd3204c5c5326cca9381ef9e5ddfdacec2f05e69e046725d7e06dd714210be3"
+  },
+  "pixman-0.32.4.tar.gz": {
+    "bytes": 817407,
+    "sha256": "80c7ed420e8a3ae749800241e6347c3d55681296cab71384be7969cd9e657e84"
+  },
+  "pixman-0.34.0-patches.tar.xz": {
+    "bytes": 948,
+    "sha256": "d9271c733e8b7cae38039e7e06a5cc1a44532e9527965d4ab7ca279e50893654"
+  },
+  "pixman-0.34.0.tar.gz": {
+    "bytes": 878784,
+    "sha256": "21b6b249b51c6800dc9553b65106e1e37d0e25df942c90531d4c3997aa20a88e"
+  },
+  "qemu-roms-ipxe-0600d3ae94f9.tar.xz": {
+    "bytes": 2587528,
+    "sha256": "58d07835d25422e99428d8b6b9a9197590813fc66e29b263b50cc68ce401463c"
+  },
+  "qemu-roms-seabios-0551a4be2ce5.tar.xz": {
+    "bytes": 458180,
+    "sha256": "913b52c06e38a1562f6751f50f28d52fb2a798c813a00137dd73717820772e71"
+  },
+  "qtbase-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 47142456,
+    "sha256": "df2f4a230be4ea04f9798f2c19ab1413a3b8ec6a80bef359f50284235307b546"
+  },
+  "qtdeclarative-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 34140352,
+    "sha256": "404dd6d2d206bb882ecd6622f0c708c9d6bd724a4d83776e13c49761c159d215"
+  },
+  "qtimageformats-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 1975664,
+    "sha256": "49c026c49a738ed024c072a4b205cdc1235507da4a2d0ea740bd574fff138ccb"
+  },
+  "qtpositioning-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 1456364,
+    "sha256": "ab1a099b2b3e7330398b2ab2b4420a3c32904d74ce4515ebb8e2cb83209d6d8f"
+  },
+  "qtsvg-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 1728084,
+    "sha256": "fc41c47b69ca1f80473cd4b11996394155781105345392961d064d04f95d5bef"
+  },
+  "qtwebchannel-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 214760,
+    "sha256": "129f89a6aba792c47f110582967f4f586457e7b63de3465e5f1dd210ce6bf04a"
+  },
+  "qtwebengine-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 412372456,
+    "sha256": "2314ce9b0dd5f75f629077daad5a5781bac164d508ecff2ebad56ff2bc8745e5"
+  },
+  "qtwebsockets-everywhere-src-6.5.3.tar.xz": {
+    "bytes": 459696,
+    "sha256": "04e2ae17594d56cf2930c99dbd2a97eb88ff514b445c17ff7b86e8978fc7a7c3"
+  },
+  "SOURCES.txt": {
+    "bytes": 5374,
+    "sha256": "7ed5e70a71ceaa811fe18d285f8ba5dc4e581c25d419be6b26d6978bcca46a84"
+  },
+  "tools-netsim-f113660da2a5.tar.xz": {
+    "bytes": 34418208,
+    "sha256": "ca20617d642388a2ae56ff9c09c83baad8e510349478fa13d7cf924e58120d69"
+  }
+}

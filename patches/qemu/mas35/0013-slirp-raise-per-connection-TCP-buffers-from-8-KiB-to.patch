@@ -1,0 +1,40 @@
+From 95cea2248f92b40663086e3c706ae1deaf391037 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 21:13:12 +0200
+Subject: [PATCH 13/60] slirp: raise per-connection TCP buffers from 8 KiB to
+ 128 KiB
+
+With 8 KiB (6 * MSS) slirp can keep only ~8.7 KB in flight towards the
+guest and refills only after the guest ACKs, so a single connection is
+stop-and-wait on the main loop and tops out around 30 MB/s. libslirp
+upstream uses 128 KiB; the advertised window is still clamped to 64 KiB
+because this slirp has no window scaling.
+
+Patch: 0001-slirp-tcp-buffers-128k.diff
+
+Change-Id: I0bfc55b250b2f7278958b623bd3390f685cedcbf
+---
+ slirp/tcp.h | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/slirp/tcp.h b/slirp/tcp.h
+index 174d3d960..0ab2a0de5 100644
+--- a/slirp/tcp.h
++++ b/slirp/tcp.h
+@@ -38,8 +38,14 @@ typedef	uint32_t tcp_seq;
+ #define      PR_SLOWHZ       2               /* 2 slow timeouts per second (approx) */
+ #define      PR_FASTHZ       5               /* 5 fast timeouts per second (not important) */
+ 
+-#define TCP_SNDSPACE 8192
+-#define TCP_RCVSPACE 8192
++/*
++ * MAS: 8 KiB (rounded up to 6 * MSS = 8760 bytes) caps the bytes slirp can
++ * have in flight towards the guest (so_snd) and the window it offers the
++ * guest (so_rcv), so every connection runs stop-and-wait on the main loop.
++ * libslirp upstream uses 128 KiB (external/libslirp/src/tcp.h:44-45).
++ */
++#define TCP_SNDSPACE (1024 * 128)
++#define TCP_RCVSPACE (1024 * 128)
+ 
+ /*
+  * TCP header.

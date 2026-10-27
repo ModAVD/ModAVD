@@ -1,0 +1,87 @@
+From f165da20538383ae5c345eccc1ff8b767405aedf Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 19:51:25 +0200
+Subject: [PATCH 49/60] MAS local: say what -metrics-collection and
+ -crash-report-mode do now
+
+Not for upstream, follows "MAS local: never upload usage metrics" and
+"MAS local: never upload crash reports".
+
+The help of -metrics-collection still said that it sends usage
+statistics and crash reports to Google, and the option list said "send
+them to google play". This build never sends either: the flag behaves
+like -no-metrics. Say so, and point to the crash report help.
+
+-crash-report-mode only listed its values. This build never uploads a
+crash report and never asks about it, keeps the newest 5 dumps in its
+own database, and only "disabled" changes anything (crash reporting
+off); never, always and ask are accepted and have no effect. Say that
+in -help-crash-report-mode and in the option list.
+
+No update check option exists; the -debug-updater tag is still right,
+as android_checkForUpdates() still logs that it skips the check.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Id587770c70b59fa7f78f689cd6b53275a8e43795
+---
+ .../emu/cmdline/include/android/cmdline-options.h |  6 +++---
+ android/emu/cmdline/src/android/help.c            | 15 ++++++++++++---
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/android/emu/cmdline/include/android/cmdline-options.h b/android/emu/cmdline/include/android/cmdline-options.h
+index 074853d3d..81277f3b9 100644
+--- a/android/emu/cmdline/include/android/cmdline-options.h
++++ b/android/emu/cmdline/include/android/cmdline-options.h
+@@ -219,7 +219,7 @@ OPT_FLAG(wait_for_debugger, "Pause on launch and wait for a debugger process to
+ OPT_FLAG(skip_adb_auth, "Skip adb authentication dialogue")
+ 
+ OPT_FLAG(metrics_to_console, "Enable usage metrics and print the messages to stdout")
+-OPT_FLAG(metrics_collection, "Enable usage metrics and send them to google play")
++OPT_FLAG(metrics_collection, "Ignored: this build never uploads usage metrics or crash reports")
+ OPT_PARAM(metrics_to_file, "<file>", "Enable usage metrics and write the messages into specified file")
+ OPT_FLAG(no_metrics, "Disable metrics collection")
+ OPT_FLAG(detect_image_hang, "Enable the detection of system image hangs.")
+@@ -381,8 +381,8 @@ OPT_PARAM(fishtank, "<discovery_file>", "The fishtank ui for emulator <discovery
+ 
+ OPT_PARAM(crash_report_mode,
+           "<option list>",
+-          "Override crash reporting mode. Available options: disabled, never, "
+-          "always, ask")
++          "Crash reports stay on this machine, never uploaded. Options: "
++          "disabled (off); never, always, ask (no effect)")
+ 
+ OPT_FLAG (no_display_layout, "Disable display layout from the environment configuration." )
+ 
+diff --git a/android/emu/cmdline/src/android/help.c b/android/emu/cmdline/src/android/help.c
+index d8fd7ea05..c716b431e 100644
+--- a/android/emu/cmdline/src/android/help.c
++++ b/android/emu/cmdline/src/android/help.c
+@@ -1974,8 +1974,10 @@ static void
+ help_metrics_collection(stralloc_t* out)
+ {
+     PRINTF(
+-    "  Help make the emulator better by sending usage statistics\n"
+-    "  and crash reports to Google upon (graceful) emulator exit.\n"
++    "  Accepted for compatibility only: this build never sends usage\n"
++    "  statistics or crash reports anywhere, and with this flag it behaves\n"
++    "  like \"-no-metrics\". Crash reports stay on this machine, see\n"
++    "  \"-help-crash-report-mode\".\n"
+     "  Mutually exclusive with \"-metrics-to-file <file>\" and \"-metrics-to-console\".\n\n"
+     );
+ }
+@@ -2313,7 +2315,14 @@ static void help_display_modality(stralloc_t* out){
+ 
+ static void help_crash_report_mode(stralloc_t* out) {
+     PRINTF("  Override crash reporting mode. Available options: disabled, "
+-           "never, always, ask\n");
++           "never, always, ask\n\n"
++           "  This build never uploads crash reports and never asks about\n"
++           "  it. Crash dumps are kept in a local database (by default\n"
++           "  emu-crash-<version>-mas.db in the AndroidEmulator temporary\n"
++           "  directory, or ANDROID_EMU_CRASH_REPORTING_DATABASE); the newest\n"
++           "  5 are kept (ANDROID_EMU_CRASH_REPORTS_TO_KEEP, 1 to 100).\n"
++           "  \"disabled\" turns crash reporting off altogether; \"never\",\n"
++           "  \"always\" and \"ask\" are accepted and change nothing.\n");
+ }
+ 
+ static void help_no_display_layout(stralloc_t* out) {

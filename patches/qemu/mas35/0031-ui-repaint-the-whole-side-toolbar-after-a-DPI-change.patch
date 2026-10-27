@@ -1,0 +1,99 @@
+From e89c37f389cf55346fc85dc2aedd0dc9ead07eaf Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 28 Sep 2026 09:08:55 +0200
+Subject: [PATCH 31/60] ui: repaint the whole side toolbar after a DPI change
+
+When the emulator starts while Windows reports a different DPI than later
+(the monitor was off at 96 DPI, then came back at 150%), the fixed-size tool
+window keeps its logical size, so its backing store is never resized and
+keeps the old device size: only the top-left 2/3 of the toolbar is painted
+and the lower buttons are cut off. A real resize of the window repaints it
+fully. After painting, compare the store's paint device with the window size
+at the current device pixel ratio and resize the store once per ratio when
+they differ.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I21ec323e06fc8fb081038bbf58f3677fe00ffc25
+---
+ .../src/android/skin/qt/tool-window.cpp       | 33 +++++++++++++++++++
+ .../src/android/skin/qt/tool-window.h         |  2 ++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 7539bc2c6..444bb5124 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -17,6 +17,7 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <chrono>
++#include <cmath>
+ #include <istream>
+ #include <iterator>
+ #include <memory>
+@@ -25,6 +26,7 @@
+ 
+ #include <QAbstractButton>
+ #include <QApplication>
++#include <QBackingStore>
+ #include <QBitmap>
+ #include <QByteArray>
+ #include <QClipboard>
+@@ -2456,6 +2458,37 @@ void ToolWindow::paintEvent(QPaintEvent*) {
+         p.drawRect(QRect(0, 0, width() - 1, height() - 1));
+     }
+     p.end();
++    rebuildBackingStoreIfStale();
++}
++
++// Qt resizes a window's backing store only when the window's logical size
++// changes. When just the device pixel ratio changes under this fixed-size
++// window (e.g. the emulator started while the monitor was off and Windows
++// reported 96 DPI, then the monitor came back at 150%), the store keeps its old
++// device size and only its top-left part of the toolbar gets painted. Resize
++// the store once the image it paints into no longer matches the window; at
++// most once per ratio, so a mismatch the resize cannot fix never loops.
++void ToolWindow::rebuildBackingStoreIfStale() {
++    QBackingStore* store = backingStore();
++    QPaintDevice* device = store ? store->paintDevice() : nullptr;
++    const qreal dpr = devicePixelRatio();
++    if (!device || dpr == mBackingStoreRebuiltDpr) {
++        return;
++    }
++    if (std::abs(device->width() - width() * dpr) <= 2 &&
++        std::abs(device->height() - height() * dpr) <= 2) {
++        return;
++    }
++    mBackingStoreRebuiltDpr = dpr;
++    QTimer::singleShot(0, this, [this] {
++        if (QBackingStore* store = backingStore()) {
++            // Go through another size first in case a resize to the same
++            // logical size is skipped.
++            store->resize(size() + QSize(1, 1));
++            store->resize(size());
++        }
++        update();
++    });
+ }
+ 
+ void ToolWindow::notifySwitchOnTop() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index 3cfef05b7..82d85a80f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -208,6 +208,7 @@ private:
+     virtual void mousePressEvent(QMouseEvent* event) override;
+     virtual void paintEvent(QPaintEvent*) override;
+     virtual void hideEvent(QHideEvent* event) override;
++    void rebuildBackingStoreIfStale();
+ 
+     EmulatorQtWindow* mEmulatorWindow;
+     android::base::MemberOnDemandT<ExtendedWindowHolder,
+@@ -232,6 +233,7 @@ private:
+     UIEventRecorderPtr mUIEventRecorder;
+     UserActionsCounterPtr mUserActionsCounter;
+     bool mTopSwitched = false;
++    qreal mBackingStoreRebuiltDpr = 0;
+ 
+     bool mIsExiting = false;
+     bool mAskedWhetherToSaveSnapshot = false;

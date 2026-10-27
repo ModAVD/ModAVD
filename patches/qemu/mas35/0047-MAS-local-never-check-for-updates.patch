@@ -1,0 +1,88 @@
+From 4ff7829724c30d29ce11a96672274a832099a9ac Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 14:58:54 +0200
+Subject: [PATCH 47/60] MAS local: never check for updates
+
+Not for upstream: it is the opposite of the upstream design.
+
+At every start vl.c calls android_checkForUpdates(), which ran a
+SystemClockUpdateChecker on a worker thread. At most every 4 hours per
+emulator version (timestamp in emu-update-last-check.ini in the user
+directory) it fetched
+https://dl.google.com/android/repository/repository2-3.xml with libcurl,
+with the installation id, OS, host bitness, emulator and core version in
+the query string. No metrics option turns it off.
+
+This build never checks for updates: upgrades come from whoever
+distributed it. android_checkForUpdates() now only logs one line saying
+so, and DataLoader::load() returns nothing instead of fetching the XML,
+so the Help page of the extended controls (the only other user) shows
+"Unavailable" as the latest version instead of making the request.
+
+Usage metrics and crash reports are covered by "MAS local: never upload
+usage metrics" and "MAS local: never upload crash reports".
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Id0fdc2ef49ee8818f3a9333030d36a8751c475a6
+---
+ .../android/update-check/UpdateChecker.cpp    | 40 +++++--------------
+ 1 file changed, 11 insertions(+), 29 deletions(-)
+
+diff --git a/android/emu/update-check/src/android/update-check/UpdateChecker.cpp b/android/emu/update-check/src/android/update-check/UpdateChecker.cpp
+index 1c9fc3aa7..6db4bdbc0 100644
+--- a/android/emu/update-check/src/android/update-check/UpdateChecker.cpp
++++ b/android/emu/update-check/src/android/update-check/UpdateChecker.cpp
+@@ -65,16 +65,13 @@ static const char kNewerVersionMessage[] =
+ )";
+ 
+ void android_checkForUpdates(const char* coreVersion) {
+-    auto checker =
+-            std::make_unique<android::update_check::SystemClockUpdateChecker>(
+-                    coreVersion);
+-
+-    if (checker->runAsyncCheck()) {
+-        // checker will delete itself after the check in the worker thread
+-        checker.release();
+-    } else {
+-        VERBOSE_PRINT(updater, "UpdateChecker: skipped version check");
+-    }
++    // MAS local: never check for updates. Upstream starts a
++    // SystemClockUpdateChecker here, which at most every 4 hours per version
++    // fetches kVersionUrl with the installation id, OS and emulator version.
++    // Upgrades of this build come from whoever distributed it.
++    (void)coreVersion;
++    dinfo("Update check skipped: this build never checks for updates; "
++          "upgrades come from whoever distributed it.");
+ }
+ 
+ namespace android {
+@@ -112,25 +109,10 @@ public:
+     }
+ 
+     virtual std::string load() override {
+-        std::string xml;
+-        std::string url(kVersionUrl);
+-        if (!mCoreVersion.empty()) {
+-            const auto& id = android::studio::getInstallationId();
+-            url += Uri::FormatEncodeArguments(
+-                    "?tool=emulator&uid=%s&os=%s&osa=%s&", id,
+-                    toString(System::get()->getOsType()),
+-                    toOsArchString(System::get()->getHostBitness()));
+-            // append the fields which may change from run to run: version and
+-            // core version
+-            url += getVersionUriFields();
+-        }
+-        char* error = nullptr;
+-        if (!curl_download(url.c_str(), nullptr, &curlWriteCallback, &xml,
+-                           &error)) {
+-            dwarning("UpdateCheck: Failure: %s", error);
+-            ::free(error);
+-        }
+-        return xml;
++        // MAS local: never fetch kVersionUrl. Besides the startup check
++        // above, the Help page of the extended controls asks for the latest
++        // version through here; with nothing loaded it shows "Unavailable".
++        return {};
+     }
+ 
+     virtual std::string getUniqueDataKey() override {

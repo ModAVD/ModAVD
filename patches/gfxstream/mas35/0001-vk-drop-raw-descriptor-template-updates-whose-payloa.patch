@@ -1,0 +1,105 @@
+From 1a7dcf48a355e333110f462ed04608aa6d58c357 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:20 +0200
+Subject: [PATCH 01/23] vk: drop raw descriptor-template updates whose payload
+ was lost in transit
+
+Patch: 0002-gfxstream-vk-drop-raw-descriptor-template-updates.diff
+
+Change-Id: Ic17408fab89ed80edf57a83d7250e4d86e57dba2
+---
+ host/vulkan/vk_decoder.cpp | 60 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder.cpp b/host/vulkan/vk_decoder.cpp
+index a1479ba0..c1516256 100644
+--- a/host/vulkan/vk_decoder.cpp
++++ b/host/vulkan/vk_decoder.cpp
+@@ -10233,8 +10233,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)descriptorUpdateTemplate, (unsigned long long)pData);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkUpdateDescriptorSetWithTemplate(unboxed_device, descriptorSet,
+-                                                          descriptorUpdateTemplate, pData);
++                    // MAS: raw vkUpdateDescriptorSetWithTemplate carries pData as a single byte (generated
++                    // marshaling of an untyped const void*), so the driver would read the
++                    // descriptor payload out of a 1-byte buffer: access violation inside the
++                    // host Vulkan driver and the emulator dies (Star Rail -force-vulkan on the
++                    // API 34 image, whose guest vkGetDeviceProcAddr hands out the raw encoder
++                    // for the KHR alias). The payload is lost on the wire; drop the call.
++                    static bool sWarned = false;
++                    if (!sWarned) {
++                        sWarned = true;
++                        GFXSTREAM_ERROR(
++                            "Dropping raw vkUpdateDescriptorSetWithTemplate: the guest sent no descriptor "
++                            "payload (guest Vulkan encoder predates the Sized path)");
++                    }
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (m_snapshotsEnabled) {
+@@ -13481,8 +13492,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)set, (unsigned long long)pData);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkCmdPushDescriptorSetWithTemplate(
+-                        unboxed_commandBuffer, descriptorUpdateTemplate, layout, set, pData);
++                    // MAS: raw vkCmdPushDescriptorSetWithTemplate carries pData as a single byte (generated
++                    // marshaling of an untyped const void*), so the driver would read the
++                    // descriptor payload out of a 1-byte buffer: access violation inside the
++                    // host Vulkan driver and the emulator dies (Star Rail -force-vulkan on the
++                    // API 34 image, whose guest vkGetDeviceProcAddr hands out the raw encoder
++                    // for the KHR alias). The payload is lost on the wire; drop the call.
++                    static bool sWarned = false;
++                    if (!sWarned) {
++                        sWarned = true;
++                        GFXSTREAM_ERROR(
++                            "Dropping raw vkCmdPushDescriptorSetWithTemplate: the guest sent no descriptor "
++                            "payload (guest Vulkan encoder predates the Sized path)");
++                    }
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (m_snapshotsEnabled) {
+@@ -15596,8 +15618,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)descriptorUpdateTemplate, (unsigned long long)pData);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkUpdateDescriptorSetWithTemplateKHR(unboxed_device, descriptorSet,
+-                                                             descriptorUpdateTemplate, pData);
++                    // MAS: raw vkUpdateDescriptorSetWithTemplateKHR carries pData as a single byte (generated
++                    // marshaling of an untyped const void*), so the driver would read the
++                    // descriptor payload out of a 1-byte buffer: access violation inside the
++                    // host Vulkan driver and the emulator dies (Star Rail -force-vulkan on the
++                    // API 34 image, whose guest vkGetDeviceProcAddr hands out the raw encoder
++                    // for the KHR alias). The payload is lost on the wire; drop the call.
++                    static bool sWarned = false;
++                    if (!sWarned) {
++                        sWarned = true;
++                        GFXSTREAM_ERROR(
++                            "Dropping raw vkUpdateDescriptorSetWithTemplateKHR: the guest sent no descriptor "
++                            "payload (guest Vulkan encoder predates the Sized path)");
++                    }
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (m_snapshotsEnabled) {
+@@ -15658,8 +15691,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)set, (unsigned long long)pData);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkCmdPushDescriptorSetWithTemplateKHR(
+-                        unboxed_commandBuffer, descriptorUpdateTemplate, layout, set, pData);
++                    // MAS: raw vkCmdPushDescriptorSetWithTemplateKHR carries pData as a single byte (generated
++                    // marshaling of an untyped const void*), so the driver would read the
++                    // descriptor payload out of a 1-byte buffer: access violation inside the
++                    // host Vulkan driver and the emulator dies (Star Rail -force-vulkan on the
++                    // API 34 image, whose guest vkGetDeviceProcAddr hands out the raw encoder
++                    // for the KHR alias). The payload is lost on the wire; drop the call.
++                    static bool sWarned = false;
++                    if (!sWarned) {
++                        sWarned = true;
++                        GFXSTREAM_ERROR(
++                            "Dropping raw vkCmdPushDescriptorSetWithTemplateKHR: the guest sent no descriptor "
++                            "payload (guest Vulkan encoder predates the Sized path)");
++                    }
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (m_snapshotsEnabled) {

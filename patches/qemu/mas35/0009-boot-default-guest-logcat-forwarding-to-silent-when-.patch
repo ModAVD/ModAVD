@@ -1,0 +1,31 @@
+From 1702519008f2b3be67b02251c904dc8cadaa42e0 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:16 +0200
+Subject: [PATCH 09/60] boot: default guest logcat forwarding to silent when
+ -logcat is not given
+
+Patch: 05-logcat-silent-default.diff
+
+Change-Id: I4cdc59027467da41d71070dbecba27a9eadeff8f
+---
+ android/android-emu/android/userspace-boot-properties.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/android/android-emu/android/userspace-boot-properties.cpp b/android/android-emu/android/userspace-boot-properties.cpp
+index 006ea6c8b..37efdf86c 100644
+--- a/android/android-emu/android/userspace-boot-properties.cpp
++++ b/android/android-emu/android/userspace-boot-properties.cpp
+@@ -654,7 +654,12 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
+ 
+             params.push_back({androidbootLogcatProp, param});
+         } else {
+-            params.push_back({androidbootLogcatProp, "*:V"});
++            // MAS: without -logcat the host end of the logcat console (hvc1)
++            // is a null chardev, yet "*:V" made the guest's goldfish-logcat
++            // service format and push every log line through virtio-console.
++            // "*:S" keeps the service but has it write nothing. adb logcat
++            // is unaffected (it reads logd directly).
++            params.push_back({androidbootLogcatProp, "*:S"});
+         }
+     }
+ 

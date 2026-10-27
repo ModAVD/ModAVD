@@ -1,0 +1,44 @@
+From 997ea8845a82a38558a106de13bb438e0c825fed Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Thu, 1 Oct 2026 08:31:45 +0200
+Subject: [PATCH 12/23] MAS: back WC host-visible memory with the cached type
+ by default
+
+ANDROID_EMU_VK_WC_AS_CACHED is now on unless set to 0. Measured 09-30 on
+Star Rail (NVIDIA, WHPX): render thread 93% -> 50% in Vulkan mode, 98% -> 48%
+and 41 -> 60 fps (cap) with ANGLE at the same spot; an 84 min headless SRC run
+had no crash, freeze or GPU fault. Without a cached coherent type on the heap
+an allocation keeps its type.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I95a794ca6e9eca9d115c248ad91aacae4f9e69f6
+---
+ host/vulkan/vk_decoder_global_state.cpp | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 76294d2e..8681fe11 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -6617,13 +6617,15 @@ class VkDecoderGlobalState::Impl {
+             localAllocInfo.memoryTypeIndex = hostMemoryInfo.index;
+             memoryPropertyFlags = hostMemoryInfo.memoryType.propertyFlags;
+ 
+-            // MAS experiment (plan P2.6), ANDROID_EMU_VK_WC_AS_CACHED=1: back guest allocations of
+-            // a host-visible, uncached, non-device-local type (NVIDIA's write-combined system
+-            // memory) with a host-cached coherent type on the same heap. The guest writes its
+-            // uploads straight into this memory through the address space mapping; with the
+-            // write-combined type that copy loop takes a third of Star Rail's render thread.
++            // MAS (plan P2.6), on by default, ANDROID_EMU_VK_WC_AS_CACHED=0 turns it off: back guest
++            // allocations of a host-visible, uncached, non-device-local type (NVIDIA's
++            // write-combined system memory) with a host-cached coherent type on the same heap. The
++            // guest writes its uploads straight into this memory through the address space
++            // mapping; with the write-combined type that copy loop takes a third of Star Rail's
++            // render thread (ANGLE's memcpy almost half). Without a cached coherent type on the
++            // heap the allocation keeps its type.
+             static const bool sWcAsCached =
+-                gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_WC_AS_CACHED") == "1";
++                gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_WC_AS_CACHED") != "0";
+             constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                               VK_MEMORY_PROPERTY_HOST_CACHED_BIT;

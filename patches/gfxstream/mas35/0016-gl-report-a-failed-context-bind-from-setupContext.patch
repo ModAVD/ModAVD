@@ -1,0 +1,197 @@
+From d76efdbece698c6b432f4d2db485d060a85b0fc2 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:42:22 +0200
+Subject: [PATCH 16/23] gl: report a failed context bind from setupContext()
+
+DisplaySurfaceGlContextHelper::setupContext() returns true even when
+eglMakeCurrent() fails. Since "Fix recusion and thread safety of EGL
+context setup" it pushes the thread's previous context on a stack and
+falls through on failure, so that teardownContext() still pops and
+restores it. RecursiveScopedContextBind only calls teardownContext()
+after a successful setupContext(), though, so the fall through also
+made isOk() always true: no caller can tell that the helper's context
+is not current, and GL calls then go to no context, or to the one the
+thread had before.
+
+EmulationGl::updateYUVTextures() does not check isOk() at all. When
+the bind fails, glGetGlobalTexName() returns 0 for every plane and the
+updater gets texture 0. We hit this on Windows with an injected
+wglMakeCurrent() failure, standing in for ERROR_BUSY while the context
+is current on another thread, with the Android Emulator's CUDA video
+decoder: cuGraphicsGLRegisterImage() failed on texture 0, the updater
+then copied the frame into an uninitialized CUarray, and nvcuda
+faulted in that very update. That ran on a vCPU thread, so the whole
+emulator went down. The uninitialized copy is being fixed in the
+emulator; the frame is lost either way, and the updater should not
+run without the context.
+
+Return whether the bind worked, and have RecursiveScopedContextBind
+call teardownContext() after a failed setupContext() too, so that the
+previous context is restored as before. Callers that check isOk()
+already, e.g. ColorBufferGl and BufferGl, now skip their GL work when
+the bind fails instead of issuing it to no context or to the wrong
+one. For ~ColorBufferGl() that means leaking the buffer's objects
+when the bind fails, which is what its check was written to do.
+
+Make updateYUVTextures() drop the update when the bind fails. That can
+happen on every frame, so log the first failure of a run and then
+every 300th one. destroyYUVTextures() did not check the bind either;
+skip the deletion there rather than deleting the names in whatever
+context is current.
+
+Test: during CUDA H.264 decode, a debugger makes the pbuffer bind in
+      updateYUVTextures() fail (wglMakeCurrent() with an invalid
+      HGLRC): that update is dropped without calling the updater, one
+      error is logged and the following updates run normally. 20
+      failures in a row log one error, and one info line once the
+      bind works again.
+Test: a failed bind on a render thread that had its own context
+      current (ERROR_BUSY, during rcCompose) is still followed by
+      teardownContext() binding that context again.
+Test: 400 CUDA and 200 ffmpeg decode sessions as for the commits
+      above, with no abort and no error logged.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Ic31c69273af7129a72930d2838dddc75fd49e8f7
+---
+ host/gl/context_helper.h       | 17 ++++++++++++++---
+ host/gl/display_surface_gl.cpp |  8 ++++++--
+ host/gl/emulation_gl.cpp       | 29 +++++++++++++++++++++++++++++
+ 3 files changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/host/gl/context_helper.h b/host/gl/context_helper.h
+index c5804214..06ca6d91 100644
+--- a/host/gl/context_helper.h
++++ b/host/gl/context_helper.h
+@@ -25,6 +25,10 @@ class ContextHelper {
+   public:
+     ContextHelper() = default;
+     virtual ~ContextHelper() = default;
++    // Saves the calling thread's current context and makes the helper's
++    // context current. Returns false if the context could not be made
++    // current; GL calls must then not be made. teardownContext() restores
++    // the saved context and is also needed after a failed setupContext().
+     virtual bool setupContext() = 0;
+     virtual void teardownContext() = 0;
+     virtual bool isBound() const = 0;
+@@ -44,7 +48,10 @@ class ContextHelper {
+ class RecursiveScopedContextBind {
+   public:
+     RecursiveScopedContextBind(ContextHelper* helper) : mHelper(helper) {
+-        mIsBound = helper ? helper->setupContext() : false;
++        if (helper) {
++            mIsBound = helper->setupContext();
++            mNeedsTeardown = true;
++        }
+     }
+ 
+     bool isOk() const { return mIsBound; }
+@@ -52,15 +59,19 @@ class RecursiveScopedContextBind {
+     ~RecursiveScopedContextBind() { release(); }
+ 
+     void release() {
+-        if (mIsBound) {
++        if (mNeedsTeardown) {
+             mHelper->teardownContext();
+-            mIsBound = false;
++            mNeedsTeardown = false;
+         }
++        mIsBound = false;
+     }
+ 
+   private:
+     ContextHelper* mHelper;
+     bool mIsBound = false;
++    // Also set when setupContext() failed: teardownContext() then restores
++    // the context the thread had before.
++    bool mNeedsTeardown = false;
+ };
+ 
+ }  // namespace gl
+diff --git a/host/gl/display_surface_gl.cpp b/host/gl/display_surface_gl.cpp
+index 3ad225bc..20281cb7 100644
+--- a/host/gl/display_surface_gl.cpp
++++ b/host/gl/display_surface_gl.cpp
+@@ -69,6 +69,7 @@ class DisplaySurfaceGlContextHelper : public ContextHelper {
+                             currentDrawSurface != mSurface ||
+                             currentReadSurface != mSurface);
+ 
++        bool bound = true;
+         if (needsUpdate) {
+             if (!previousContexts.empty()) {
+                 GFXSTREAM_ERROR(
+@@ -83,7 +84,10 @@ class DisplaySurfaceGlContextHelper : public ContextHelper {
+                 // Legacy swiftshader logspam on exit with this line.
+                 GFXSTREAM_DEBUG("Failed to make display surface context current: %d",
+                                 s_egl.eglGetError());
+-                // Fall through to allow adding previous context to stack.
++                // Still add the previous context to the stack, so that
++                // teardownContext() restores it, but report the failure:
++                // GL calls made now would not reach this context.
++                bound = false;
+             }
+         }
+ 
+@@ -91,7 +95,7 @@ class DisplaySurfaceGlContextHelper : public ContextHelper {
+             {.context = currentContext,
+              .readSurface = currentReadSurface,
+              .drawSurface = currentDrawSurface});
+-        return true;
++        return bound;
+     }
+ 
+     void teardownContext() override {
+diff --git a/host/gl/emulation_gl.cpp b/host/gl/emulation_gl.cpp
+index 51570f9d..8d40d642 100644
+--- a/host/gl/emulation_gl.cpp
++++ b/host/gl/emulation_gl.cpp
+@@ -15,6 +15,7 @@
+ #include "emulation_gl.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cstring>
+ #include <optional>
+ #include <vector>
+@@ -1592,6 +1593,13 @@ void EmulationGl::destroyYUVTextures(uint32_t type, uint32_t count, uint32_t* te
+     auto format = *formatOpt;
+ 
+     RecursiveScopedContextBind bind(getPbufferSurfaceContextHelper());
++    if (!bind.isOk()) {
++        // The names would be deleted in whatever context the thread has
++        // current instead. Leak the textures rather than risk that.
++        GFXSTREAM_ERROR("%s: could not bind the pbuffer context, not deleting %u texture sets",
++                        __func__, count);
++        return;
++    }
+     if (format == GfxstreamFormat::NV12 || format == GfxstreamFormat::NV21) {
+         s_gles2.glDeleteTextures(2 * count, textures);
+     } else if (format == GfxstreamFormat::YV12 || format == GfxstreamFormat::YV21) {
+@@ -1608,6 +1616,27 @@ void EmulationGl::updateYUVTextures(uint32_t type, uint32_t* textures, void* pri
+     auto format = *formatOpt;
+ 
+     RecursiveScopedContextBind bind(getPbufferSurfaceContextHelper());
++    // Without the context, glGetGlobalTexName() does not return the
++    // textures' global names (it returns 0 when no context is current), and
++    // a CUDA updater then fails to register the textures. Drop this update;
++    // the next frame tries again. As that can happen on every frame, log
++    // the first failure of a run and then every kLogInterval-th one.
++    constexpr uint32_t kLogInterval = 300;
++    static std::atomic<uint32_t> sBindFailures{0};
++    if (!bind.isOk()) {
++        const uint32_t failures = sBindFailures.fetch_add(1) + 1;
++        if (failures == 1 || failures % kLogInterval == 0) {
++            GFXSTREAM_ERROR(
++                "%s: could not bind the pbuffer context, dropping the update "
++                "(failure %u in a row, logged every %u)",
++                __func__, failures, kLogInterval);
++        }
++        return;
++    }
++    if (const uint32_t failures = sBindFailures.exchange(0); failures > 1) {
++        GFXSTREAM_INFO("%s: bound the pbuffer context again after %u dropped updates", __func__,
++                       failures);
++    }
+ 
+     yuv_updater_t updater = (yuv_updater_t)func;
+     uint32_t gtextures[3] = {0, 0, 0};

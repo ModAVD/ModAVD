@@ -1,0 +1,112 @@
+From 33f28079a27e6ecd08b7e9ddee4b82e8512abc30 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:20 +0200
+Subject: [PATCH 02/23] gles: recompile ESSL 3.10 compute shaders as GLSL 4.30
+ when the host rejects them
+
+Patch: 0003-gfxstream-gles-compute-essl310-fallback-glsl430.diff
+
+Change-Id: I966241490bd9194b651d59bd58bd2d51e671e7b2
+---
+ .../gl/glestranslator/gles_v2/gles_v2_imp.cpp | 65 +++++++++++++++++++
+ .../gl/glestranslator/gles_v2/shader_parser.h |  4 ++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/host/gl/glestranslator/gles_v2/gles_v2_imp.cpp b/host/gl/glestranslator/gles_v2/gles_v2_imp.cpp
+index b22bf1a9..06df2c42 100644
+--- a/host/gl/glestranslator/gles_v2/gles_v2_imp.cpp
++++ b/host/gl/glestranslator/gles_v2/gles_v2_imp.cpp
+@@ -876,6 +876,44 @@ GL_APICALL void  GL_APIENTRY glColorMask(GLboolean red, GLboolean green, GLboole
+     ctx->dispatcher().glColorMask(red,green,blue,alpha);
+ }
+ 
++// MAS: ESSL 3.10 shaders go to the host driver untranslated (ARB_ES3_1_compatibility,
++// see ANGLEShaderParser::translate). NVIDIA's ES front end is stricter than mobile
++// drivers: it rejects implicit int->uint conversions (C7011) and image formats such
++// as rg32f outside the ES core set (C7613). Honkai: Star Rail ships compute shaders
++// with both (HLSLcc output); 8 of them failed to compile and the game crashed a few
++// seconds later in its render thread. A compute program has a single stage, so it
++// can be compiled as desktop GLSL 4.30 instead without version-mixing problems.
++static bool sRewriteEssl310ToGlsl430(const std::string& in, std::string* out) {
++    const size_t v = in.find("#version");
++    if (v == std::string::npos) return false;
++    const size_t eol = in.find('\n', v);
++    if (eol == std::string::npos) return false;
++    const std::string versionLine = in.substr(v, eol - v);
++    if (versionLine.find("310") == std::string::npos ||
++        versionLine.find("es") == std::string::npos) {
++        return false;
++    }
++    std::string res = in.substr(0, v) + "#version 430\n";
++    size_t pos = eol + 1;
++    while (pos < in.size()) {
++        size_t next = in.find('\n', pos);
++        if (next == std::string::npos) next = in.size();
++        const std::string line = in.substr(pos, next - pos);
++        const size_t first = line.find_first_not_of(" \t");
++        // ES-only extensions (GL_EXT_texture_buffer, GL_OES_shader_image_atomic, ...)
++        // are core in 4.30 or unknown to the desktop compiler; "require" would fail.
++        const bool esExtension =
++                first != std::string::npos && line.compare(first, 10, "#extension") == 0 &&
++                (line.find("GL_EXT_") != std::string::npos ||
++                 line.find("GL_OES_") != std::string::npos);
++        res += esExtension ? "// " + line : line;
++        res += "\n";
++        pos = next + 1;
++    }
++    *out = res;
++    return true;
++}
++
+ GL_APICALL void  GL_APIENTRY glCompileShader(GLuint shader){
+     GET_CTX();
+     if(ctx->shareGroup().get()) {
+@@ -902,6 +940,33 @@ GL_APICALL void  GL_APIENTRY glCompileShader(GLuint shader){
+             sp->setInfoLog(infoLog);
+ 
+             ctx->dispatcher().glGetShaderiv(globalShaderName,GL_COMPILE_STATUS,&compileStatus);
++
++            std::string desktopSrc;
++            if (compileStatus == GL_FALSE && !isGles2Gles() &&
++                sp->getType() == GL_COMPUTE_SHADER &&
++                sRewriteEssl310ToGlsl430(sp->parsedLines()[0], &desktopSrc)) {
++                const GLchar* esSrc = sp->parsedLines()[0];
++                const std::string esCopy(esSrc);
++                const GLchar* p = desktopSrc.c_str();
++                ctx->dispatcher().glShaderSource(globalShaderName, 1, &p, NULL);
++                ctx->dispatcher().glCompileShader(globalShaderName);
++                GLint retryStatus = GL_FALSE;
++                ctx->dispatcher().glGetShaderiv(globalShaderName, GL_COMPILE_STATUS, &retryStatus);
++                if (retryStatus != GL_FALSE) {
++                    GFXSTREAM_INFO("glCompileShader: compute shader %u compiled as GLSL 430 "
++                                   "after the ESSL 310 compile failed", shader);
++                    sp->setParsedSrc(desktopSrc);
++                    infoLog = new GLchar[1];
++                    infoLog[0] = 0;
++                    sp->setInfoLog(infoLog);
++                    compileStatus = retryStatus;
++                } else {
++                    // Keep the original source and its info log.
++                    const GLchar* orig = esCopy.c_str();
++                    ctx->dispatcher().glShaderSource(globalShaderName, 1, &orig, NULL);
++                    ctx->dispatcher().glCompileShader(globalShaderName);
++                }
++            }
+             sp->setCompileStatus(compileStatus == GL_FALSE ? false : true);
+         } else {
+             ctx->dispatcher().glCompileShader(globalShaderName);
+diff --git a/host/gl/glestranslator/gles_v2/shader_parser.h b/host/gl/glestranslator/gles_v2/shader_parser.h
+index c0549472..933051ff 100644
+--- a/host/gl/glestranslator/gles_v2/shader_parser.h
++++ b/host/gl/glestranslator/gles_v2/shader_parser.h
+@@ -35,6 +35,10 @@ public:
+             const GLint* length);
+     const std::string& getOriginalSrc() const;
+     const GLchar** parsedLines();
++    // MAS: replace the source handed to the host driver (used by the ESSL 310
++    // compute -> GLSL 430 fallback in glCompileShader, so snapshot restore
++    // recompiles the same text).
++    void setParsedSrc(const std::string& src) { m_parsedSrc = src; }
+     void           clear();
+     GLenum         getType();
+ 

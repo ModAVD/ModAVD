@@ -1,0 +1,224 @@
+From 113840c02c3ebde7ddbad21b953aa610be81e144 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 01:05:50 +0200
+Subject: [PATCH 39/60] MAS local: never upload crash reports
+
+Not for upstream: it is the opposite of the upstream design.
+
+Uploads used to depend on the consent provider: -metrics-collection,
+-crash-report-mode always, or a saved crashReportPreference of 1 (Qt
+settings, registry key HKCU\Software\Android Open Source
+Project\Emulator\set) all gave ALWAYS, and the reports were then sent to
+Google. This build keeps reports on the machine only, whatever the
+options and settings say:
+
+- crashpad_handler is started without an upload URL, so it never starts
+  its upload thread;
+- uploadEntries() no longer consults the consent provider (no dialog),
+  forces uploads off in the database settings and only keeps the newest
+  reports locally, as with no consent before;
+- ProcessPendingReport() refuses without touching the report or the
+  network, and crashreport -u refuses before recording an upload
+  request.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I53b681b12f1830aa75fdd4d3dc6d0be167e6ee98
+---
+ .../android/crashreport/CrashSytemInit.cpp    | 110 +++---------------
+ .../android/crashreport/CrashUploadTool.cpp   |   7 ++
+ .../src/android/crashreport/CrashUploader.cpp |   6 +
+ 3 files changed, 31 insertions(+), 92 deletions(-)
+
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp b/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
+index 51270f0b5..0f3ec216e 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
+@@ -58,11 +58,8 @@ using crashpad::CrashReportDatabase;
+ namespace android {
+ namespace crashreport {
+ 
+-#ifdef NDEBUG
+-constexpr char CrashURL[] = "https://clients2.google.com/cr/report";
+-#else
+-constexpr char CrashURL[] = "https://clients2.google.com/cr/staging_report";
+-#endif
++// MAS: no crash upload URL here on purpose, see initialize() and
++// uploadEntries().
+ // The crashpad handler binary, as shipped with the emulator.
+ const constexpr char kCrashpadHandler[] = "crashpad_handler";
+ 
+@@ -110,9 +107,11 @@ public:
+         args.emplace_back(
+                 absl::StrCat("--monitor-pid=", System::get()->getCurrentProcessId()));
+ #endif
++        // MAS: no upload URL. crashpad_handler then never starts its upload
++        // thread, so nothing it writes can leave this machine.
+         bool active = mClient->StartHandler(
+-                handler_path, mDatabasePath, metrics_path, CrashURL, annotations,
+-               std::move(args) , true, false);
++                handler_path, mDatabasePath, metrics_path, std::string(),
++                annotations, std::move(args), true, false);
+ 
+         mDatabase = CrashReportDatabase::Initialize(mDatabasePath);
+         mInitialized = active && mDatabase;
+@@ -144,60 +143,24 @@ public:
+               message, mInitialized ? "enabled" : "disabled",
+               System::get()->getCurrentProcessId());
+ 
+-        auto collect = mConsentProvider->consentRequired();
+-        bool areUploadsEnabled = (collect == CrashConsent::Consent::ALWAYS);
+-        if (mDatabase && areUploadsEnabled) {
+-            dinfo("Crash reports will be automatically uploaded to: %s",
+-                  CrashURL);
+-            mDatabase->GetSettings()->SetUploadsEnabled(areUploadsEnabled);
++        // MAS: this build never uploads a crash report and never asks about
++        // it, whatever -crash-report-mode, -metrics-collection or the saved
++        // crash report preference say: the consent provider is not consulted.
++        // Keep the newest kLocalReportsToKeep minidumps on disk for the user
++        // to collect and drop only older ones.
++        dinfo("Crash reports stay on this machine: this build never uploads "
++              "them, whatever the crash report settings say.");
++        if (mDatabase->GetSettings()) {
++            mDatabase->GetSettings()->SetUploadsEnabled(false);
+         }
+ 
+-        // Get consent for any report that was not yet uploaded.
+-        std::vector<crashpad::UUID> toRemove;
+         std::vector<CrashReportDatabase::Report> reports;
+         std::vector<CrashReportDatabase::Report> pendingReports;
+         mDatabase->GetCompletedReports(&reports);
+         mDatabase->GetPendingReports(&pendingReports);
+         reports.insert(reports.end(), pendingReports.begin(),
+                        pendingReports.end());
+-
+-        // MAS: without explicit upload consent, never ask (no dialog), never
+-        // upload and never delete a report just for lack of consent. Keep the
+-        // newest kLocalReportsToKeep minidumps on disk for the user to collect
+-        // and drop only older ones.
+-        if (!areUploadsEnabled) {
+-            keepReportsLocally(reports);
+-            return;
+-        }
+-
+-        for (const auto& report : reports) {
+-            if (!report.uploaded) {
+-                auto status = mConsentProvider->requestConsent(report);
+-                switch (status) {
+-                    case CrashConsent::ReportAction::UPLOAD_REMOVE: {
+-                        std::thread upload(
+-                                [this, report]() { processReport(report); });
+-                        upload.detach();
+-                        break;
+-                    }
+-                    case CrashConsent::ReportAction::REMOVE:
+-                        dinfo("No consent for crashreport %s, deleting.",
+-                              report.uuid.ToString().c_str());
+-                        toRemove.push_back(report.uuid);
+-                        break;
+-                    case CrashConsent::ReportAction::UNDECIDED_KEEP:
+-                        dinfo("Failed to get consent, keeping %s for now.",
+-                              report.id.c_str());
+-                        break;
+-                }
+-            } else {
+-                toRemove.push_back(report.uuid);
+-            }
+-        }
+-
+-        for (const auto& report : toRemove) {
+-            mDatabase->DeleteReport(report);
+-        }
++        keepReportsLocally(reports);
+     }
+ 
+     void setConsentProvider(CrashConsent* replacement) {
+@@ -242,8 +205,8 @@ private:
+             std::string path = local[i].file_path.value();
+ #endif
+             if (i < keep) {
+-                dinfo("No upload consent, keeping crash report %s locally "
+-                      "(not uploaded): %s",
++                dinfo("Keeping crash report %s on this machine (never "
++                      "uploaded): %s",
+                       local[i].uuid.ToString().c_str(), path.c_str());
+             } else {
+                 dinfo("Keeping only the newest %d crash reports, removing "
+@@ -258,43 +221,6 @@ private:
+         }
+     }
+ 
+-    void processReport(const CrashReportDatabase::Report& report) {
+-        using namespace std::chrono_literals;
+-        std::vector<std::chrono::seconds> backoff{0s,  2s,  4s,   8s,  16s,
+-                                                  32s, 64s, 128s, 256s};
+-        auto status = UploadResult::kSuccess;
+-        auto wait = backoff.begin();
+-
+-        mDatabase->GetSettings()->SetUploadsEnabled(true);
+-        mDatabase->RequestUpload(report.uuid);
+-        CrashReportDatabase::Report updatedReport;
+-
+-        do {
+-            std::this_thread::sleep_for(*wait);
+-            mDatabase->LookUpCrashReport(report.uuid, &updatedReport);
+-            dinfo("Attempting to send crashreport %s to "
+-                  "%s",
+-                  updatedReport.uuid.ToString().c_str(), CrashURL);
+-            if (!updatedReport.uploaded) {
+-                status = ProcessPendingReport(mDatabase.get(), report);
+-            } else {
+-                status = UploadResult::kSuccess;
+-            }
+-            ++wait;
+-        } while (status == UploadResult::kRetry && wait != backoff.end());
+-
+-        if (status == UploadResult::kSuccess) {
+-            // We should have a report id, fetch it!
+-
+-            if (mDatabase->LookUpCrashReport(report.uuid, &updatedReport) ==
+-                CrashReportDatabase::OperationStatus::kNoError) {
+-                mConsentProvider->reportCompleted(updatedReport);
+-            }
+-        } else {
+-            dwarning("Failed to send report..");
+-        }
+-    }
+-
+     DISALLOW_COPY_AND_ASSIGN(CrashSystem);
+ 
+     std::unique_ptr<crashpad::CrashpadClient> mClient;
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp b/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
+index fec8206d6..9b32ba318 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashUploadTool.cpp
+@@ -324,6 +324,13 @@ static bool DeleteCrashReports(
+ 
+ static bool UploadCrashReports(
+         std::shared_ptr<CrashReportDatabase> crashDatabase) {
++    // MAS: this build never uploads crash reports. Leave the database alone
++    // (no upload request is recorded) and point at the local files instead.
++    fprintf(stderr,
++            "This build never uploads crash reports. Use -l to list the "
++            "local minidumps.\n");
++    return false;
++
+     std::vector<crashpad::CrashReportDatabase::Report> pendingReports;
+     std::vector<crashpad::CrashReportDatabase::Report> reports;
+ 
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashUploader.cpp b/android/emu/crashreport/src/android/crashreport/CrashUploader.cpp
+index a06ac8d13..dfa60dfc3 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashUploader.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashUploader.cpp
+@@ -154,6 +154,12 @@ static UploadResult UploadReport(
+ 
+ UploadResult ProcessPendingReport(CrashReportDatabase* database_,
+                                   const CrashReportDatabase::Report& report) {
++    // MAS: this build never uploads crash reports. Refuse before touching the
++    // report or the network, so the report stays in the database as it is.
++    printf("Not uploading crash report %s: this build never uploads crash "
++           "reports.\n",
++           report.uuid.ToString().c_str());
++    return UploadResult::kPermanentFailure;
+ #ifdef __APPLE__
+     crashpad::RecordFileLimitAnnotation();
+ #endif

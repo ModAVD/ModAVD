@@ -1,0 +1,96 @@
+From d61e5771db271d857acfa4b39fd929d49d4b4d93 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 20:50:59 +0200
+Subject: [PATCH 52/60] media: return textures of frames dropped while loading
+ a snapshot
+
+When a snapshot is loaded, the H.264, HEVC and VP8/VP9 decoders replay
+the packets saved since the last key frame through oneShotDecode(),
+which receives the decoded frames and drops them. load() only tells
+the video helper to ignore its output when mVideoHelper is set. With
+the CUDA decoder the helper is still mHwVideoHelper at that point (the
+VP8/VP9 decoder moves it to mVideoHelper only in the first
+try_decode()), so in GPU texture mode every replayed frame takes a
+Y/UV texture pair from the pool, and dropping the frame leaks the pair
+until the GL share group goes away: about 3 MB per frame at 1080p.
+
+Hand the pairs of the dropped frames back to the pool. Frames decoded
+into a byte buffer carry no texture names and are dropped as before.
+Returning the pairs works whichever helper produced the frames and
+however the decoders shuffle them, so it is used rather than switching
+the hardware helper to ignore its output during the replay.
+
+The VP8/VP9 oneShotDecode() decodes every packet twice, through
+decode_internal() and again through mVideoHelper->decode(), so it
+leaked two pairs per replayed packet. This change leaves the double
+decode alone.
+
+Test: snapshots saved while a guest decoded 1080p video with the CUDA
+      decoder in GPU texture mode, then loaded, with a debugger
+      counting. Without this change the VP9 decoder replayed 38
+      packets, uploaded 76 frames into textures and returned none of
+      the pairs; with it, 37 packets, 74 frames, 74 pairs returned.
+      H.264 replays with it: 2 and 3 frames, all returned.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I9067b7b50f6260a2210d621c5873d3dd64628a5d
+---
+ .../src/android/emulation/MediaH264DecoderGeneric.cpp      | 7 +++++++
+ .../src/android/emulation/MediaHevcDecoderGeneric.cpp      | 7 +++++++
+ .../media/src/android/emulation/MediaVpxDecoderGeneric.cpp | 7 +++++++
+ 3 files changed, 21 insertions(+)
+
+diff --git a/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
+index 9c4398078..8507b727f 100644
+--- a/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaH264DecoderGeneric.cpp
+@@ -481,6 +481,13 @@ void MediaH264DecoderGeneric::oneShotDecode(const uint8_t* data,
+         if (!success) {
+             break;
+         }
++        // The frame is dropped. If it was decoded to GPU textures, its pair
++        // came from the pool; hand it back, or the textures leak.
++        if (frame.texture.size() >= 2 && frame.texture[0] > 0 &&
++            frame.texture[1] > 0) {
++            mRenderer.putTextureFrame(
++                    TextureFrame{frame.texture[0], frame.texture[1]});
++        }
+     }
+ }
+ 
+diff --git a/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
+index 6a2e4ce1a..11ed2e868 100644
+--- a/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaHevcDecoderGeneric.cpp
+@@ -504,6 +504,13 @@ void MediaHevcDecoderGeneric::oneShotDecode(const uint8_t* data,
+         if (!success) {
+             break;
+         }
++        // The frame is dropped. If it was decoded to GPU textures, its pair
++        // came from the pool; hand it back, or the textures leak.
++        if (frame.texture.size() >= 2 && frame.texture[0] > 0 &&
++            frame.texture[1] > 0) {
++            mRenderer.putTextureFrame(
++                    TextureFrame{frame.texture[0], frame.texture[1]});
++        }
+     }
+ }
+ 
+diff --git a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+index 74dd899bb..12085d8cf 100644
+--- a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+@@ -403,6 +403,13 @@ void MediaVpxDecoderGeneric::oneShotDecode(const uint8_t* data,
+         if (!success) {
+             break;
+         }
++        // The frame is dropped. If it was decoded to GPU textures, its pair
++        // came from the pool; hand it back, or the textures leak.
++        if (frame.texture.size() >= 2 && frame.texture[0] > 0 &&
++            frame.texture[1] > 0) {
++            mRenderer.putTextureFrame(
++                    TextureFrame{frame.texture[0], frame.texture[1]});
++        }
+     }
+ }
+ 

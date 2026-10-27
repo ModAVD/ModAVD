@@ -1,0 +1,40 @@
+From 031863a2e1567c64a494f3e2b9e5f78e2095c7e4 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 21:19:00 +0200
+Subject: [PATCH 33/60] snapshot: log the command-line cold boot notice instead
+ of a toast
+
+With -no-snapshot-load (and -no-snapshot, which implies it) Quickboot::load()
+put "Emulator is performing a full startup..." over the window on every
+start. A launcher that always cold boots gets the same toast each time and
+nobody reads it. Keep the text as an INFO log line (the window agent used to
+log it as USER_INFO) and drop the window message.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I0f094abc27b81b9ddcf64112a7858269a0fd1bb0
+---
+ android/android-emu/android/snapshot/Quickboot.cpp | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/android/android-emu/android/snapshot/Quickboot.cpp b/android/android-emu/android/snapshot/Quickboot.cpp
+index 28f9d0f2d..5d8003974 100644
+--- a/android/android-emu/android/snapshot/Quickboot.cpp
++++ b/android/android-emu/android/snapshot/Quickboot.cpp
+@@ -343,12 +343,11 @@ bool Quickboot::load(const char* name) {
+                 ->settings->android_cmdLineOptions()
+                 ->no_snapshot_load) {
+         if (!getConsoleAgents()->settings->hw()->fastboot_forceColdBoot) {
+-            // Only display a message if this is a one-time-like thing (command
+-            // line), and not an AVD option.
+-            mWindow.showMessage(
+-                    "Emulator is performing a full startup. This may take upto "
+-                    "two minutes, or more.",
+-                    WINDOW_MESSAGE_OK, kDefaultMessageTimeoutMs);
++            // Only log this for a one-time-like thing (command line), and not
++            // an AVD option. No window message: a launcher that always passes
++            // -no-snapshot-load would get the same toast on every start.
++            dinfo("Emulator is performing a full startup. This may take upto "
++                  "two minutes, or more.");
+         }
+         reportFailedLoad(
+                 getConsoleAgents()->settings->hw()->fastboot_forceColdBoot

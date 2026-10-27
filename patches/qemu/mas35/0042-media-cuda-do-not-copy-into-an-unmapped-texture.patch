@@ -1,0 +1,156 @@
+From 13819c2a024fae6710f4dc667cde1836e50859aa Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:39:26 +0200
+Subject: [PATCH 42/60] media/cuda: do not copy into an unmapped texture
+
+media_cuda_copy_decoded_frame() ignored the result of
+cuGraphicsGLRegisterImage(), cuGraphicsMapResources() and
+cuGraphicsSubResourceGetMappedArray(); NVDEC_API_CALL discards the
+error unless MEDIA_CUVID_DEBUG is set at build time. If any of them
+failed, |texture_ptr| was never written and its indeterminate value
+was passed to cuMemcpy2D() as dstArray, and map/unmap/unregister were
+called on a resource that was never registered.
+
+Registration fails, for example, when the GL context that owns the
+texture is not on the CUDA device (hybrid GPU laptops where GL runs on
+the iGPU), when the pbuffer context could not be bound, or after a
+device reset.
+
+The pbuffer case has been seen to crash the emulator. Forcing the
+wglMakeCurrent() behind the context bind in
+EmulationGl::updateYUVTextures() to fail with a debugger, during guest
+H.264 decode on the CUDA path, is enough: the bind still reports
+success, glGetGlobalTexName() returns 0 for both planes,
+cuGraphicsGLRegisterImage() on texture 0 fails and leaves the resource
+NULL, and cuMemcpy2D() gets stale stack data as dstArray. It faulted
+in nvcuda64.dll on a non-canonical address (access violation) on the
+vCPU thread, on the first frame after the failed bind (abridged):
+
+  nvcuda64.dll!cuMemcpy2D_v2
+  media_cuda_copy_decoded_frame (inlined, Y plane)
+  media_cuda_utils_nv12_updater
+  gfxstream::host::gl::EmulationGl::updateYUVTextures
+  android::emulation::MediaTexturePool::saveDecodedFrameToTexture
+  android::emulation::MediaCudaVideoHelper::HandlePictureDisplay
+  ...
+  qemu_whpx_cpu_thread_fn
+
+A gfxstream change makes updateYUVTextures() drop the update when the
+bind fails, so that path no longer gets here; registration can still
+fail for the other reasons above.
+
+Initialize the handles, stop at the first failed step and release only
+what was acquired. Report the first failure once so the cause is visible
+in release builds. Also zero-initialize the TextureFrame that
+HandlePictureDisplay() stores in byte-buffer mode.
+
+Test: H.264 1080p decode with CUDA on an NVIDIA host: 400 sessions,
+      no warning, no error
+Test: a debugger makes cuGraphicsGLRegisterImage() fail for the Y
+      plane of one frame during CUDA decode: one warning, no Map,
+      GetMappedArray, Unmap, Unregister or cuMemcpy2D for that plane,
+      the UV plane and later frames are copied as usual, no crash.
+      Making cuGraphicsMapResources() fail 100 times calls only
+      Unregister for the plane, making
+      cuGraphicsSubResourceGetMappedArray() fail 100 times calls Unmap
+      and Unregister; GPU local memory and handle count stay flat.
+Test: before this change, the failed bind above crashed in
+      nvcuda64.dll on the first frame (minidump: the resource NULL,
+      dstArray a stale stack value)
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I3e69c8d622e950437b28e0dcd6db2ba03c4b3520
+---
+ .../src/android/emulation/MediaCudaUtils.cpp  | 44 ++++++++++++++++---
+ .../emulation/MediaCudaVideoHelper.cpp        |  3 +-
+ 2 files changed, 39 insertions(+), 8 deletions(-)
+
+diff --git a/android/emu/media/src/android/emulation/MediaCudaUtils.cpp b/android/emu/media/src/android/emulation/MediaCudaUtils.cpp
+index 87f4f73be..edbe4b579 100644
+--- a/android/emu/media/src/android/emulation/MediaCudaUtils.cpp
++++ b/android/emu/media/src/android/emulation/MediaCudaUtils.cpp
+@@ -13,10 +13,12 @@
+ // limitations under the License.
+ 
+ #include "host-common/MediaCudaUtils.h"
++#include <atomic>
+ #include <cstdint>
+ #include <string>
+ #include <vector>
+ #include "android/main-emugl.h"
++#include "android/utils/debug.h"
+ 
+ #ifdef _WIN32
+ #define WIN32_LEAN_AND_MEAN 1
+@@ -58,6 +60,16 @@ extern "C" {
+ #define MEDIA_CUDA_COPY_Y_TEXTURE 1
+ #define MEDIA_CUDA_COPY_UV_TEXTURE 2
+ 
++// The copy runs for every decoded frame, so only report the first failure.
++static void media_cuda_warn_once(const char* call, CUresult res) {
++    static std::atomic<bool> s_warned{false};
++    if (!s_warned.exchange(true)) {
++        dwarning("cuda: %s failed with error %d; decoded frames will not be "
++                 "copied to the output texture",
++                 call, (int)res);
++    }
++}
++
+ static void media_cuda_copy_decoded_frame(void* privData,
+                                           int mode,
+                                           uint32_t dest_texture_handle) {
+@@ -66,15 +78,33 @@ static void media_cuda_copy_decoded_frame(void* privData,
+ 
+     const unsigned int GL_TEXTURE_2D = 0x0DE1;
+     const unsigned int cudaGraphicsMapFlagsNone = 0x0;
+-    CUgraphicsResource CudaRes{0};
++    CUgraphicsResource CudaRes = nullptr;
+     CUVID_DPRINT("cuda copy decoded frame testure %d",
+                  (int)dest_texture_handle);
+-    NVDEC_API_CALL(cuGraphicsGLRegisterImage(&CudaRes, dest_texture_handle,
+-                                             GL_TEXTURE_2D, 0x0));
+-    CUarray texture_ptr;
+-    NVDEC_API_CALL(cuGraphicsMapResources(1, &CudaRes, 0));
+-    NVDEC_API_CALL(
+-            cuGraphicsSubResourceGetMappedArray(&texture_ptr, CudaRes, 0, 0));
++    CUresult res = cuGraphicsGLRegisterImage(&CudaRes, dest_texture_handle,
++                                             GL_TEXTURE_2D,
++                                             cudaGraphicsMapFlagsNone);
++    if (res != CUDA_SUCCESS) {
++        // Nothing was registered, so there is nothing to map, copy into or
++        // unregister. Carrying on would hand cuMemcpy2D() an uninitialized
++        // CUarray.
++        media_cuda_warn_once("cuGraphicsGLRegisterImage", res);
++        return;
++    }
++    res = cuGraphicsMapResources(1, &CudaRes, 0);
++    if (res != CUDA_SUCCESS) {
++        media_cuda_warn_once("cuGraphicsMapResources", res);
++        NVDEC_API_CALL(cuGraphicsUnregisterResource(CudaRes));
++        return;
++    }
++    CUarray texture_ptr = nullptr;
++    res = cuGraphicsSubResourceGetMappedArray(&texture_ptr, CudaRes, 0, 0);
++    if (res != CUDA_SUCCESS || texture_ptr == nullptr) {
++        media_cuda_warn_once("cuGraphicsSubResourceGetMappedArray", res);
++        NVDEC_API_CALL(cuGraphicsUnmapResources(1, &CudaRes, 0));
++        NVDEC_API_CALL(cuGraphicsUnregisterResource(CudaRes));
++        return;
++    }
+     CUdeviceptr dpSrcFrame = copy_context->src_frame;
+     CUDA_MEMCPY2D m = {0};
+     m.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+diff --git a/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp b/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
+index b20aa91b7..d2bfe8932 100644
+--- a/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
++++ b/android/emu/media/src/android/emulation/MediaCudaVideoHelper.cpp
+@@ -361,7 +361,8 @@ int MediaCudaVideoHelper::HandlePictureDisplay(CUVIDPARSERDISPINFO* pDispInfo) {
+     NVDEC_API_CALL(cuCtxPushCurrent(mCudaContext));
+     unsigned int newOutBufferSize = mOutputWidth * mOutputHeight * 3 / 2;
+     std::vector<uint8_t> myFrame;
+-    TextureFrame texFrame;
++    // Stays {0, 0} in byte-buffer mode; consumers treat 0 as "no texture".
++    TextureFrame texFrame{0, 0};
+     if (mUseGpuTexture && mTexturePool != nullptr) {
+         media_cuda_utils_copy_context my_copy_context{
+                 .src_frame = dpSrcFrame,

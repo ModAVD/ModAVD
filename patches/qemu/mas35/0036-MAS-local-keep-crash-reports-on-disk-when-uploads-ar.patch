@@ -1,0 +1,116 @@
+From f6946362219929b1433d53edbc210b6fee237688 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 5 Oct 2026 19:00:19 +0200
+Subject: [PATCH 36/60] MAS local: keep crash reports on disk when uploads are
+ not enabled
+
+Not for upstream: it is the opposite of the upstream privacy design.
+
+On every boot uploadEntries() asks the consent provider about each report
+that was not uploaded. Without -metrics-collection the headless and the
+launcher providers answer REMOVE, so the minidump of the previous crash is
+deleted before anyone can look at it, and the windowed provider may pop up
+a dialog.
+
+When uploads are not enabled, skip the consent query altogether: do not
+show a dialog, do not upload, and keep the newest 5 reports (override with
+ANDROID_EMU_CRASH_REPORTS_TO_KEEP, 1..100) in the local database, logging
+the minidump path of each. Older ones are removed. With uploads enabled the
+upstream flow is unchanged.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Icbbae812225ad8ce12cdd61ff65f958df64e875c
+---
+ .../android/crashreport/CrashSytemInit.cpp    | 65 +++++++++++++++++++
+ 1 file changed, 65 insertions(+)
+
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp b/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
+index 2c62ad3f4..51270f0b5 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashSytemInit.cpp
+@@ -11,6 +11,9 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
++#include <stdlib.h>
++
++#include <algorithm>
+ #include <functional>
+ #include <map>     // for map
+ #include <memory>  // for unique_ptr
+@@ -158,6 +161,15 @@ public:
+         reports.insert(reports.end(), pendingReports.begin(),
+                        pendingReports.end());
+ 
++        // MAS: without explicit upload consent, never ask (no dialog), never
++        // upload and never delete a report just for lack of consent. Keep the
++        // newest kLocalReportsToKeep minidumps on disk for the user to collect
++        // and drop only older ones.
++        if (!areUploadsEnabled) {
++            keepReportsLocally(reports);
++            return;
++        }
++
+         for (const auto& report : reports) {
+             if (!report.uploaded) {
+                 auto status = mConsentProvider->requestConsent(report);
+@@ -193,6 +205,59 @@ public:
+     }
+ 
+ private:
++    // Number of crash reports kept on disk when uploads are not enabled.
++    // ANDROID_EMU_CRASH_REPORTS_TO_KEEP overrides it (1..100).
++    static constexpr size_t kLocalReportsToKeep = 5;
++
++    void keepReportsLocally(std::vector<CrashReportDatabase::Report> reports) {
++        size_t keep = kLocalReportsToKeep;
++        auto env = System::get()->envGet("ANDROID_EMU_CRASH_REPORTS_TO_KEEP");
++        if (!env.empty()) {
++            int n = atoi(env.c_str());
++            if (n >= 1 && n <= 100) {
++                keep = n;
++            }
++        }
++        // Uploaded reports are not ours to keep; upstream removes them too.
++        std::vector<crashpad::UUID> toRemove;
++        std::vector<CrashReportDatabase::Report> local;
++        for (const auto& report : reports) {
++            if (report.uploaded) {
++                toRemove.push_back(report.uuid);
++            } else {
++                local.push_back(report);
++            }
++        }
++        std::sort(local.begin(), local.end(),
++                  [](const CrashReportDatabase::Report& a,
++                     const CrashReportDatabase::Report& b) {
++                      return a.creation_time > b.creation_time;
++                  });
++        for (size_t i = 0; i < local.size(); i++) {
++#ifdef _WIN32
++            std::string path = android::base::Win32UnicodeString(
++                                       local[i].file_path.value().c_str())
++                                       .toString();
++#else
++            std::string path = local[i].file_path.value();
++#endif
++            if (i < keep) {
++                dinfo("No upload consent, keeping crash report %s locally "
++                      "(not uploaded): %s",
++                      local[i].uuid.ToString().c_str(), path.c_str());
++            } else {
++                dinfo("Keeping only the newest %d crash reports, removing "
++                      "older report %s: %s",
++                      (int)keep, local[i].uuid.ToString().c_str(),
++                      path.c_str());
++                toRemove.push_back(local[i].uuid);
++            }
++        }
++        for (const auto& uuid : toRemove) {
++            mDatabase->DeleteReport(uuid);
++        }
++    }
++
+     void processReport(const CrashReportDatabase::Report& report) {
+         using namespace std::chrono_literals;
+         std::vector<std::chrono::seconds> backoff{0s,  2s,  4s,   8s,  16s,

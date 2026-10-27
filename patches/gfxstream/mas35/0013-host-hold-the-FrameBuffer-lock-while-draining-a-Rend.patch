@@ -1,0 +1,70 @@
+From 087e2e4f2826dfe67b7aa7dc6eb19ea80793e7bd Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 5 Oct 2026 19:53:08 +0200
+Subject: [PATCH 13/23] host: hold the FrameBuffer lock while draining a
+ RenderThread's GL state
+
+Since "Move GL handling to the GL server" (5010278c, Change-Id
+I85b99b352df082daa8a7d7728c15346bb900520e),
+FrameBuffer::Impl::drainGlRenderThreadResources() calls
+EmulationGl::drainRenderThreadResources() without taking m_lock. Before
+that change the work went through drainGlRenderThreadSurfaces() and
+drainGlRenderThreadContexts(), which both take it.
+
+EmulationGl::drainRenderThreadSurfaces() binds the shared pbuffer
+context through the color buffer ContextHelper, walks mWindows and
+closes ColorBuffers via closeColorBufferByWindow(), which expects m_lock
+to be held. Every other user of that context binds it under m_lock. So
+when a guest process exits, its RenderThreads bind the context
+concurrently with each other, with the process cleanup thread and with
+ColorBuffer updates, for example YUV frames that the host media decoder
+uploads on a vCPU thread. On Windows the second wglMakeCurrent() fails
+with ERROR_BUSY; the caller then runs its GL calls with no context
+current, and when that is the YUV converter's first frame, the
+conversion shader "fails to compile" and GFXSTREAM_FATAL aborts the
+emulator.
+
+Take m_lock in drainGlRenderThreadResources(), as the two functions that
+it replaced did.
+
+Test: Windows 11 host, NVIDIA GPU, -gpu host; guest H.264 decode to an
+      ImageReader in a loop of full, killed and overlapping sessions.
+      Unfixed, the emulator aborted after ~310 sessions with the CUDA
+      decoder and ~65 with ANDROID_EMU_MEDIA_DECODER_CUDA=0 (ffmpeg).
+      With this series, 400 CUDA and 200 ffmpeg sessions ran without
+      an abort or an error; earlier versions of it ran 1520 and 707
+      more.
+Test: with extra logging of the pbuffer context's owner, ~136 ffmpeg
+      sessions without this change gave 57 ERROR_BUSY binds, all
+      against a draining RenderThread; with it, 0 conflicts.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I7c35598b87c5844a375fc8e1f6e419ba6c27165b
+---
+ host/frame_buffer.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index f455cb2a..9b015892 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -4319,13 +4319,18 @@ void FrameBuffer::Impl::createEmulatedEglFenceSync(EGLenum type, int destroyWhen
+     }
+ }
+ 
+-void FrameBuffer::Impl::drainGlRenderThreadResources() {
++void FrameBuffer::Impl::drainGlRenderThreadResources() NO_THREAD_SAFETY_ANALYSIS {
+     // If we're already exiting then snapshot should not contain
+     // this thread information at all.
+     if (isShuttingDown()) {
+         return;
+     }
+ 
++    // Draining binds the shared pbuffer context and closes ColorBuffers, so
++    // it must hold m_lock like every other user of that context. Otherwise
++    // another thread (e.g. a ColorBuffer update from the media decoder)
++    // fails to make the context current and runs its GL calls without one.
++    AutoLock mutex(m_lock);
+     if (m_emulationGl) {
+         m_emulationGl->drainRenderThreadResources();
+     }

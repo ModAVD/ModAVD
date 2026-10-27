@@ -1,0 +1,60 @@
+From ca7d38d232a3c90d5879162e604caad126960c5b Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:42:22 +0200
+Subject: [PATCH 17/23] egl: clear the last error before each wglMakeCurrent()
+ attempt
+
+WglDisplay::makeCurrent() tells the error-less failure that it retries
+from a real one by calling GetLastError() after wglMakeCurrent()
+returns FALSE. Nothing clears the last error before the call, and
+wglMakeCurrent() does not clear it either, so a failure that sets no
+error code, which is the case the retry exists for, is judged by
+whatever an earlier call on the same thread left behind: a stale error
+ends the retries at once and reports a failure that might have been
+retried.
+
+Clear the last error before every attempt, so that what is read after
+a failure comes from that wglMakeCurrent() call.
+
+Test: on Windows 11 with an NVIDIA driver, a standalone program shows
+      that a successful wglMakeCurrent() leaves a preset last error in
+      place. In the emulator, a debugger made a render thread that had
+      its own context current fail to bind a context that was current
+      on another thread: with the last error cleared, the first
+      attempt read 0 and was retried, the retry failed with 0xaa
+      (ERROR_BUSY) and was reported, and teardownContext() bound the
+      thread's context again.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I019602fdadad1d6696dd6b39c0d1cb0603aa3622
+---
+ host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+index fbb5502c..c8ca97a1 100644
+--- a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
++++ b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+@@ -1159,7 +1159,14 @@ public:
+             // context as current while none is, and its GL calls would go
+             // nowhere. A failed release leaves no context current either, so
+             // it still counts as done.
++            //
++            // wglMakeCurrent() does not necessarily set the last error when it
++            // fails, so clear it before every attempt: 0 must mean that this
++            // call failed without an error code, not that an earlier call on
++            // this thread happened to leave 0 behind (or a stale error that
++            // would make an error-less failure look like a real one).
+             int count = 100;
++            SetLastError(0);
+             while (!dispatch->wglMakeCurrent(hdcDraw, hdcContext)) {
+                 const DWORD error = GetLastError();
+                 if (!hdcContext) {
+@@ -1170,6 +1177,7 @@ public:
+                     return false;
+                 }
+                 Sleep(16);
++                SetLastError(0);
+             }
+             ret = true;
+         } else if (!dispatch->wglMakeContextCurrent) {

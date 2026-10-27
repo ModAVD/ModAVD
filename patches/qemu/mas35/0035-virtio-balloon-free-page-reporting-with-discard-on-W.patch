@@ -1,0 +1,531 @@
+From ba542b29b03e1ef822f250dc885c09e622eeadb5 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Fri, 2 Oct 2026 22:35:40 +0200
+Subject: [PATCH 35/60] virtio-balloon: free page reporting, with discard on
+ Windows
+
+P3.5 dynamic memory, level 1: let the host working set follow what the
+guest actually uses. Guest RAM stays committed (private bytes do not
+change); what goes back to Windows is the physical memory behind pages
+the guest reports as free.
+
+virtio-balloon gets VIRTIO_BALLOON_F_REPORTING and
+VIRTIO_BALLOON_F_PAGE_POISON from upstream QEMU 5.1 (91b867191ddf
+"virtio-balloon: Provide an interface for free page reporting",
+7483cbbaf820 "virtio-balloon: Implement support for page poison reporting
+feature"), adapted to this tree: qemu_balloon_is_inhibited() instead of
+virtio_balloon_inhibited(), no free page hinting, and a config space that
+stays 8 bytes unless page-poison is on. New properties as upstream:
+free-page-reporting (default off) and page-poison (default on). Reported
+blocks go to ram_block_discard_range(). The device logs one line per GiB
+discarded.
+
+ram_block_discard_range() had no Windows path (QEMU_MADV_DONTNEED is
+invalid there). It now calls the new qemu_win32_discard_memory(), which
+uses DiscardVirtualMemory and falls back to MEM_RESET + VirtualUnlock.
+File-backed (Quick Boot ram.img), user-backed and preallocated blocks
+are skipped with a one-time warning.
+
+Measured on this host (Windows 11 26200) with a standalone WHP partition
+(C:\emu-src\work\balloon\whpprobe): after the guest filled 256 MiB that
+is mapped with WHvMapGpaRange, DiscardVirtualMemory dropped all 65536
+pages from the working set (262 -> 6 MiB, system available +246 MiB),
+private bytes stayed 259 MiB, guest and host then saw the same zeroed
+pages and each other's later writes (0 mismatches). MEM_RESET alone freed
+nothing; MEM_RESET + VirtualUnlock freed the working set but kept the
+old contents. DiscardVirtualMemory costs about 0.8 ms per 4 MiB.
+
+Enable with: -qemu -device virtio-balloon-pci,free-page-reporting=on
+
+Change-Id: I2b35d4614ab686beb448defe0a2e205857022040
+---
+ exec.c                                        |  38 ++++
+ hw/virtio/virtio-balloon.c                    | 163 +++++++++++++++++-
+ include/exec/cpu-common.h                     |   1 +
+ include/hw/virtio/virtio-balloon.h            |   7 +-
+ include/qemu/osdep.h                          |   8 +
+ .../standard-headers/linux/virtio_balloon.h   |   7 +
+ util/oslib-win32.c                            |  60 +++++++
+ 7 files changed, 278 insertions(+), 6 deletions(-)
+
+diff --git a/exec.c b/exec.c
+index 17bcd11f7..bc5faa69f 100644
+--- a/exec.c
++++ b/exec.c
+@@ -2021,6 +2021,11 @@ size_t qemu_ram_pagesize(RAMBlock *rb)
+     return rb->page_size;
+ }
+ 
++ram_addr_t qemu_ram_get_used_length(RAMBlock *rb)
++{
++    return rb->used_length;
++}
++
+ /* Returns the largest size of page in use */
+ size_t qemu_ram_pagesize_largest(void)
+ {
+@@ -4281,7 +4286,9 @@ int ram_block_discard_range(RAMBlock *rb, uint64_t start, size_t length)
+     }
+ 
+     if ((start + length) <= rb->used_length) {
++#ifndef _WIN32
+         bool need_madvise, need_fallocate;
++#endif
+         uint8_t *host_endaddr = host_startaddr + length;
+         if ((uintptr_t)host_endaddr & (rb->page_size - 1)) {
+             error_report("ram_block_discard_range: Unaligned end address: %p",
+@@ -4291,6 +4298,36 @@ int ram_block_discard_range(RAMBlock *rb, uint64_t start, size_t length)
+ 
+         errno = ENOTSUP; /* If we are missing MADVISE etc */
+ 
++#ifdef _WIN32
++        /*
++         * Windows has no madvise/fallocate. Anonymous guest RAM comes from
++         * VirtualAlloc(MEM_COMMIT) in qemu_anon_ram_alloc(); drop the
++         * physical pages behind the range and keep it committed, so a later
++         * access (host or guest through the WHPX mapping) faults in a page
++         * again. The contents afterwards are either the old ones or zero.
++         * File-backed (Quick Boot ram.img mapping), user-backed and
++         * preallocated blocks are not ours to discard.
++         */
++        if (rb->fd != -1 || (rb->flags & (RAM_USER_BACKED | RAM_PREALLOC))) {
++            static bool warned;
++
++            ret = -ENOTSUP;
++            if (!warned) {
++                warned = true;
++                warn_report("ram_block_discard_range: block '%s' is not "
++                            "anonymous memory (fd %d, flags 0x%x); discard "
++                            "is skipped for it on Windows",
++                            rb->idstr, rb->fd, rb->flags);
++            }
++            goto err;
++        }
++        ret = qemu_win32_discard_memory(host_startaddr, length);
++        if (ret) {
++            goto err;
++        }
++        trace_ram_block_discard_range(rb->idstr, host_startaddr, length,
++                                      true, false, ret);
++#else
+         /* The logic here is messy;
+          *    madvise DONTNEED fails for hugepages
+          *    fallocate works on hugepages and shmem
+@@ -4345,6 +4382,7 @@ int ram_block_discard_range(RAMBlock *rb, uint64_t start, size_t length)
+         }
+         trace_ram_block_discard_range(rb->idstr, host_startaddr, length,
+                                       need_madvise, need_fallocate, ret);
++#endif /* _WIN32 */
+     } else {
+         error_report("ram_block_discard_range: Overrun block '%s' (%" PRIu64
+                      "/%zx/" RAM_ADDR_FMT")",
+diff --git a/hw/virtio/virtio-balloon.c b/hw/virtio/virtio-balloon.c
+index f456cea2e..d928b2c13 100644
+--- a/hw/virtio/virtio-balloon.c
++++ b/hw/virtio/virtio-balloon.c
+@@ -207,6 +207,92 @@ static void balloon_stats_set_poll_interval(Object *obj, Visitor *v,
+     balloon_stats_change_timer(s, 0);
+ }
+ 
++/*
++ * Free page reporting (VIRTIO_BALLOON_F_REPORTING), ported from upstream
++ * QEMU 5.1 (91b867191ddf "virtio-balloon: Provide an interface for free
++ * page reporting" and 7483cbbaf820 "virtio-balloon: Implement support for
++ * page poison reporting feature").
++ *
++ * The guest hands us scatter lists of free buddy blocks (2^page_reporting_order
++ * pages each) that it keeps isolated until we return the element. We discard
++ * the host backing of each block; the guest then puts the pages back on its
++ * free lists and may reuse them at any time.
++ */
++static void virtio_balloon_handle_report(VirtIODevice *vdev, VirtQueue *vq)
++{
++    VirtIOBalloon *dev = VIRTIO_BALLOON(vdev);
++    VirtQueueElement *elem;
++
++    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
++        unsigned int i;
++
++        /*
++         * When we discard the page it has the effect of removing the page
++         * from the hypervisor itself and causing it to be zeroed when it
++         * is returned to us. So we must not discard the page if it is
++         * accessible by another device or process, or if the guest is
++         * expecting it to retain a non-zero value.
++         *
++         * On Windows a discarded page comes back either with its old
++         * contents or zero-filled, so the poison_val == 0 (init_on_free)
++         * case is still safe there: both outcomes read as zero.
++         */
++        if (qemu_balloon_is_inhibited() || dev->poison_val) {
++            goto skip_element;
++        }
++
++        for (i = 0; i < elem->in_num; i++) {
++            void *addr = elem->in_sg[i].iov_base;
++            size_t size = elem->in_sg[i].iov_len;
++            ram_addr_t ram_offset;
++            RAMBlock *rb;
++
++            /*
++             * There is no need to check the memory section to see if
++             * it is ram/readonly/romd like there is for handle_output
++             * below. If the region is not meant to be written to then
++             * address_space_map will have allocated a bounce buffer
++             * and it will be freed in address_space_unmap and trigger
++             * and unassigned_mem_write before failing to copy over the
++             * buffer. If more than one bad descriptor is provided it
++             * will return NULL after the first bounce buffer and fail
++             * to map any resources.
++             */
++            rb = qemu_ram_block_from_host(addr, false, &ram_offset);
++            if (!rb) {
++                trace_virtio_balloon_bad_addr(elem->in_addr[i]);
++                continue;
++            }
++
++            /*
++             * For now we will simply ignore unaligned memory regions, or
++             * regions that overrun the end of the RAMBlock.
++             */
++            if (!QEMU_IS_ALIGNED(ram_offset | size, qemu_ram_pagesize(rb)) ||
++                (ram_offset + size) > qemu_ram_get_used_length(rb)) {
++                continue;
++            }
++
++            if (ram_block_discard_range(rb, ram_offset, size) == 0) {
++                dev->reported_bytes += size;
++            }
++        }
++
++        /* One line per GiB discarded, to line up with host memory graphs. */
++        if (dev->reported_bytes - dev->reported_bytes_logged >= (1ULL << 30)) {
++            dev->reported_bytes_logged = dev->reported_bytes;
++            info_report("virtio-balloon: free page reporting has discarded "
++                        "%" PRIu64 " MiB in total",
++                        dev->reported_bytes >> 20);
++        }
++
++skip_element:
++        virtqueue_push(vq, elem, 0);
++        virtio_notify(vdev, vq);
++        g_free(elem);
++    }
++}
++
+ static void virtio_balloon_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+ {
+     VirtIOBalloon *s = VIRTIO_BALLOON(vdev);
+@@ -308,16 +394,31 @@ out:
+     }
+ }
+ 
++/*
++ * Without page-poison the config space keeps its old 8-byte size, so a
++ * device created without the new properties looks exactly as before.
++ */
++static size_t virtio_balloon_config_size(VirtIOBalloon *s)
++{
++    uint64_t features = s->host_features;
++
++    if (virtio_has_feature(features, VIRTIO_BALLOON_F_PAGE_POISON)) {
++        return sizeof(struct virtio_balloon_config);
++    }
++    return offsetof(struct virtio_balloon_config, free_page_hint_cmd_id);
++}
++
+ static void virtio_balloon_get_config(VirtIODevice *vdev, uint8_t *config_data)
+ {
+     VirtIOBalloon *dev = VIRTIO_BALLOON(vdev);
+-    struct virtio_balloon_config config;
++    struct virtio_balloon_config config = {};
+ 
+     config.num_pages = cpu_to_le32(dev->num_pages);
+     config.actual = cpu_to_le32(dev->actual);
++    config.poison_val = cpu_to_le32(dev->poison_val);
+ 
+     trace_virtio_balloon_get_config(config.num_pages, config.actual);
+-    memcpy(config_data, &config, sizeof(struct virtio_balloon_config));
++    memcpy(config_data, &config, virtio_balloon_config_size(dev));
+ }
+ 
+ static int build_dimm_list(Object *obj, void *opaque)
+@@ -353,21 +454,33 @@ static ram_addr_t get_current_ram_size(void)
+     return size;
+ }
+ 
++static bool virtio_balloon_page_poison_support(void *opaque)
++{
++    VirtIOBalloon *s = opaque;
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++
++    return virtio_vdev_has_feature(vdev, VIRTIO_BALLOON_F_PAGE_POISON);
++}
++
+ static void virtio_balloon_set_config(VirtIODevice *vdev,
+                                       const uint8_t *config_data)
+ {
+     VirtIOBalloon *dev = VIRTIO_BALLOON(vdev);
+-    struct virtio_balloon_config config;
++    struct virtio_balloon_config config = {};
+     uint32_t oldactual = dev->actual;
+     ram_addr_t vm_ram_size = get_current_ram_size();
+ 
+-    memcpy(&config, config_data, sizeof(struct virtio_balloon_config));
++    memcpy(&config, config_data, virtio_balloon_config_size(dev));
+     dev->actual = le32_to_cpu(config.actual);
+     if (dev->actual != oldactual) {
+         qapi_event_send_balloon_change(vm_ram_size -
+                         ((ram_addr_t) dev->actual << VIRTIO_BALLOON_PFN_SHIFT),
+                         &error_abort);
+     }
++    dev->poison_val = 0;
++    if (virtio_balloon_page_poison_support(dev)) {
++        dev->poison_val = le32_to_cpu(config.poison_val);
++    }
+     trace_virtio_balloon_set_config(dev->actual, oldactual);
+ }
+ 
+@@ -413,6 +526,21 @@ static int virtio_balloon_post_load_device(void *opaque, int version_id)
+     return 0;
+ }
+ 
++/*
++ * Only sent when the guest negotiated PAGE_POISON (it does with init_on_free
++ * or page poisoning); upstream uses the same (misspelt) section name.
++ */
++static const VMStateDescription vmstate_virtio_balloon_page_poison = {
++    .name = "vitio-balloon-device/page-poison",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = virtio_balloon_page_poison_support,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32(poison_val, VirtIOBalloon),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static const VMStateDescription vmstate_virtio_balloon_device = {
+     .name = "virtio-balloon-device",
+     .version_id = 1,
+@@ -423,6 +551,10 @@ static const VMStateDescription vmstate_virtio_balloon_device = {
+         VMSTATE_UINT32(actual, VirtIOBalloon),
+         VMSTATE_END_OF_LIST()
+     },
++    .subsections = (const VMStateDescription * []) {
++        &vmstate_virtio_balloon_page_poison,
++        NULL
++    }
+ };
+ 
+ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
+@@ -432,7 +564,7 @@ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
+     int ret;
+ 
+     virtio_init(vdev, "virtio-balloon", VIRTIO_ID_BALLOON,
+-                sizeof(struct virtio_balloon_config));
++                virtio_balloon_config_size(s));
+ 
+     ret = qemu_add_balloon_handler(virtio_balloon_to_target,
+                                    virtio_balloon_stat, s);
+@@ -447,6 +579,17 @@ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
+     s->dvq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
+     s->svq = virtio_add_queue(vdev, 128, virtio_balloon_receive_stats);
+ 
++    /*
++     * The guest numbers its queues densely: inflate, deflate, stats, then
++     * (free page hint, not offered here) and reporting, so this is queue 3.
++     * Linux needs at least PAGE_REPORTING_CAPACITY (32) descriptors.
++     */
++    if (virtio_has_feature(s->host_features, VIRTIO_BALLOON_F_REPORTING)) {
++        s->reporting_vq = virtio_add_queue(vdev, 32,
++                                           virtio_balloon_handle_report);
++        info_report("virtio-balloon: free page reporting enabled");
++    }
++
+     reset_stats(s);
+ }
+ 
+@@ -469,6 +612,8 @@ static void virtio_balloon_device_reset(VirtIODevice *vdev)
+         g_free(s->stats_vq_elem);
+         s->stats_vq_elem = NULL;
+     }
++
++    s->poison_val = 0;
+ }
+ 
+ static void virtio_balloon_set_status(VirtIODevice *vdev, uint8_t status)
+@@ -509,6 +654,14 @@ static const VMStateDescription vmstate_virtio_balloon = {
+ static Property virtio_balloon_properties[] = {
+     DEFINE_PROP_BIT("deflate-on-oom", VirtIOBalloon, host_features,
+                     VIRTIO_BALLOON_F_DEFLATE_ON_OOM, false),
++    /*
++     * Same defaults as upstream: page-poison on (a guest with init_on_free
++     * or page poisoning refuses REPORTING without it), reporting opt-in.
++     */
++    DEFINE_PROP_BIT("page-poison", VirtIOBalloon, host_features,
++                    VIRTIO_BALLOON_F_PAGE_POISON, true),
++    DEFINE_PROP_BIT("free-page-reporting", VirtIOBalloon, host_features,
++                    VIRTIO_BALLOON_F_REPORTING, false),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+diff --git a/include/exec/cpu-common.h b/include/exec/cpu-common.h
+index 9f20df93b..d7b6c639a 100644
+--- a/include/exec/cpu-common.h
++++ b/include/exec/cpu-common.h
+@@ -80,6 +80,7 @@ void qemu_ram_set_uf_zeroable(RAMBlock *rb);
+ 
+ size_t qemu_ram_pagesize(RAMBlock *block);
+ size_t qemu_ram_pagesize_largest(void);
++ram_addr_t qemu_ram_get_used_length(RAMBlock *rb);
+ 
+ void cpu_physical_memory_rw(hwaddr addr, uint8_t *buf,
+                             int len, int is_write);
+diff --git a/include/hw/virtio/virtio-balloon.h b/include/hw/virtio/virtio-balloon.h
+index 1ea13bd6a..6052e0a6c 100644
+--- a/include/hw/virtio/virtio-balloon.h
++++ b/include/hw/virtio/virtio-balloon.h
+@@ -33,7 +33,7 @@ typedef struct virtio_balloon_stat_modern {
+ 
+ typedef struct VirtIOBalloon {
+     VirtIODevice parent_obj;
+-    VirtQueue *ivq, *dvq, *svq;
++    VirtQueue *ivq, *dvq, *svq, *reporting_vq;
+     uint32_t num_pages;
+     uint32_t actual;
+     uint64_t stats[VIRTIO_BALLOON_S_NR];
+@@ -43,6 +43,11 @@ typedef struct VirtIOBalloon {
+     int64_t stats_last_update;
+     int64_t stats_poll_interval;
+     uint32_t host_features;
++
++    uint32_t poison_val;
++    /* free page reporting: bytes handed to ram_block_discard_range() */
++    uint64_t reported_bytes;
++    uint64_t reported_bytes_logged;
+ } VirtIOBalloon;
+ 
+ #endif
+diff --git a/include/qemu/osdep.h b/include/qemu/osdep.h
+index 02d575e7e..f48b93ab5 100644
+--- a/include/qemu/osdep.h
++++ b/include/qemu/osdep.h
+@@ -267,6 +267,14 @@ void *qemu_memalign(size_t alignment, size_t size);
+ void *qemu_anon_ram_alloc(size_t size, uint64_t *align, bool shared);
+ void qemu_vfree(void *ptr);
+ void qemu_anon_ram_free(void *ptr, size_t size);
++#ifdef _WIN32
++/*
++ * Give the physical pages behind committed private memory back to the
++ * system while keeping the range committed and accessible. Afterwards
++ * each page reads either its old contents or zero. Returns 0 or -errno.
++ */
++int qemu_win32_discard_memory(void *addr, size_t length);
++#endif
+ 
+ extern bool insufficientMemMessage;
+ 
+diff --git a/include/standard-headers/linux/virtio_balloon.h b/include/standard-headers/linux/virtio_balloon.h
+index 7b0a41b8f..0bd52c54c 100644
+--- a/include/standard-headers/linux/virtio_balloon.h
++++ b/include/standard-headers/linux/virtio_balloon.h
+@@ -34,6 +34,9 @@
+ #define VIRTIO_BALLOON_F_MUST_TELL_HOST	0 /* Tell before reclaiming pages */
+ #define VIRTIO_BALLOON_F_STATS_VQ	1 /* Memory Stats virtqueue */
+ #define VIRTIO_BALLOON_F_DEFLATE_ON_OOM	2 /* Deflate balloon on OOM */
++#define VIRTIO_BALLOON_F_FREE_PAGE_HINT	3 /* VQ to report free pages */
++#define VIRTIO_BALLOON_F_PAGE_POISON	4 /* Guest is using page poisoning */
++#define VIRTIO_BALLOON_F_REPORTING	5 /* Page reporting virtqueue */
+ 
+ /* Size of a PFN in the balloon interface. */
+ #define VIRTIO_BALLOON_PFN_SHIFT 12
+@@ -43,6 +46,10 @@ struct virtio_balloon_config {
+ 	uint32_t num_pages;
+ 	/* Number of pages we've actually got in balloon. */
+ 	uint32_t actual;
++	/* Free page hint command id, readonly by guest (not implemented here). */
++	uint32_t free_page_hint_cmd_id;
++	/* Stores PAGE_POISON if page poisoning is in use */
++	uint32_t poison_val;
+ };
+ 
+ #define VIRTIO_BALLOON_S_SWAP_IN  0   /* Amount of memory swapped in */
+diff --git a/util/oslib-win32.c b/util/oslib-win32.c
+index 6f98f070b..7f37518bf 100644
+--- a/util/oslib-win32.c
++++ b/util/oslib-win32.c
+@@ -38,6 +38,7 @@
+ #include "trace.h"
+ #include "qemu/sockets.h"
+ #include "qemu/cutils.h"
++#include "qemu/error-report.h"
+ 
+ /* this must come after including "trace.h" */
+ #include <shlobj.h>
+@@ -151,6 +152,65 @@ void qemu_anon_ram_free(void *ptr, size_t size)
+     }
+ }
+ 
++typedef DWORD (WINAPI *DiscardVirtualMemoryFunc)(PVOID, SIZE_T);
++
++/*
++ * Used by ram_block_discard_range() (virtio-balloon free page reporting).
++ *
++ * DiscardVirtualMemory (Windows 8.1+) drops the pages from the working set
++ * and frees the physical memory at once; the range stays committed and
++ * PAGE_READWRITE, and the next touch maps a page again. MEM_RESET alone only
++ * marks the pages clean: they stay in the working set until the memory
++ * manager trims it, so nothing visible is freed. The fallback therefore
++ * pairs it with VirtualUnlock on unlocked memory, which removes the pages
++ * from the working set; being clean, they are then repurposed instead of
++ * written to the page file. OfferVirtualMemory is not usable: offered pages
++ * are inaccessible until ReclaimVirtualMemory, and the guest may touch a
++ * reported page again at any time without telling us.
++ */
++int qemu_win32_discard_memory(void *addr, size_t length)
++{
++    static DiscardVirtualMemoryFunc discard_fn;
++    static bool resolved;
++    static int failures;
++    DWORD err;
++
++    if (!resolved) {
++        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
++        discard_fn = k32 ? (DiscardVirtualMemoryFunc)
++                     GetProcAddress(k32, "DiscardVirtualMemory") : NULL;
++        resolved = true;
++        info_report("qemu_win32_discard_memory: using %s",
++                    discard_fn ? "DiscardVirtualMemory"
++                               : "MEM_RESET + VirtualUnlock");
++    }
++
++    if (discard_fn) {
++        err = discard_fn(addr, length);
++        if (err == ERROR_SUCCESS) {
++            return 0;
++        }
++    } else {
++        err = ERROR_PROC_NOT_FOUND;
++    }
++
++    /* DiscardVirtualMemory missing or failed: the range is unchanged. */
++    if (VirtualAlloc(addr, length, MEM_RESET, PAGE_READWRITE)) {
++        /* Fails with ERROR_NOT_LOCKED by design, but trims the pages. */
++        VirtualUnlock(addr, length);
++        return 0;
++    }
++
++    if (failures < 5) {
++        failures++;
++        error_report("qemu_win32_discard_memory: %p +0x%zx failed "
++                     "(DiscardVirtualMemory %lu, MEM_RESET %lu)",
++                     addr, length, (unsigned long)err,
++                     (unsigned long)GetLastError());
++    }
++    return -EINVAL;
++}
++
+ #ifndef CONFIG_LOCALTIME_R
+ /* FIXME: add proper locking */
+ struct tm *gmtime_r(const time_t *timep, struct tm *result)

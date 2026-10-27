@@ -1,0 +1,45 @@
+From 0e4496f448a3a9f63879b02e08b0a00306ca9c50 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 19:53:40 +0200
+Subject: [PATCH 09/23] MAS local: log descriptor templates that have array
+ entries
+
+Not for upstream. Logs the first 20 templates with array entries so a run
+shows whether a game hits the offset bug fixed in the previous commit.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: If7eb0dbebe7a121659de922cfc980c18fa717469
+---
+ host/vulkan/vk_decoder_global_state.cpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index be2a5718..67b293e5 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -11058,6 +11058,25 @@ class VkDecoderGlobalState::Impl {
+ 
+         res.createInfo.pDescriptorUpdateEntries = res.linearizedTemplateEntries.data();
+ 
++        // MAS local diagnostic (not for upstream): templates with array entries are the ones the
++        // old per-entry offsets got wrong.
++        {
++            uint32_t arrayEntries = 0;
++            uint32_t maxCount = 0;
++            for (const auto& e : res.linearizedTemplateEntries) {
++                if (e.descriptorType != VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT &&
++                    e.descriptorCount > 1) {
++                    ++arrayEntries;
++                    maxCount = std::max(maxCount, e.descriptorCount);
++                }
++            }
++            static std::atomic<uint32_t> sLogged{0};
++            if (arrayEntries && sLogged.fetch_add(1) < 20) {
++                GFXSTREAM_INFO("MAS: descriptor update template with %u array entries (max count %u) of %u",
++                               arrayEntries, maxCount, pCreateInfo->descriptorUpdateEntryCount);
++            }
++        }
++
+         return res;
+     }
+ 

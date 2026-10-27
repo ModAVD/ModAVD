@@ -1,0 +1,38 @@
+From 7be0b38b303db516f179f120966424a9dc98a2bc Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:18 +0200
+Subject: [PATCH 10/60] whpx: opt-in ANDROID_EMU_WHPX_KEEP_XSAVE to keep
+ XSAVE/AVX on Windows 10
+
+Patch: 06-whpx-keep-xsave-optin.diff
+
+Change-Id: If571acdbd47ad4b6baa3c9508a85e428c6162e22
+---
+ target/i386/whpx-all.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index bc5f4f406..063e56b87 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -1847,6 +1847,20 @@ static void whpx_disable_xsave(struct whpx_state *whpx)
+         }
+     }
+ 
++    /*
++     * MAS: opt-in to keep XSAVE (and with it AVX/AVX2 in the guest) on
++     * Windows 10 as well. Windows 11 already keeps it with this same code;
++     * what is missing is only the XSAVE state in snapshots, which we do not
++     * use. Unverified on Windows 10 hosts, hence opt-in.
++     */
++    {
++        const char *keep = getenv("ANDROID_EMU_WHPX_KEEP_XSAVE");
++        if (keep && keep[0] == '1') {
++            printf("WHPX: keeping XSAVE enabled (ANDROID_EMU_WHPX_KEEP_XSAVE)\n");
++            return;
++        }
++    }
++
+     if (!whpx_has_xsave()) {
+         return;
+     }

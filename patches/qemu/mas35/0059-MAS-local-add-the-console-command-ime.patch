@@ -1,0 +1,260 @@
+From 7fd78bd8c59293ea6edea75302907c483b105554 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 27 Oct 2026 13:37:26 +0100
+Subject: [PATCH 59/60] MAS local: add the console command ime
+
+'ime status' prints the state of the host input method channel:
+connected, version, textmode, inputType, imeOptions, cursor (or none)
+and active. 'ime commit', 'ime preedit', 'ime finish', 'ime key' and
+'ime delete' send the matching frames to the guest input method, so
+automation can type any language with 'adb emu ime commit <text>'.
+
+The text of commit and preedit is the rest of the line after the first
+space following the sub-command, spaces included. find_command() skips
+those spaces, so the handler steps back over them in the line buffer.
+Text longer than one frame goes out in several, split between UTF-8
+sequences. Without a connected guest input method the commands answer
+KO with the reason.
+
+Change-Id: I45728ec8632f54518ed86f9df8cb13e8170123b2
+---
+ android/android-emu/android/console.cpp | 212 ++++++++++++++++++++++++
+ 1 file changed, 212 insertions(+)
+
+diff --git a/android/android-emu/android/console.cpp b/android/android-emu/android/console.cpp
+index 5af5eeadb..465f8d0fa 100644
+--- a/android/android-emu/android/console.cpp
++++ b/android/android-emu/android/console.cpp
+@@ -36,6 +36,7 @@
+ #include "android/cmdline-option.h"
+ #include "android/console_auth.h"
+ #include "android/emulation/ConfigDirs.h"
++#include "android/emulation/ModavdImePipe.h"
+ #include "android/emulation/QemuMiscPipe.h"
+ #include "android/emulation/control/EmulatorAdvertisement.h"
+ #include "android/emulator-window.h"
+@@ -4372,6 +4373,211 @@ static const CommandDefRec multi_display_commands[] = {
+ 
+         {NULL, NULL, NULL, NULL, NULL, NULL}};
+ 
++/********************************************************************************************/
++/********************************************************************************************/
++/***** ******/
++/*****                            I M E   C O M M A N D S ******/
++/***** ******/
++/********************************************************************************************/
++/********************************************************************************************/
++
++using android::emulation::ModavdImePipe;
++
++// The <text> of 'ime commit|preedit <text>': the rest of the line after the
++// first space that follows the sub-command, spaces included. find_command()
++// skipped the spaces in front of |args|, so step back over them; when only
++// spaces follow the sub-command it set |args| to NULL.
++static const char* ime_text_arg(ControlClient client, char* args) {
++    if (args) {
++        while (args[-1] == ' ') {
++            --args;
++        }
++        return args + 1;
++    }
++    const char* end = client->buff + strlen(client->buff);
++    const char* p = end;
++    while (p > client->buff && p[-1] == ' ') {
++        --p;
++    }
++    return p < end ? p + 1 : nullptr;
++}
++
++// Parses a decimal or 0x-prefixed hexadecimal number from 0 to |max|.
++static bool ime_parse_number(const std::string& s,
++                             unsigned long long max,
++                             unsigned long long* out) {
++    const char* p = s.c_str();
++    int base = 10;
++    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
++        p += 2;
++        base = 16;
++    }
++    if (!isxdigit((unsigned char)*p)) {
++        return false;
++    }
++    errno = 0;
++    char* end = nullptr;
++    const unsigned long long value = strtoull(p, &end, base);
++    if (errno || *end || value > max) {
++        return false;
++    }
++    *out = value;
++    return true;
++}
++
++static int ime_reply(ControlClient client, bool ok, const std::string& error) {
++    if (!ok) {
++        control_write(client, "KO: %s\r\n", error.c_str());
++        return -1;
++    }
++    return 0;
++}
++
++static int do_ime_status(ControlClient client, char* args) {
++    const ModavdImePipe::State state = ModavdImePipe::getState();
++    control_write(client, "connected=%d\r\n", state.connected ? 1 : 0);
++    control_write(client, "version=%u\r\n", state.version);
++    control_write(client, "textmode=%d\r\n", state.textMode ? 1 : 0);
++    control_write(client, "inputType=%u\r\n", state.inputType);
++    control_write(client, "imeOptions=%u\r\n", state.imeOptions);
++    if (state.hasCursor) {
++        control_write(client, "cursor=%d,%d,%d,%d\r\n", state.cursorLeft,
++                      state.cursorTop, state.cursorRight, state.cursorBottom);
++    } else {
++        control_write(client, "cursor=none\r\n");
++    }
++    control_write(client, "active=%d\r\n", state.active ? 1 : 0);
++    return 0;
++}
++
++static int do_ime_commit(ControlClient client, char* args) {
++    const char* text = ime_text_arg(client, args);
++    if (!text) {
++        control_write(client,
++                      "KO: argument missing, try 'ime commit <text>'\r\n");
++        return -1;
++    }
++    std::string error;
++    return ime_reply(client, ModavdImePipe::sendCommit(text, &error), error);
++}
++
++static int do_ime_preedit(ControlClient client, char* args) {
++    const char* text = ime_text_arg(client, args);
++    if (!text) {
++        control_write(client,
++                      "KO: argument missing, try 'ime preedit <text>'\r\n");
++        return -1;
++    }
++    std::string error;
++    return ime_reply(client, ModavdImePipe::sendPreedit(-1, text, &error),
++                     error);
++}
++
++static int do_ime_finish(ControlClient client, char* args) {
++    if (args) {
++        control_write(client, "KO: 'ime finish' takes no arguments\r\n");
++        return -1;
++    }
++    std::string error;
++    return ime_reply(client, ModavdImePipe::sendFinishComposing(&error),
++                     error);
++}
++
++static int do_ime_key(ControlClient client, char* args) {
++    std::vector<std::string> words;
++    if (args) {
++        words = absl::StrSplit(args, ' ', absl::SkipEmpty());
++    }
++    unsigned long long keycode = 0;
++    unsigned long long metaState = 0;
++    if (words.empty() || words.size() > 2 ||
++        !ime_parse_number(words[0], UINT32_MAX, &keycode) ||
++        (words.size() == 2 &&
++         !ime_parse_number(words[1], UINT32_MAX, &metaState))) {
++        control_write(client,
++                      "KO: usage: 'ime key <keycode> [<metaState>]'\r\n");
++        return -1;
++    }
++    std::string error;
++    return ime_reply(client,
++                     ModavdImePipe::sendKey(static_cast<uint32_t>(keycode),
++                                            static_cast<uint32_t>(metaState),
++                                            ModavdImePipe::kKeyDownUp, &error),
++                     error);
++}
++
++static int do_ime_delete(ControlClient client, char* args) {
++    std::vector<std::string> words;
++    if (args) {
++        words = absl::StrSplit(args, ' ', absl::SkipEmpty());
++    }
++    unsigned long long before = 0;
++    unsigned long long after = 0;
++    if (words.size() != 2 || !ime_parse_number(words[0], INT32_MAX, &before) ||
++        !ime_parse_number(words[1], INT32_MAX, &after)) {
++        control_write(client,
++                      "KO: usage: 'ime delete <before> <after>'\r\n");
++        return -1;
++    }
++    std::string error;
++    return ime_reply(client,
++                     ModavdImePipe::sendDelete(static_cast<int32_t>(before),
++                                               static_cast<int32_t>(after),
++                                               &error),
++                     error);
++}
++
++static const CommandDefRec ime_commands[] = {
++        {"status", "show the host input method channel state",
++         "'ime status' shows whether the guest input method (ModAVD Host "
++         "Input) is\r\n"
++         "connected, the protocol version it announced, whether the emulator "
++         "window\r\n"
++         "is in text mode, the inputType and imeOptions of the focused "
++         "editor, the\r\n"
++         "last cursor rectangle in guest display pixels (left,top,right,"
++         "bottom, or\r\n"
++         "'none') and whether the focus is an editable text field\r\n",
++         NULL, do_ime_status, NULL},
++
++        {"commit", "type text into the focused editor",
++         "'ime commit <text>' commits <text> to the focused editor, replacing "
++         "any\r\n"
++         "composing text. <text> is UTF-8 and is the rest of the line after "
++         "the first\r\n"
++         "space, spaces included\r\n",
++         NULL, do_ime_commit, NULL},
++
++        {"preedit", "set the composing text",
++         "'ime preedit <text>' sets the composing text, with the cursor at "
++         "its end.\r\n"
++         "<text> is taken like in 'ime commit'; an empty <text> removes the "
++         "composing\r\n"
++         "text\r\n",
++         NULL, do_ime_preedit, NULL},
++
++        {"finish", "finish composing",
++         "'ime finish' keeps the composing text as it is and ends "
++         "composing\r\n",
++         NULL, do_ime_finish, NULL},
++
++        {"key", "send a key press to the focused editor",
++         "'ime key <keycode> [<metaState>]' sends an Android key press and "
++         "release\r\n"
++         "through the input method, e.g. 67 for DEL or 66 for ENTER. "
++         "<metaState> is a\r\n"
++         "mask of KeyEvent.META_* flags, 0 by default. Numbers may be "
++         "decimal or 0x hex\r\n",
++         NULL, do_ime_key, NULL},
++
++        {"delete", "delete text around the cursor",
++         "'ime delete <before> <after>' deletes <before> UTF-16 units before "
++         "the cursor\r\n"
++         "and <after> UTF-16 units after it\r\n",
++         NULL, do_ime_delete, NULL},
++
++        {NULL, NULL, NULL, NULL, NULL, NULL}};
++
+ /********************************************************************************************/
+ /********************************************************************************************/
+ /***** ******/
+@@ -4792,6 +4998,12 @@ extern const CommandDefRec main_commands[] = {
+          "Usage: phonenumber <gsm-formatted number>.\n", NULL,
+          do_set_phone_number, NULL},
+ 
++        {"ime", "host input method commands",
++         "allows you to type text in any language into the focused editor "
++         "through the\r\n"
++         "guest input method ModAVD Host Input\r\n",
++         NULL, NULL, ime_commands},
++
+         {NULL, NULL, NULL, NULL, NULL, NULL}};
+ 
+ }  // namespace

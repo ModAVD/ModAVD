@@ -1,0 +1,53 @@
+From ecfe1de0458b7653a47bd6f4937b0539e86ccf8f Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 30 Sep 2026 19:53:39 +0200
+Subject: [PATCH 08/23] vk: offset descriptor template entries by their element
+ counts
+
+calcLinearizedDescriptorUpdateTemplateInfo() sizes the linearized buffers
+by the sum of descriptorCount over the entries, and the guest sends every
+element of every entry in entry order (vkUpdateDescriptorSetWithTemplateSized
+and Sized2), but the per-entry offsets advanced by one element per entry.
+An entry that follows an array entry therefore read the array's second
+element instead of its own, so the host wrote the wrong image, buffer or
+buffer view into every binding after the first array of a template.
+
+Advance the image info, buffer info and buffer view cursors by the entry's
+descriptorCount, as the inline uniform block path already does.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: Ifd6df208de0f4e3ae3f933cf3aa23b404c297b9d
+---
+ host/vulkan/vk_decoder_global_state.cpp | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index d7bd6c63..be2a5718 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -11028,20 +11028,22 @@ class VkDecoderGlobalState::Impl {
+ 
+             auto type = entry.descriptorType;
+ 
++            // The guest sends every array element of an entry, in entry order, so an entry
++            // starts after all elements of the entries before it.
+             if (isDescriptorTypeImageInfo(type)) {
+                 entryForHost.offset =
+                     res.imageInfoStart + imageInfoCount * sizeof(VkDescriptorImageInfo);
+                 entryForHost.stride = sizeof(VkDescriptorImageInfo);
+-                ++imageInfoCount;
++                imageInfoCount += entryForHost.descriptorCount;
+             } else if (isDescriptorTypeBufferInfo(type)) {
+                 entryForHost.offset =
+                     res.bufferInfoStart + bufferInfoCount * sizeof(VkDescriptorBufferInfo);
+                 entryForHost.stride = sizeof(VkDescriptorBufferInfo);
+-                ++bufferInfoCount;
++                bufferInfoCount += entryForHost.descriptorCount;
+             } else if (isDescriptorTypeBufferView(type)) {
+                 entryForHost.offset = res.bufferViewStart + bufferViewCount * sizeof(VkBufferView);
+                 entryForHost.stride = sizeof(VkBufferView);
+-                ++bufferViewCount;
++                bufferViewCount += entryForHost.descriptorCount;
+             } else if (type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT) {
+                 entryForHost.offset = res.inlineUniformBlockStart + inlineUniformBlockCount;
+                 entryForHost.stride = 0;

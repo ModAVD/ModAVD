@@ -1,6 +1,24 @@
 [
   {
     "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
+    "dir": "qemu/mas35",
+    "head": "a1e36334f096ce5268a7df2b750f1a4a09b83c52",
+    "repo": "external/qemu",
+    "upstream": "platform/external/qemu",
+    "count": 60,
+    "tree": "08d6404e25008bb19caadf4185af10cbad91bc50"
+  },
+  {
+    "base": "04d0287b04f72d908c621a919fa2ea5c563b1a66",
+    "dir": "gfxstream/mas35",
+    "head": "28437bb6c4b3fdef705d1919813467af465a718d",
+    "repo": "hardware/google/gfxstream",
+    "upstream": "platform/hardware/google/gfxstream",
+    "count": 23,
+    "tree": "51288846bdcb9054d899ffc8458d6744d6206e32"
+  },
+  {
+    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
     "dir": "qemu/mas32",
     "head": "bc694d86d778732785a75364479fc03fad0250bc",
     "repo": "external/qemu",

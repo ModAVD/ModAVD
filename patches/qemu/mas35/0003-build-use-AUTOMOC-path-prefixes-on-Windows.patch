@@ -1,0 +1,44 @@
+From 8490421a6d51802908cd51ec16659caac8c40595 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 14:24:11 +0200
+Subject: [PATCH 03/60] build: use AUTOMOC path prefixes on Windows
+
+The generated moc files included their headers as
+"<autogen dir>/../../../../<source>". With the output directory under a
+normal checkout root (C:\emu-src\objs) the include path clang reports for
+ext-page-location-web (network-connectivity-manager.h, 262 chars) exceeds
+MAX_PATH and ninja's /showIncludes parser fails the build with
+"path too long". With CMAKE_AUTOMOC_PATH_PREFIX moc includes the headers
+relative to the include directories instead.
+
+Change-Id: Ice3afbb5896b9eac12545960609cdd91abcf9ff1
+---
+ android/build/cmake/config/emu-qt5-config.cmake | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/android/build/cmake/config/emu-qt5-config.cmake b/android/build/cmake/config/emu-qt5-config.cmake
+index 89006df7b..dde078830 100644
+--- a/android/build/cmake/config/emu-qt5-config.cmake
++++ b/android/build/cmake/config/emu-qt5-config.cmake
+@@ -33,6 +33,13 @@ endif()
+ set(CMAKE_AUTOMOC TRUE)
+ set(CMAKE_AUTOUIC TRUE)
+ set(CMAKE_AUTORCC TRUE)
++if(WIN32)
++  # Let moc include headers relative to the include directories. Otherwise the
++  # generated moc files include them as "<autogen dir>/../../../../<source>",
++  # and on a normal checkout root the reported include path exceeds MAX_PATH:
++  # ninja's /showIncludes parser then fails the build with "path too long".
++  set(CMAKE_AUTOMOC_PATH_PREFIX ON)
++endif()
+ if(LINUX)
+   # rcc defaults to using zstd compression, but for an unknown reason, emulator is crashing with
+   # this compression algorithm.
+@@ -470,6 +477,7 @@ set(PACKAGE_EXPORT
+     QT5_FOUND
+     QT5_DEFINITIONS
+     CMAKE_AUTOMOC
++    CMAKE_AUTOMOC_PATH_PREFIX
+     CMAKE_AUTOUIC
+     CMAKE_AUTORCC
+     CMAKE_AUTORCC_OPTIONS

@@ -1,0 +1,114 @@
+From 4898a1aaf7be8db5b779861dfcde829b6f2ca0e4 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 28 Sep 2026 00:10:32 +0200
+Subject: [PATCH 28/60] whpx: let the TSC catch up with the virtual clock after
+ a pause
+
+With 8 or 12 vCPUs a Linux guest drops the TSC clocksource after the VM
+has been paused and resumed (1 of 3 boots with 8 vCPUs, 2 of 3 with 12;
+never in 9 pauses with 6), always with the TSC ahead of the HPET by a
+bit more than 0.4 ms over one watchdog interval:
+
+  clocksource: timekeeping watchdog on CPU7: Marking clocksource 'tsc'
+  as unstable because the skew is too large:
+  clocksource: 'hpet' wd_nsec: 511576500 ...
+  clocksource: 'tsc' cs_nsec: 512030576 ...
+  clocksource: Switched to clocksource hpet
+
+The previous change suspends the partition's time in a VM change state
+handler, but do_vm_stop() stops QEMU_CLOCK_VIRTUAL (cpu_disable_ticks)
+first and only runs the handlers after pause_all_vcpus() has kicked
+every vCPU out of WHvRunVirtualProcessor and waited for all of them. The
+TSC runs on alone for that long, which grows with the number of vCPUs.
+On resume vm_prepare_start() starts the virtual clock first and the TSC
+only in the handler, which gives back part of it. The rest stays as a
+permanent step between the TSC and the HPET.
+
+The TSC cannot be set back: the guest has already read those values.
+Instead, note on stop how long the TSC ran after the virtual clock
+stopped (host time now minus the host time the virtual clock stopped
+at, known from the virtual clock's offset while it ran), and on resume
+keep the partition's time suspended until the virtual clock has run as
+long. The wait is below a millisecond and happens before the vCPUs are
+resumed.
+
+Assisted-by: Claude Opus 5.5
+Change-Id: I5c1f0e7a2b9d43f8a6e1c0d7b3a9f2e4c8d61a05
+---
+ target/i386/whpx-all.c | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index 33a8bf4f4..35d92fec7 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -2005,19 +2005,45 @@ static void whpx_cpu_update_state(void *opaque, int running, RunState state)
+  * a TSC that is ahead of its own virtual clock and loadvm repeats the jump.
+  * Stop the partition's time together with the virtual clock; the TSC read
+  * for savevm is then the value at the moment the VM stopped.
++ *
++ * "Together" is not quite true: do_vm_stop() stops the virtual clock
++ * (cpu_disable_ticks) before pause_all_vcpus(), and this handler only runs
++ * once every vCPU has been kicked out of the hypervisor and has parked, so
++ * the TSC runs on alone for that long, and more so the more vCPUs there are.
++ * On the way back the virtual clock starts first (cpu_enable_ticks) and the
++ * TSC only here, which gives some of it back. With 8 or more vCPUs what is
++ * left can exceed the few hundred microseconds the Linux clocksource
++ * watchdog allows between the TSC and the HPET, and the guest drops the TSC.
++ * The TSC cannot be moved back (the guest has already read those values),
++ * so keep it suspended on resume until the virtual clock has run as long
++ * as the TSC ran alone on stop.
+  */
++static int64_t whpx_vclock_offset;  /* cpu_get_clock() - get_clock() */
++static bool whpx_vclock_offset_valid;
++static int64_t whpx_vclock_stopped; /* cpu_get_clock() while stopped */
++static int64_t whpx_tsc_lead;       /* ns the TSC ran on alone at stop */
++
+ static void whpx_vm_state_change(void *opaque, int running, RunState state)
+ {
+     struct whpx_state *whpx = &whpx_global;
+     HRESULT hr;
++    int64_t now, left;
+ 
+     if (!running) {
+         if (whp_dispatch.WHvSuspendPartitionTime) {
++            now = get_clock();
+             hr = whp_dispatch.WHvSuspendPartitionTime(whpx->partition);
+             if (FAILED(hr)) {
+                 warn_report("WHPX: Failed to suspend partition time,"
+                             " hr=%08lx", hr);
+             }
++            whpx_vclock_stopped = cpu_get_clock();
++            whpx_tsc_lead = 0;
++            if (SUCCEEDED(hr) && whpx_vclock_offset_valid) {
++                /* host time now minus host time at cpu_disable_ticks() */
++                now -= whpx_vclock_stopped - whpx_vclock_offset;
++                whpx_tsc_lead = MIN(MAX(now, 0), NANOSECONDS_PER_SECOND);
++            }
+         }
+     } else if (whp_dispatch.WHvResumePartitionTime) {
+         /*
+@@ -2026,11 +2052,23 @@ static void whpx_vm_state_change(void *opaque, int running, RunState state)
+          * WHvResumePartitionTime the first WHvRunVirtualProcessor call
+          * resumes it.
+          */
++        while (whpx_tsc_lead > 0) {
++            left = whpx_vclock_stopped + whpx_tsc_lead - cpu_get_clock();
++            if (left <= 0) {
++                break;
++            }
++            if (left > 2 * SCALE_MS) {
++                g_usleep((left - SCALE_MS) / SCALE_US);
++            }
++        }
++        whpx_tsc_lead = 0;
+         hr = whp_dispatch.WHvResumePartitionTime(whpx->partition);
+         if (FAILED(hr)) {
+             warn_report("WHPX: Failed to resume partition time,"
+                         " hr=%08lx", hr);
+         }
++        whpx_vclock_offset = cpu_get_clock() - get_clock();
++        whpx_vclock_offset_valid = true;
+     }
+ }
+ 
