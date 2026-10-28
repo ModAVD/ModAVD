@@ -1,11 +1,11 @@
 {
   "ModAVD-0.35.0-win-x64.zip": {
     "bytes": 281536289,
-    "sha256": "a93e9c35b6baa6d8838fc53b5937e36e24b632d08e0869f1747c913eb39b5430"
+    "sha256": "e0309814e86adb95de5c0bddc71c1bd4479d2cad18b74a98fe9f8ed1b6f66a93"
   },
   "ModAVD-0.35.0-sources.zip": {
     "bytes": 829637443,
-    "sha256": "97cb21272969c3de88695ffd0c70bf99ad9e3481292ba5c4e3a8b460315a4320"
+    "sha256": "798f7e9fc659f42784b1589f40a3ad0af96cc4d1d9f7d52035b4071650372a95"
   },
   "build-bazel-862d0ec34f27-glib-2.82.2.bcr.5.aemu.tar.xz": {
     "bytes": 28696,
@@ -133,11 +133,11 @@
   },
   "manifest-aosp-base.xml": {
     "bytes": 13590,
-    "sha256": "d8291cdbd3c5b4d617a6f3f7d9685427b4f15f842ad3bbd6b4e757bee34276a1"
+    "sha256": "fb89a9daaa732d43e906c40a104b8c5cd85db9c38c58873b947c6fb71eb98cf6"
   },
   "manifest-mas35.xml": {
     "bytes": 13640,
-    "sha256": "4bd3204c5c5326cca9381ef9e5ddfdacec2f05e69e046725d7e06dd714210be3"
+    "sha256": "84e1f125494b426b2dfcea0f7c9393dcc4e7e17699d9f5768e0cfe726da53043"
   },
   "pixman-0.32.4.tar.gz": {
     "bytes": 817407,

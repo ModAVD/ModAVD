@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ModAVD mas-35（Pkg.BuildId=mas-35，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-10-27 生成。
+<!-- ModAVD mas-35（Pkg.BuildId=mas-35，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-10-28 生成。
      manifest 源：https://android.googlesource.com/platform/manifest 分支 emu-main-dev（repo init 时 depth=1）。
      revision 全部是 AOSP emu-main-dev 上的公开提交；qemu / gfxstream / crashpad 在此基础上按 patches/ 回放补丁得到 mas-35 的源码。
 -->
