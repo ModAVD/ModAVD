@@ -1,0 +1,181 @@
+From 1cad229e0d9a8ca6bd09bda179a6057482457d02 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 22:08:07 +0800
+Subject: [PATCH] components: validate pinned adb DLLs and package revision
+ before skipping
+
+Check all three adb runtime files against the verified Google archive and require the pinned revision. Reuse the validator before staged installation. Includes Windows PowerShell 5.1 missing, truncated, modified and version-mismatch regression fixtures.
+---
+ tools/fetch-components.ps1               | 54 ++++++++++++++---
+ tools/tests/platform-tools-integrity.ps1 | 75 ++++++++++++++++++++++++
+ 2 files changed, 121 insertions(+), 8 deletions(-)
+ create mode 100644 tools/tests/platform-tools-integrity.ps1
+
+diff --git a/tools/fetch-components.ps1 b/tools/fetch-components.ps1
+index 5965058..ada1065 100644
+--- a/tools/fetch-components.ps1
++++ b/tools/fetch-components.ps1
+@@ -104,7 +104,13 @@ $Components = @(
+         Id = 'platform-tools'; Name = '平台工具（adb）'; Version = '37.0.1'
+         Url = 'platform-tools_r37.0.1-win.zip'; Size = [long]8044989; Sha1 = 'e03e78b1d80b396f1c3358e31251cb31740e1110'
+         Target = 'platform-tools'; ArchiveRoot = 'platform-tools'
+-        KeyFiles = @('adb.exe'); ExtractedBytes = [long]20MB
++        KeyFiles = @('adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll'); ExtractedBytes = [long]20MB
++        # Pinned files from the SHA-1-verified Google 37.0.1 archive.
++        KeyHashes = @{
++            'adb.exe' = 'b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f'
++            'AdbWinApi.dll' = 'c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d'
++            'AdbWinUsbApi.dll' = '0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b'
++        }
+         Props = "Pkg.UserSrc=false`nPkg.Revision=37.0.1`n"
+     },
+     @{
+@@ -266,6 +272,17 @@ function Get-Sha1([string]$Path) {
+     return ([BitConverter]::ToString($hash).Replace('-', '')).ToLowerInvariant()
+ }
+ 
++function Get-Sha256([string]$Path) {
++    $sha = [Security.Cryptography.SHA256]::Create()
++    try {
++        $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 1MB)
++        try {
++            $hash = $sha.ComputeHash($fs)
++        } finally { $fs.Dispose() }
++    } finally { $sha.Dispose() }
++    return ([BitConverter]::ToString($hash).Replace('-', '')).ToLowerInvariant()
++}
++
+ function Remove-File([string]$Path) {
+     # 删掉丢弃的 .part（重新下载用）
+     if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }
+@@ -292,14 +309,31 @@ function Clear-StagingRoot {
+     Write-Log '  清理了上次遗留的 sdk\.staging'
+ }
+ 
+-function Test-Installed($C) {
+-    $dir = Join-Path $SdkDir $C.Target
+-    foreach ($k in $C.KeyFiles) {
+-        $p = Join-Path $dir $k
+-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $false }
+-        if ((Get-Item -LiteralPath $p).Length -le 0) { return $false }
++function Test-ComponentFiles($C, [string]$Dir) {
++    try {
++        foreach ($k in $C.KeyFiles) {
++            $p = Join-Path $Dir $k
++            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $false }
++            if ((Get-Item -LiteralPath $p).Length -le 0) { return $false }
++        }
++        if ($C.KeyHashes) {
++            foreach ($entry in $C.KeyHashes.GetEnumerator()) {
++                $hash = (Get-Sha256 (Join-Path $Dir $entry.Key))
++                if ($hash -ine $entry.Value) { return $false }
++            }
++            $props = Join-Path $Dir 'source.properties'
++            if (-not (Test-Path -LiteralPath $props -PathType Leaf)) { return $false }
++            $revision = @([IO.File]::ReadAllLines($props) | Where-Object { $_ -match '^\s*Pkg\.Revision\s*=' })
++            if ($revision.Count -ne 1 -or ($revision[0] -replace '^\s*Pkg\.Revision\s*=\s*', '').Trim() -ne $C.Version) { return $false }
++        }
++        return $true
++    } catch {
++        return $false
+     }
+-    return $true
++}
++
++function Test-Installed($C) {
++    return (Test-ComponentFiles $C (Join-Path $SdkDir $C.Target))
+ }
+ 
+ function Get-Revision($C) {
+@@ -608,6 +642,10 @@ function Install-Component($C, [string]$Zip) {
+             Say '  压缩包里没有 source.properties，已补写'
+         }
+ 
++        if (-not (Test-ComponentFiles $C $extracted)) {
++            throw ('解压后的关键文件或版本校验失败：' + $C.Name)
++        }
++
+         $script:Where = '把解压好的 ' + $C.Name + ' 挪到 sdk\' + $C.Target
+         $target = Join-Path $SdkDir $C.Target
+         if (Test-Path -LiteralPath $target) {
+diff --git a/tools/tests/platform-tools-integrity.ps1 b/tools/tests/platform-tools-integrity.ps1
+new file mode 100644
+index 0000000..d7c5c2a
+--- /dev/null
++++ b/tools/tests/platform-tools-integrity.ps1
+@@ -0,0 +1,75 @@
++﻿# Copyright 2026 Ji Mao Cai
++# SPDX-License-Identifier: Apache-2.0
++
++param([Parameter(Mandatory=$true)][string]$Archive)
++# Run with Windows PowerShell 5.1 and Google's pinned 37.0.1 ZIP.
++$ErrorActionPreference = 'Stop'
++Add-Type -AssemblyName System.IO.Compression.FileSystem
++$path = Join-Path (Split-Path $PSScriptRoot -Parent) 'fetch-components.ps1'
++$tokens = $null; $errors = $null
++$ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
++if ($errors.Count) { throw $errors[0] }
++$assignment = $ast.Find({ param($n)
++    $n -is [Management.Automation.Language.AssignmentStatementAst] -and
++    $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and
++    $n.Left.VariablePath.UserPath -eq 'Components'
++}, $true)
++$components = & ([scriptblock]::Create($assignment.Right.Extent.Text))
++$component = @($components | Where-Object { $_.Id -eq 'platform-tools' })[0]
++foreach ($name in @('Get-Sha1', 'Get-Sha256', 'Test-ComponentFiles', 'Test-Installed')) {
++    $function = $ast.Find({ param($n)
++        $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
++    }, $true)
++    if (-not $function) { throw ('Missing function: ' + $name) }
++    . ([scriptblock]::Create($function.Extent.Text))
++}
++if ((Get-Item -LiteralPath $Archive).Length -ne $component.Size -or
++    (Get-Sha1 $Archive) -ine $component.Sha1) {
++    throw 'Google ZIP does not match the pinned size/hash'
++}
++$tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
++$fixture = Join-Path $tempParent ('modavd-components-' + [guid]::NewGuid().ToString('N'))
++$checks = 0
++function Expect([bool]$Expected) {
++    if ((Test-Installed $component) -ne $Expected) { throw ('Unexpected completeness result at check ' + $script:checks) }
++    $script:checks++
++}
++try {
++    [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $fixture)
++    $SdkDir = $fixture
++    $dir = Join-Path $fixture 'platform-tools'
++    Expect $true; Expect $true
++    foreach ($name in $component.KeyFiles) {
++        $file = Join-Path $dir $name
++        $bytes = [IO.File]::ReadAllBytes($file)
++        $aside = Join-Path $fixture 'removed.bin'
++        Move-Item -LiteralPath $file -Destination $aside
++        Expect $false
++        Move-Item -LiteralPath $aside -Destination $file
++        [IO.File]::WriteAllBytes($file, [byte[]]@(0))
++        Expect $false
++        $bad = [byte[]]$bytes.Clone(); $bad[0] = $bad[0] -bxor 255
++        [IO.File]::WriteAllBytes($file, $bad)
++        Expect $false
++        [IO.File]::WriteAllBytes($file, $bytes)
++        Expect $true
++    }
++    $props = Join-Path $dir 'source.properties'
++    $original = [IO.File]::ReadAllBytes($props)
++    Remove-Item -LiteralPath $props
++    Expect $false
++    [IO.File]::WriteAllText($props, 'Pkg.Revision=0.0.0')
++    Expect $false
++    [IO.File]::WriteAllText($props, "Pkg.Revision=37.0.1`nPkg.Revision=37.0.1`n")
++    Expect $false
++    [IO.File]::WriteAllBytes($props, $original)
++    Expect $true
++    if (-not (Test-ComponentFiles $component $dir)) { throw 'Staged validator differs' }
++    Write-Output ('platform-tools: ' + $checks + ' pinned-package integrity checks passed')
++} finally {
++    $resolved = [IO.Path]::GetFullPath($fixture)
++    if ($resolved.StartsWith((Join-Path $tempParent 'modavd-components-'), [StringComparison]::OrdinalIgnoreCase) -and
++        (Test-Path -LiteralPath $resolved)) {
++        Remove-Item -LiteralPath $resolved -Recurse -Force
++    }
++}
