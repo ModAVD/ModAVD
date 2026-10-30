@@ -29,7 +29,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录>
 1. **组包**：依据已审核的文件政策复制 SDK、桌面 APK、组件下载/问题收集脚本、说明与许可证，最后写 `modavd-manifest.json`（版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，以及其余每个文件的大小和 SHA-256）。SDK 文件集改变时先复核政策；不在原 SDK 上删除文件。
 2. **主包 ZIP**：`ModAVD-0.34.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录（Mirror 酱按路径比文件，外层文件夹带版本号会让增量等于全量）。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。
 3. **验证主包**：逐文件 SHA-256 与组包目录一致，排除文件不在包内，条目直接从包根开始（带外层文件夹就报错），路径和编码全部通过，清单与包里的文件一一对应。
-4. **补丁**：从构建快照记录的提交导出，作者为 `qiyinxi <qiyinxi@foxmail.com>`，提交说明无联合作者尾注。在独立临时仓库用 `git am --keep-cr` 回放，每个提交的源码树与原提交相同。
+4. **补丁**：从构建快照记录的提交导出，提交说明无联合作者尾注。外部贡献者的补丁保留本人署名（GitHub noreply 地址），其余作者为 `qiyinxi <qiyinxi@foxmail.com>`；`scripts/checks.py` 只认这两种。在独立临时仓库用 `git am --keep-cr` 回放，每个提交的源码树和作者与原提交相同。
 5. **源码总包与清单**：没变的源码文件逐个验哈希后复用，只给变化的源项目重新归档。用 `7z a -tzip -mx0 -mcu=on` 生成和平台无关的 `ModAVD-0.34.0-sources.zip`，外层文件夹同名；包括对应源码、`SOURCES.txt`、两份 manifest 和包内的 `SHA256SUMS.txt`。清单同时同步到本仓库 `manifests/`，不再分别上传附件。
 6. **两层校验表**：包内那份只列逐个源码文件，排除自身；外层 `SHA256SUMS.txt` **只列主包和源码总包这两行**。
 7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、最近 10 版的改动摘要）；接着是更新公告（更新内容、怎么更新、AUTO-MAS 版本、已知问题）；然后一行 `<!-- modavd:github-only -->`；以下是回归结果、两个 ZIP 的字节数和 SHA-256、源码包的文件数和总大小。逐个源码文件的 SHA-256 不进说明，见源码包内和本仓库 `release/` 的 `<版本>.sources.SHA256SUMS.txt`。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
