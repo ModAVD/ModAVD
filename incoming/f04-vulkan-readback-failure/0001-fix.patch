@@ -1,0 +1,212 @@
+From 8d099821a1b6015dd8d2295f2edd0e6da796d956 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 22:00:42 +0800
+Subject: [PATCH] host: propagate readback failure to synchronous post
+ callbacks
+
+Return the backend result through both ColorBuffer wrappers and skip channel conversion when readback failed. Regression probes compile both GLES configurations and exercise first-frame failure, repeated failure and recovery.
+---
+ host/color_buffer.cpp            |  16 ++---
+ host/color_buffer.h              |   2 +-
+ host/frame_buffer.cpp            |   5 +-
+ tests/modavd/readback-failure.py | 107 +++++++++++++++++++++++++++++++
+ 4 files changed, 120 insertions(+), 10 deletions(-)
+ create mode 100644 tests/modavd/readback-failure.py
+
+diff --git a/host/color_buffer.cpp b/host/color_buffer.cpp
+index af9e1e3..8e196ac 100644
+--- a/host/color_buffer.cpp
++++ b/host/color_buffer.cpp
+@@ -71,7 +71,7 @@ class ColorBuffer::Impl : public LazySnapshotObj<ColorBuffer::Impl> {
+     uint32_t getHeight() const { return mHeight; }
+     GfxstreamFormat getFormat() const { return mFormat; }
+ 
+-    void readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++    bool readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                      void* outPixels, uint64_t outPixelsSize);
+     void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, Rect rect,
+                            GfxstreamFormat pixelsFormat, void* outPixels,
+@@ -278,24 +278,24 @@ void ColorBuffer::Impl::restore() {
+ #endif
+ }
+ 
+-void ColorBuffer::Impl::readToBytes(int x, int y, int width, int height,
++bool ColorBuffer::Impl::readToBytes(int x, int y, int width, int height,
+                                     GfxstreamFormat pixelsFormat, void* outPixels,
+                                     uint64_t outPixelsSize) {
+     touch();
+ 
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     if (mColorBufferGl) {
+-        mColorBufferGl->readPixels(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
+-        return;
++        return mColorBufferGl->readPixels(x, y, width, height, pixelsFormat, outPixels,
++                                         outPixelsSize);
+     }
+ #endif
+ 
+     if (mColorBufferVk) {
+-        mColorBufferVk->readToBytes(x, y, width, height, outPixels, outPixelsSize);
+-        return;
++        return mColorBufferVk->readToBytes(x, y, width, height, outPixels, outPixelsSize);
+     }
+ 
+     GFXSTREAM_FATAL("%s: No ColorBuffer impl", __func__);
++    return false;
+ }
+ 
+ void ColorBuffer::Impl::readToBytesScaled(
+@@ -569,9 +569,9 @@ uint32_t ColorBuffer::getHeight() const { return mImpl->getHeight(); }
+ 
+ GfxstreamFormat ColorBuffer::getFormat() const { return mImpl->getFormat(); }
+ 
+-void ColorBuffer::readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++bool ColorBuffer::readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                               void* outPixels, uint64_t outPixelsSize) {
+-    mImpl->readToBytes(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
++    return mImpl->readToBytes(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
+ }
+ 
+ void ColorBuffer::readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation,
+diff --git a/host/color_buffer.h b/host/color_buffer.h
+index faf2d0f..c557545 100644
+--- a/host/color_buffer.h
++++ b/host/color_buffer.h
+@@ -68,7 +68,7 @@ class ColorBuffer : public IColorBuffer, public LazySnapshotObj<ColorBuffer> {
+     uint32_t getHeight() const override;
+     GfxstreamFormat getFormat() const;
+ 
+-    void readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++    bool readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                      void* outPixels, uint64_t outPixelsSize) override;
+     void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, const Rect& rect,
+                            GfxstreamFormat pixelsFormat, void* outPixels,
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 9b01589..458e1da 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -1601,7 +1601,10 @@ static bool readbackColorBufferWithoutWorker(ColorBuffer* cb, unsigned char* img
+         return false;
+     }
+     const uint64_t size = 4ull * width * height;
+-    cb->readToBytes(0, 0, static_cast<int>(width), static_cast<int>(height), format, img, size);
++    if (!cb->readToBytes(0, 0, static_cast<int>(width), static_cast<int>(height), format, img,
++                         size)) {
++        return false;
++    }
+     const bool swapRedBlue = srcBgra != readBgra;
+     if (swapRedBlue || srcNoAlpha) {
+         for (uint64_t i = 0; i < size; i += 4) {
+diff --git a/tests/modavd/readback-failure.py b/tests/modavd/readback-failure.py
+new file mode 100644
+index 0000000..bc1d8d9
+--- /dev/null
++++ b/tests/modavd/readback-failure.py
+@@ -0,0 +1,107 @@
++# Copyright 2026 Ji Mao Cai
++# SPDX-License-Identifier: Apache-2.0
++
++"""Compile actual ColorBuffer wrappers and callback helper with GL/Vulkan doubles.
++
++Run from a Visual Studio Developer PowerShell. Does not invoke a GPU or recorder.
++"""
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++
++def function(source, name):
++    match = re.search(r"^(?:static )?bool " + re.escape(name) + r"\([^;]*?\)\s*\{", source, re.M)
++    assert match, name
++    end = source.index("{", match.start()) + 1
++    depth = 1
++    while depth:
++        depth += (source[end] == "{") - (source[end] == "}")
++        end += 1
++    return source[match.start():end]
++
++root = Path(__file__).resolve().parents[2]
++source = (root / "host/color_buffer.cpp").read_text(encoding="utf-8")
++functions = "\n".join(function(source, name) for name in ("ColorBuffer::Impl::readToBytes", "ColorBuffer::readToBytes"))
++functions += "\n" + function((root / "host/frame_buffer.cpp").read_text(encoding="utf-8"), "readbackColorBufferWithoutWorker")
++code = r'''
++#include <algorithm>
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <stdexcept>
++#define GFXSTREAM_FATAL(...) throw std::runtime_error("no implementation")
++enum class GfxstreamFormat { R8G8B8A8_UNORM, B8G8R8A8_UNORM, R8G8B8X8_UNORM, Other };
++struct Backend {
++    bool success = false;
++    bool readToBytes(int, int, int, int, void* out, uint64_t n) {
++        if (!success) return false;
++        for (uint64_t i = 0; i < n; ++i) ((uint8_t*)out)[i] = uint8_t(i % 4 + 1);
++        return true;
++    }
++    bool readPixels(int x, int y, int w, int h, GfxstreamFormat, void* out, uint64_t n) {
++        return readToBytes(x, y, w, h, out, n);
++    }
++};
++struct ColorBuffer {
++    struct Impl {
++        Backend* mColorBufferGl = nullptr;
++        Backend* mColorBufferVk = nullptr;
++        void touch() {}
++        bool readToBytes(int, int, int, int, GfxstreamFormat, void*, uint64_t);
++    };
++    Impl* mImpl;
++    GfxstreamFormat format;
++    uint32_t getWidth() const { return 2; }
++    uint32_t getHeight() const { return 2; }
++    GfxstreamFormat getFormat() const { return format; }
++    bool readToBytes(int, int, int, int, GfxstreamFormat, void*, uint64_t);
++};
++@FUNCTIONS@
++int main() {
++    int checks = 0;
++    for (bool gl : {false, true}) {
++#if !GFXSTREAM_ENABLE_HOST_GLES
++        if (gl) continue;
++#endif
++        for (auto format : {GfxstreamFormat::R8G8B8A8_UNORM, GfxstreamFormat::B8G8R8A8_UNORM,
++                            GfxstreamFormat::R8G8B8X8_UNORM}) for (bool bgra : {false, true}) {
++            Backend backend;
++            ColorBuffer::Impl impl;
++            (gl ? impl.mColorBufferGl : impl.mColorBufferVk) = &backend;
++            ColorBuffer cb{&impl, format};
++            uint8_t image[16], previous[16];
++            memset(image, 0xa5, sizeof(image));
++            // First-frame failure, success, consecutive failures, then recovery.
++            for (bool success : {false, true, false, false, true}) {
++                memcpy(previous, image, sizeof(image)); backend.success = success;
++                bool updated = readbackColorBufferWithoutWorker(&cb, image, 2, 2, bgra);
++                assert(updated == success);
++                if (!success) assert(memcmp(previous, image, sizeof(image)) == 0);
++                else for (int i = 0; i < 16; i += 4) {
++                    bool swap = (format == GfxstreamFormat::B8G8R8A8_UNORM) != bgra;
++                    assert(image[i] == (swap ? 3 : 1));
++                    assert(image[i + 1] == 2 && image[i + 2] == (swap ? 1 : 3));
++                    assert(image[i + 3] == (format == GfxstreamFormat::R8G8B8X8_UNORM ? 255 : 4));
++                }
++                ++checks;
++            }
++            assert(!readbackColorBufferWithoutWorker(&cb, image, 3, 2, bgra));
++            assert(!readbackColorBufferWithoutWorker(nullptr, image, 2, 2, bgra));
++            assert(!readbackColorBufferWithoutWorker(&cb, nullptr, 2, 2, bgra));
++            cb.format = GfxstreamFormat::Other;
++            assert(!readbackColorBufferWithoutWorker(&cb, image, 2, 2, bgra));
++        }
++    }
++    printf("readback: %d success/failure/recovery checks, GLES=%d\n", checks, GFXSTREAM_ENABLE_HOST_GLES);
++}
++'''.replace("@FUNCTIONS@", functions)
++with tempfile.TemporaryDirectory(prefix="modavd-readback-") as tmp:
++    cpp = Path(tmp) / "probe.cpp"
++    cpp.write_text(code)
++    for gles in (0, 1):
++        exe = Path(tmp) / ("probe" + str(gles) + ".exe")
++        subprocess.run(["cl", "/nologo", "/std:c++17", "/EHsc", "/DGFXSTREAM_ENABLE_HOST_GLES=" + str(gles),
++                        str(cpp), "/Fe:" + str(exe), "/Fo:" + str(Path(tmp) / "probe.obj")], cwd=tmp, check=True)
++        subprocess.run([str(exe)], check=True)
