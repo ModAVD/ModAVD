@@ -8,3 +8,5 @@ scripts/*.json text eol=lf
 # 工作区里的文件（那边 core.autocrlf=true 检出，.bat 和多数 .ps1 是 CRLF），不是那边 Git 里存的内容（LF）。
 # .ps1 是 UTF-8 带 BOM，给 PowerShell 5.1 用；.bat 是 CRLF，给 cmd 用
 package/** -text
+# 执行桥源码与源码包里的逐字节相同；modavd_bridge.rc 的 SHA-256 随每一版固定
+bridge/** -text

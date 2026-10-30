@@ -23,6 +23,7 @@ ModAVD 只有一个维护者，回复可能要几天。大一点的改动请先�
 - 动手前在 issue 里说一声；issue 已经指派给谁，就是有人在做。
 - README 和 `docs/` 里写错、写得不清楚的地方：直接提 PR。
 - 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。要守的写法见 [package/README.md](package/README.md)。
+- arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装桥、不装桥两种实例上实跑游戏回归。
 - 管理器和命令行（`ModAVD.exe`、`tools\modavd.exe`）在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)：代码问题和 PR 提到那边，署名和许可规矩与本页相同。
 - `patches/`、`manifests/`、`release/` 是发版工具导出的，`scripts/` 和维护者本地的发版工具逐字节一致：PR 不直接改这些，有问题先开 issue。
 - 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。

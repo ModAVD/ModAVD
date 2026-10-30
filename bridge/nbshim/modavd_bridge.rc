@@ -1,0 +1,61 @@
+# /system/etc/init/modavd_bridge.rc
+#
+# Our own file. Nothing of Google's is modified.
+#
+# WHY THIS IS NEEDED
+# ------------------
+# The image ships /system/etc/init/ndk_translation.rc, which registers the arm /
+# arm64 binfmt_misc handlers — the thing that lets the kernel exec arm64 ELF
+# BINARIES through the translator (ro.enable.native.bridge.exec=1 on this image).
+# Its triggers test the native-bridge property against a LITERAL value:
+#
+#   on property:ro.dalvik.vm.native.bridge=libndk_translation.so \
+#      && property:ro.dalvik.vm.isa.arm64=x86_64
+#       copy /system/etc/binfmt_misc/arm64_exe /proc/sys/fs/binfmt_misc/register
+#       copy /system/etc/binfmt_misc/arm64_dyn /proc/sys/fs/binfmt_misc/register
+#
+# The moment we point ro.dalvik.vm.native.bridge at libmodavd_bridge.so those
+# triggers stop firing and arm64 executables stop running. JNI libraries loaded by
+# an app go through the NativeBridgeCallbacks struct and are unaffected, so a
+# JNI-only game (阴阳师) would not notice — but anything that execs an arm64 binary
+# would, silently.
+#
+# This file re-arms the same registration for our value. The /proc/sys/fs/binfmt_misc
+# mount itself comes from ndk_translation.rc's unconditional `on early-init` block,
+# so it is there either way.
+#
+# ZRAM ON A REMOUNTED INSTANCE
+# ----------------------------
+# Installing the bridge goes through `adb remount`, after which /system_dlkm is an
+# overlay mounted with override_creds=off: lookups in the lower erofs run with the
+# caller's credentials. init.ranchu.rc loads zram in `on early-init` with
+#
+#   start vendor.dlkm_loader
+#   exec u:r:modprobe:s0 -- /system/bin/modprobe -a -d /system/lib/modules zram.ko
+#
+# and the modprobe domain may not read / getattr system_dlkm_file directories. If
+# that modprobe walks /system/lib/modules before dlkm_loader (whose domain may) has
+# looked those directories up, it is denied and exits 1, and the device boots
+# without swap (3 of 4 cold boots on 10-29). Once dlkm_loader is done the dentries
+# are cached and the same command works, so it is repeated here. On a boot where
+# the first one succeeded it does nothing. swapon_all runs later, at
+# sys-boot-completed-set, so the device is still unconfigured at this point and
+# the comp_algorithm write that `on init` made too early can be redone.
+#
+# Install:
+#   push to /system/etc/init/modavd_bridge.rc
+#   chcon u:object_r:system_file:s0 /system/etc/init/modavd_bridge.rc
+#   chmod 644
+# Remove it when reverting.
+
+on property:ro.dalvik.vm.native.bridge=libmodavd_bridge.so && property:ro.dalvik.vm.isa.arm=x86
+    copy /system/etc/binfmt_misc/arm_exe /proc/sys/fs/binfmt_misc/register
+    copy /system/etc/binfmt_misc/arm_dyn /proc/sys/fs/binfmt_misc/register
+
+on property:ro.dalvik.vm.native.bridge=libmodavd_bridge.so && property:ro.dalvik.vm.isa.arm64=x86_64
+    copy /system/etc/binfmt_misc/arm64_exe /proc/sys/fs/binfmt_misc/register
+    copy /system/etc/binfmt_misc/arm64_dyn /proc/sys/fs/binfmt_misc/register
+
+on property:vendor.dlkm.modules.ready=true
+    exec u:r:modprobe:s0 -- /system/bin/modprobe -a -d /system/lib/modules zram.ko
+    write /sys/block/zram0/comp_algorithm lz4
