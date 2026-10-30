@@ -103,7 +103,13 @@ $Components = @(
         Id = 'platform-tools'; Name = '平台工具（adb）'; Version = '37.0.1'
         Url = 'platform-tools_r37.0.1-win.zip'; Size = [long]8044989; Sha1 = 'e03e78b1d80b396f1c3358e31251cb31740e1110'
         Target = 'platform-tools'; ArchiveRoot = 'platform-tools'
-        KeyFiles = @('adb.exe'); ExtractedBytes = [long]20MB
+        KeyFiles = @('adb.exe', 'AdbWinApi.dll', 'AdbWinUsbApi.dll'); ExtractedBytes = [long]20MB
+        # Pinned files from the SHA-1-verified Google 37.0.1 archive.
+        KeyHashes = @{
+            'adb.exe' = 'b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f'
+            'AdbWinApi.dll' = 'c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d'
+            'AdbWinUsbApi.dll' = '0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b'
+        }
         Props = "Pkg.UserSrc=false`nPkg.Revision=37.0.1`n"
     },
     @{
@@ -265,6 +271,17 @@ function Get-Sha1([string]$Path) {
     return ([BitConverter]::ToString($hash).Replace('-', '')).ToLowerInvariant()
 }
 
+function Get-Sha256([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 1MB)
+        try {
+            $hash = $sha.ComputeHash($fs)
+        } finally { $fs.Dispose() }
+    } finally { $sha.Dispose() }
+    return ([BitConverter]::ToString($hash).Replace('-', '')).ToLowerInvariant()
+}
+
 function Remove-File([string]$Path) {
     # 删掉丢弃的 .part（重新下载用）
     if (Test-Path -LiteralPath $Path) { [IO.File]::Delete($Path) }
@@ -291,14 +308,31 @@ function Clear-StagingRoot {
     Write-Log '  清理了上次遗留的 sdk\.staging'
 }
 
-function Test-Installed($C) {
-    $dir = Join-Path $SdkDir $C.Target
-    foreach ($k in $C.KeyFiles) {
-        $p = Join-Path $dir $k
-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $false }
-        if ((Get-Item -LiteralPath $p).Length -le 0) { return $false }
+function Test-ComponentFiles($C, [string]$Dir) {
+    try {
+        foreach ($k in $C.KeyFiles) {
+            $p = Join-Path $Dir $k
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $false }
+            if ((Get-Item -LiteralPath $p).Length -le 0) { return $false }
+        }
+        if ($C.KeyHashes) {
+            foreach ($entry in $C.KeyHashes.GetEnumerator()) {
+                $hash = (Get-Sha256 (Join-Path $Dir $entry.Key))
+                if ($hash -ine $entry.Value) { return $false }
+            }
+            $props = Join-Path $Dir 'source.properties'
+            if (-not (Test-Path -LiteralPath $props -PathType Leaf)) { return $false }
+            $revision = @([IO.File]::ReadAllLines($props) | Where-Object { $_ -match '^\s*Pkg\.Revision\s*=' })
+            if ($revision.Count -ne 1 -or ($revision[0] -replace '^\s*Pkg\.Revision\s*=\s*', '').Trim() -ne $C.Version) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
     }
-    return $true
+}
+
+function Test-Installed($C) {
+    return (Test-ComponentFiles $C (Join-Path $SdkDir $C.Target))
 }
 
 function Get-Revision($C) {
@@ -605,6 +639,10 @@ function Install-Component($C, [string]$Zip) {
         if (-not (Test-Path -LiteralPath $props)) {
             [IO.File]::WriteAllText($props, $C.Props, (New-Object Text.UTF8Encoding($false)))
             Say '  压缩包里没有 source.properties，已补写'
+        }
+
+        if (-not (Test-ComponentFiles $C $extracted)) {
+            throw ('解压后的关键文件或版本校验失败：' + $C.Name)
         }
 
         $script:Where = '把解压好的 ' + $C.Name + ' 挪到 sdk\' + $C.Target
