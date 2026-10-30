@@ -16,6 +16,14 @@ MACHINE_VERSIONS = 10
 MAX_ANNOUNCEMENT_CHARS = 4000
 MAX_MACHINE_CHARS = 8000
 MANIFEST = "modavd-manifest.json"
+# Patch authors: the maintainer's public identity, or an outside contributor's GitHub noreply address, which
+# CONTRIBUTING asks for and the export keeps. Any other address could be a private one.
+MAINTAINER = "qiyinxi <qiyinxi@foxmail.com>"
+NOREPLY_AUTHOR = re.compile(r"[^<>\r\n]+ <(?:[0-9]+\+)?[A-Za-z0-9][A-Za-z0-9-]{0,38}@users\.noreply\.github\.com>")
+
+
+def author_allowed(author):
+    return author == MAINTAINER or bool(NOREPLY_AUTHOR.fullmatch(author))
 
 
 def version_key(value):
@@ -219,7 +227,7 @@ def replay(root, work):
             raise ValueError(f"Replayed count/tree differs: {directory}")
         authors = set(git(repo, "log", "--format=%an <%ae>", s["base"] + "..HEAD").splitlines())
         messages = git(repo, "log", "--format=%B", s["base"] + "..HEAD")
-        if authors != {"qiyinxi <qiyinxi@foxmail.com>"} or re.search(r"(?i)co-authored-by:", messages):
+        if not all(author_allowed(a) for a in authors) or re.search(r"(?i)co-authored-by:", messages):
             raise ValueError("Patch authors/trailers differ")
         summary.append({"series": directory, "commits": count, "tree": tree, "depth": 1})
         print(f"Clean AOSP shallow replay: {directory}: {count} patches; tree {tree}", flush=True)
