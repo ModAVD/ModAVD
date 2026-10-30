@@ -588,6 +588,7 @@ Invoke-Step '模拟器日志' {
 
 Invoke-Step '模拟器崩溃转储' {
     Section '模拟器崩溃转储'
+    L '收集范围：仅 ModAVD 的 emu-crash-<version>-mas.db；近 7 天内最新 3 份'
     $bases = @()
     foreach ($b in @((Join-Path $env:LOCALAPPDATA 'Temp\AndroidEmulator'), (Join-Path $env:TEMP 'AndroidEmulator'))) {
         if ($b -and (Test-Path -LiteralPath $b)) {
@@ -598,7 +599,7 @@ Invoke-Step '模拟器崩溃转储' {
     $since = (Get-Date).AddDays(-7)
     $dumps = @()
     foreach ($b in $bases) {
-        foreach ($db in @(Get-ChildItem -LiteralPath $b -Directory -Filter 'emu-crash-*.db' -ErrorAction SilentlyContinue)) {
+        foreach ($db in @(Get-ChildItem -LiteralPath $b -Directory -Filter 'emu-crash-*-mas.db' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^emu-crash-[0-9]+\.[0-9]+\.[0-9]+-mas\.db$' })) {
             $dumps += @(Get-ChildItem -LiteralPath $db.FullName -Recurse -File -Filter '*.dmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $since })
         }
     }
