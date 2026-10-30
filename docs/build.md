@@ -1,7 +1,8 @@
 # 从源码构建 ModAVD
 
-下面以 `0.35.0`（构建号 mas-35）为例。其他版本要使用对应版本的仓库清单和补丁，不能把不同版本的源码和二进制混用。
-对应源码总包在 [0.35.0 Release](https://github.com/ModAVD/ModAVD/releases/tag/v0.35.0)，其中 `SOURCES.txt` 说明每个源码文件的来源和用途。
+下面以 main 中准备中的 `0.35.0`（构建号 mas-35）源码为例，固定本仓库提交 `b8c5b85fe4a85dee7c78f92fce950c63801e5a50`。它尚无公开 Release、标签或对应源码总包，下面直接检出这个已存在的提交，并按固定清单同步源码。
+
+当前公开版本是 [0.32.1 Release](https://github.com/ModAVD/ModAVD/releases/tag/v0.32.1)。要复现该发行版，请使用 [v0.32.1 标签下的构建说明](https://github.com/ModAVD/ModAVD/blob/v0.32.1/docs/build.md)及同一个 Release 的源码总包；包内 `SOURCES.txt` 说明各源码文件的来源和用途。其他版本也要使用对应版本的清单和补丁，不能把不同版本的源码和二进制混用。
 从 0.32.1 起版本号写成 `0.<N>.<P>`（tag `v0.32.1`），N 就是构建号 mas-N：清单仍叫 `manifest-masN.xml`，补丁目录仍按 masN 命名。
 
 ## 环境
@@ -26,12 +27,12 @@ $env:GIT_CONFIG_VALUE_2 = 'true'
 
 ## 获取确切版本
 
-先克隆本仓库并检出该版本的 Release 标签。mas30 的 Release 标签早于 `manifests/`，构建 mas30 时可以检出 mas32 的标签，里面同样有 mas30 的清单和补丁。记下本仓库目录的绝对位置：
+先克隆本仓库并检出下面固定的 mas35 提交。构建已发布版本时改用它实际存在的 Release 标签。mas30 的标签早于 `manifests/`，构建 mas30 时可以检出 mas32 的标签，里面同样有 mas30 的清单和补丁。记下本仓库目录的绝对位置：
 
 ```powershell
 git clone https://github.com/ModAVD/ModAVD.git
 Set-Location ModAVD
-git checkout v0.35.0
+git checkout b8c5b85fe4a85dee7c78f92fce950c63801e5a50
 $modavd = (Get-Location).Path
 ```
 
