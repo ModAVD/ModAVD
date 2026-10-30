@@ -1,0 +1,337 @@
+From 54018b0a1d84ca34aa8518e3db15c5dfb561128d Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:57:05 +0800
+Subject: [PATCH] file-win32: preserve direct I/O alignment and propagate read
+ errors
+
+Keep the original aligned iovecs for uncached handles. Return signed I/O errors through the worker and reserve zero padding for real EOF. Includes an isolated native Win32 regression probe; full emulator build remains for maintainer validation.
+---
+ block/file-win32.c            |  41 +++++--
+ tests/modavd/file-win32-io.py | 213 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 243 insertions(+), 11 deletions(-)
+ create mode 100644 tests/modavd/file-win32-io.py
+
+diff --git a/block/file-win32.c b/block/file-win32.c
+index f460872..6b73658 100644
+--- a/block/file-win32.c
++++ b/block/file-win32.c
+@@ -80,7 +80,7 @@ typedef struct BDRVRawState {
+  */
+ #define RAW_WIN32_BOUNCE_MAX (64 * 1024)
+ 
+-static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
++static ssize_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+ {
+     OVERLAPPED ov;
+     DWORD ret, ret_count = 0;
+@@ -96,7 +96,13 @@ static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+         ret = ReadFile(aiocb->hfile, buf, len, &ret_count, &ov);
+     }
+     if (!ret) {
+-        ret_count = 0;
++        /* Only ERROR_HANDLE_EOF is a short read. Other errors must reach
++         * aio_worker(), rather than being turned into successful zeroes. */
++        if (!(aiocb->aio_type & QEMU_AIO_WRITE) &&
++            GetLastError() == ERROR_HANDLE_EOF) {
++            return 0;
++        }
++        return -EIO;
+     }
+     if (!(aiocb->aio_type & QEMU_AIO_WRITE) && ret_count) {
+         iov_from_buf(aiocb->aio_iov, aiocb->aio_niov, 0, buf, ret_count);
+@@ -110,17 +116,20 @@ static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+  * Returns the number of bytes handles or -errno in case of an error. Short
+  * reads are only returned if the end of the file is reached.
+  */
+-static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
++static ssize_t handle_aiocb_rw(RawWin32AIOData *aiocb)
+ {
+     size_t offset = 0;
+     int i;
+ 
+-    if (aiocb->aio_niov > 1 && aiocb->aio_nbytes <= RAW_WIN32_BOUNCE_MAX) {
++    /* The block layer aligned the original iovecs for direct I/O. A heap
++     * bounce buffer has no such guarantee, so keep those iovecs intact. */
++    if (!(aiocb->bs->open_flags & BDRV_O_NOCACHE) &&
++        aiocb->aio_niov > 1 && aiocb->aio_nbytes <= RAW_WIN32_BOUNCE_MAX) {
+         void *buf = g_try_malloc(aiocb->aio_nbytes);
+         if (buf) {
+-            offset = handle_aiocb_rw_bounce(aiocb, buf);
++            ssize_t count = handle_aiocb_rw_bounce(aiocb, buf);
+             g_free(buf);
+-            return offset;
++            return count;
+         }
+     }
+ 
+@@ -140,7 +149,11 @@ static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
+                            len, &ret_count, &ov);
+         }
+         if (!ret) {
+-            ret_count = 0;
++            if (!(aiocb->aio_type & QEMU_AIO_WRITE) &&
++                GetLastError() == ERROR_HANDLE_EOF) {
++                break;
++            }
++            return -EIO;
+         }
+         if (ret_count != len) {
+             offset += ret_count;
+@@ -168,12 +181,16 @@ static int aio_worker(void *arg)
+ {
+     RawWin32AIOData *aiocb = arg;
+     ssize_t ret = 0;
+-    size_t count;
++    ssize_t count;
+ 
+     switch (aiocb->aio_type & QEMU_AIO_TYPE_MASK) {
+     case QEMU_AIO_READ:
+         count = handle_aiocb_rw(aiocb);
+-        if (count < aiocb->aio_nbytes) {
++        if (count < 0) {
++            ret = count;
++            break;
++        }
++        if ((size_t)count < aiocb->aio_nbytes) {
+             /* A short read means that we have reached EOF. Pad the buffer
+              * with zeros for bytes after EOF. */
+             iov_memset(aiocb->aio_iov, aiocb->aio_niov, count,
+@@ -181,7 +198,7 @@ static int aio_worker(void *arg)
+ 
+             count = aiocb->aio_nbytes;
+         }
+-        if (count == aiocb->aio_nbytes) {
++        if ((size_t)count == aiocb->aio_nbytes) {
+             ret = 0;
+         } else {
+             ret = -EINVAL;
+@@ -189,7 +206,9 @@ static int aio_worker(void *arg)
+         break;
+     case QEMU_AIO_WRITE:
+         count = handle_aiocb_rw(aiocb);
+-        if (count == aiocb->aio_nbytes) {
++        if (count < 0) {
++            ret = count;
++        } else if ((size_t)count == aiocb->aio_nbytes) {
+             ret = 0;
+         } else {
+             ret = -EINVAL;
+diff --git a/tests/modavd/file-win32-io.py b/tests/modavd/file-win32-io.py
+new file mode 100644
+index 0000000..39f355f
+--- /dev/null
++++ b/tests/modavd/file-win32-io.py
+@@ -0,0 +1,213 @@
++# Copyright 2026 Ji Mao Cai
++# SPDX-License-Identifier: GPL-2.0-or-later
++
++"""Compile actual file-win32 worker functions against Win32 in a temporary directory.
++
++Run from a Visual Studio Developer PowerShell: python tests/modavd/file-win32-io.py
++The allocator deliberately returns a non-sector-aligned bounce buffer. File I/O
++uses real temporary files; only API errors and allocator failure are injected.
++"""
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++
++def function(source, name):
++    match = re.search(r"^static [^\n]+\b" + name + r"\([^;]*?\)\s*\{", source, re.M)
++    assert match, name
++    start = match.start()
++    pos = source.index("{", match.start())
++    depth = 1
++    end = pos + 1
++    while depth:
++        depth += (source[end] == "{") - (source[end] == "}")
++        end += 1
++    return source[start:end]
++
++source = (Path(__file__).resolve().parents[2] / "block/file-win32.c").read_text()
++functions = "\n".join(function(source, name) for name in (
++    "handle_aiocb_rw_bounce", "handle_aiocb_rw", "aio_worker"))
++code = r'''
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <assert.h>
++#include <errno.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <malloc.h>
++typedef SSIZE_T ssize_t;
++struct iovec { void* iov_base; size_t iov_len; };
++typedef struct BlockDriverState { int open_flags; } BlockDriverState;
++typedef struct RawWin32AIOData {
++    BlockDriverState *bs;
++    HANDLE hfile;
++    struct iovec *aio_iov;
++    int aio_niov;
++    size_t aio_nbytes;
++    int64_t aio_offset;
++    int aio_type;
++} RawWin32AIOData;
++#define QEMU_AIO_READ 1
++#define QEMU_AIO_WRITE 2
++#define QEMU_AIO_FLUSH 3
++#define QEMU_AIO_TYPE_MASK 7
++#define BDRV_O_NOCACHE 1
++#define RAW_WIN32_BOUNCE_MAX (64 * 1024)
++static int calls, fail_at, alloc_fail, allocations;
++static size_t sector;
++static void* bounce_base;
++static void* bounce;
++static void *g_try_malloc(size_t size) {
++    ++allocations;
++    if (alloc_fail) return NULL;
++    bounce_base = _aligned_malloc(size + 16, 4096);
++    assert(bounce_base);
++    return bounce = (char*)bounce_base + 16;
++}
++static void g_free(void* p) {
++    if (p == bounce && p) {
++        _aligned_free(bounce_base);
++        bounce_base = bounce = NULL;
++    } else {
++        free(p);
++    }
++}
++static BOOL io_allowed(const void* buffer, DWORD size) {
++    ++calls;
++    if (calls == fail_at) { SetLastError(ERROR_READ_FAULT); return FALSE; }
++    if (sector && ((uintptr_t)buffer % sector || size % sector)) {
++        SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
++    }
++    return TRUE;
++}
++static BOOL test_read(HANDLE h, void* b, DWORD n, DWORD* done, OVERLAPPED* ov) {
++    if (!io_allowed(b, n)) return FALSE;
++    return ReadFile(h, b, n, done, ov);
++}
++static BOOL test_write(HANDLE h, const void* b, DWORD n, DWORD* done, OVERLAPPED* ov) {
++    if (!io_allowed(b, n)) return FALSE;
++    return WriteFile(h, b, n, done, ov);
++}
++static size_t iov_to_buf(const struct iovec* iov, int niov, size_t offset, void* out, size_t size) {
++    size_t done = 0;
++    int i;
++    for (i = 0; i < niov && done < size; ++i) {
++        size_t n;
++        if (offset >= iov[i].iov_len) { offset -= iov[i].iov_len; continue; }
++        n = iov[i].iov_len - offset;
++        if (n > size - done) n = size - done;
++        memcpy((char*)out + done, (char*)iov[i].iov_base + offset, n);
++        done += n; offset = 0;
++    }
++    return done;
++}
++static size_t iov_from_buf(const struct iovec* iov, int niov, size_t offset, const void* in, size_t size) {
++    size_t done = 0;
++    int i;
++    for (i = 0; i < niov && done < size; ++i) {
++        size_t n;
++        if (offset >= iov[i].iov_len) { offset -= iov[i].iov_len; continue; }
++        n = iov[i].iov_len - offset;
++        if (n > size - done) n = size - done;
++        memcpy((char*)iov[i].iov_base + offset, (char*)in + done, n);
++        done += n; offset = 0;
++    }
++    return done;
++}
++static void iov_memset(const struct iovec* iov, int niov, size_t offset, int value, size_t size) {
++    char* zeros = malloc(size);
++    assert(zeros); memset(zeros, value, size);
++    assert(iov_from_buf(iov, niov, offset, zeros, size) == size);
++    free(zeros);
++}
++#define ReadFile test_read
++#define WriteFile test_write
++@FUNCTIONS@
++#undef ReadFile
++#undef WriteFile
++static int scenarios;
++static void run(int niov, int direct, int writing, int failure, int allocationFailure, size_t fileSize, size_t alignment) {
++    struct iovec iov[17];
++    BlockDriverState bs = { direct ? BDRV_O_NOCACHE : 0 };
++    RawWin32AIOData* request;
++    char tmp[MAX_PATH], path[MAX_PATH];
++    unsigned char contents[128 * 1024], actual[17 * 4096];
++    HANDLE handle;
++    DWORD done;
++    int i, ret;
++    size_t j, size = (size_t)niov * 4096;
++    GetTempPathA(MAX_PATH, tmp);
++    assert(GetTempFileNameA(tmp, "mio", 0, path));
++    memset(contents, 0x55, sizeof(contents));
++    handle = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
++    assert(handle != INVALID_HANDLE_VALUE);
++    assert(WriteFile(handle, contents, (DWORD)fileSize, &done, NULL));
++    assert(done == fileSize); assert(CloseHandle(handle));
++    handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
++                        direct ? FILE_FLAG_NO_BUFFERING : 0, NULL);
++    assert(handle != INVALID_HANDLE_VALUE);
++    for (i = 0; i < niov; ++i) {
++        iov[i].iov_base = _aligned_malloc(4096, 4096); iov[i].iov_len = 4096;
++        assert(iov[i].iov_base); memset(iov[i].iov_base, writing ? 0x7a : 0xa5, 4096);
++    }
++    request = malloc(sizeof(*request)); assert(request);
++    *request = (RawWin32AIOData){&bs, handle, iov, niov, size, 0,
++                                writing ? QEMU_AIO_WRITE : QEMU_AIO_READ};
++    calls = allocations = 0; fail_at = failure; alloc_fail = allocationFailure;
++    sector = direct ? alignment : 0;
++    ret = aio_worker(request);
++    assert(ret == (failure ? -EIO : 0));
++    if (direct || niov == 1 || size > RAW_WIN32_BOUNCE_MAX) assert(allocations == 0);
++    else assert(allocations == 1);
++    if (!writing) {
++        assert(iov_to_buf(iov, niov, 0, actual, size) == size);
++        if (failure == 1) {
++            for (j = 0; j < size; ++j) assert(actual[j] == 0xa5);
++        } else if (failure == 2) {
++            for (j = 0; j < 4096; ++j) assert(actual[j] == 0x55);
++            for (; j < size; ++j) assert(actual[j] == 0xa5);
++        } else {
++            for (j = 0; j < size; ++j) assert(actual[j] == (j < fileSize ? 0x55 : 0));
++        }
++    }
++    assert(CloseHandle(handle));
++    if (writing && !failure) {
++        handle = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
++        assert(handle != INVALID_HANDLE_VALUE);
++        assert(ReadFile(handle, actual, (DWORD)size, &done, NULL) && done == size);
++        for (j = 0; j < size; ++j) assert(actual[j] == 0x7a);
++        assert(CloseHandle(handle));
++    }
++    for (i = 0; i < niov; ++i) _aligned_free(iov[i].iov_base);
++    assert(DeleteFileA(path)); ++scenarios;
++}
++int main(void) {
++    int sizes[] = {1, 2, 16, 17};
++    size_t alignments[] = {512, 4096};
++    int d, w, i, a;
++    for (a = 0; a < 2; ++a) for (d = 0; d < 2; ++d) for (w = 0; w < 2; ++w) {
++        for (i = 0; i < 4; ++i) {
++            run(sizes[i], d, w, 0, 0, 128 * 1024, alignments[a]);
++            run(sizes[i], d, w, 1, 0, 128 * 1024, alignments[a]);
++        }
++        run(2, d, w, 0, 1, 128 * 1024, alignments[a]);
++    }
++    run(2, 0, 0, 2, 1, 128 * 1024, 512);
++    run(2, 1, 0, 2, 0, 128 * 1024, 4096);
++    run(3, 0, 0, 0, 0, 6144, 512);
++    run(3, 0, 0, 0, 1, 6144, 512);
++    run(3, 1, 0, 0, 0, 8192, 4096);
++    printf("file-win32: %d native Win32 scenarios passed\n", scenarios);
++    return 0;
++}
++'''.replace("@FUNCTIONS@", functions)
++
++with tempfile.TemporaryDirectory(prefix="modavd-io-") as tmp:
++    cpp = Path(tmp) / "probe.c"
++    cpp.write_text(code)
++    subprocess.run(["cl", "/nologo", "/std:c11", "/W3", str(cpp),
++                    "/Fe:" + str(Path(tmp) / "probe.exe"), "/Fo:" + str(Path(tmp) / "probe.obj")],
++                   cwd=tmp, check=True)
++    subprocess.run([str(Path(tmp) / "probe.exe")], check=True)
