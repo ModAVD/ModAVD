@@ -1,0 +1,223 @@
+From 12a12fcc3c34af05cd70112b341a169a926d4205 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:58:32 +0800
+Subject: [PATCH] vk: track logical staging buffer capacity separately from
+ allocation size
+
+Publish capacity after successful resource creation and clear both sizes on destruction. Grow and restore using logical size. Includes extracted production functions with padded-memory and allocation failure regression coverage.
+---
+ host/vulkan/vk_common_operations.cpp |  11 ++-
+ host/vulkan/vk_common_operations.h   |   2 +
+ tests/modavd/staging-capacity.py     | 139 +++++++++++++++++++++++++++
+ 3 files changed, 148 insertions(+), 4 deletions(-)
+ create mode 100644 tests/modavd/staging-capacity.py
+
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 0805b13..7546b58 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -380,10 +380,14 @@ bool VkEmulation::StagingBuffer::create(VulkanDispatch* vk, VkDevice device,
+     debugUtilsHelper.addDebugLabel(mMemory, "AEMU_StagingBufferMemory");
+     debugUtilsHelper.addDebugLabel(mBuffer, "AEMU_StagingBuffer");
+ 
++    // Publish capacity only after creation, allocation, mapping and binding succeed.
++    mBufferSize = size;
+     return true;
+ }
+ 
+ void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
++    mBufferSize = 0;
++    mAllocationSize = 0;
+     if (!vk || device == VK_NULL_HANDLE) {
+         GFXSTREAM_WARNING("StagingBuffer::destroy: invalid parameters");
+         return;
+@@ -403,7 +407,7 @@ void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
+ }
+ 
+ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+-    if (size <= mStaging.mAllocationSize && mStaging.mMappedPtr) {
++    if (size <= mStaging.mBufferSize && mStaging.mMappedPtr) {
+         return true;
+     }
+     if (size > kMaxStagingBufferSize) {
+@@ -412,12 +416,12 @@ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+ 
+     // Every user of the staging buffer waits on mCommandBufferFence before releasing mMutex,
+     // so the current buffer is idle and can be replaced.
+-    const VkDeviceSize oldSize = mStaging.mAllocationSize;
++    const VkDeviceSize oldSize = mStaging.mBufferSize;
+     const VkDeviceSize newSize = std::max(size, std::min(oldSize * 2, kMaxStagingBufferSize));
+     mStaging.destroy(mDvk, mDevice);
+     if (mStaging.create(mDvk, mDevice, &mDeviceInfo.memProps, mDebugUtilsHelper, newSize)) {
+         GFXSTREAM_INFO("Grew Vulkan staging buffer from %" PRIu64 " to %" PRIu64 " bytes.", oldSize,
+-                       mStaging.mAllocationSize);
++                       mStaging.mBufferSize);
+         return true;
+     }
+ 
+@@ -428,7 +432,6 @@ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+         return false;
+     }
+     mStaging.destroy(mDvk, mDevice);
+-    mStaging.mAllocationSize = 0;
+     return false;
+ }
+ 
+diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
+index 83b6b1d..35539b5 100644
+--- a/host/vulkan/vk_common_operations.h
++++ b/host/vulkan/vk_common_operations.h
+@@ -687,6 +687,8 @@ class VkEmulation {
+     struct StagingBuffer {
+         VkDeviceMemory mMemory = VK_NULL_HANDLE;
+         VkBuffer mBuffer = VK_NULL_HANDLE;
++        // Logical VkBuffer capacity; memory requirements may include padding.
++        VkDeviceSize mBufferSize = 0;
+         VkDeviceSize mAllocationSize = 0;
+         void* mMappedPtr = nullptr;
+         bool mIsHostCoherent = false;
+diff --git a/tests/modavd/staging-capacity.py b/tests/modavd/staging-capacity.py
+new file mode 100644
+index 0000000..cbf92fb
+--- /dev/null
++++ b/tests/modavd/staging-capacity.py
+@@ -0,0 +1,139 @@
++# Copyright 2026 Ji Mao Cai
++# SPDX-License-Identifier: Apache-2.0
++
++"""Compile real staging functions with a padded-memory Vulkan dispatch double.
++
++Run from a Visual Studio Developer PowerShell. No Vulkan driver is invoked.
++"""
++from pathlib import Path
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[2]
++source = (root / "host/vulkan/vk_common_operations.cpp").read_text(encoding="utf-8")
++start = source.index("bool VkEmulation::StagingBuffer::create(")
++end = source.index("ExternalMemory::Mode VkEmulation::getExternalMemoryMode()", start)
++functions = source[start:end]
++header = (root / "host/vulkan/vk_common_operations.h").read_text(encoding="utf-8")
++start = header.index("    struct StagingBuffer {")
++staging = header[start:header.index("    };", start) + len("    };")]
++code = r'''
++#include <algorithm>
++#include <cassert>
++#include <cinttypes>
++#include <cstdio>
++#include <map>
++#define GFXSTREAM_ERROR(...) ((void)0)
++#define GFXSTREAM_WARNING(...) ((void)0)
++#define GFXSTREAM_INFO(...) ((void)0)
++#define GFXSTREAM_VERBOSE(...) ((void)0)
++using VkDeviceSize = uint64_t;
++using VkDevice = uint64_t;
++using VkDeviceMemory = uint64_t;
++using VkBuffer = uint64_t;
++using VkResult = int;
++constexpr uint64_t VK_NULL_HANDLE = 0, VK_WHOLE_SIZE = UINT64_MAX;
++constexpr int VK_SUCCESS = 0, VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO = 1;
++constexpr int VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO = 2, VK_SHARING_MODE_EXCLUSIVE = 0;
++constexpr int VK_BUFFER_USAGE_TRANSFER_DST_BIT = 1, VK_BUFFER_USAGE_TRANSFER_SRC_BIT = 2;
++constexpr int VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT = 1;
++struct VkBufferCreateInfo { int type; const void* next; int flags; VkDeviceSize size;
++    int usage; int sharing; uint32_t count; const void* indices; };
++struct VkMemoryRequirements { VkDeviceSize size; VkDeviceSize alignment; uint32_t memoryTypeBits; };
++struct VkMemoryType { uint32_t propertyFlags = 1; uint32_t heapIndex = 0; };
++struct VkPhysicalDeviceMemoryProperties { VkMemoryType memoryTypes[1]; };
++struct VkMemoryAllocateInfo { int sType; const void* pNext; VkDeviceSize allocationSize; uint32_t memoryTypeIndex; };
++struct DebugUtilsHelper { template<class T> void addDebugLabel(T, const char*) const {} };
++static int failStage, failuresLeft, checks;
++static bool fail(int stage) { if (stage == failStage && failuresLeft) { --failuresLeft; return true; } return false; }
++static const char* string_VkResult(int) { return "injected"; }
++struct VulkanDispatch {
++    uint64_t next = 1;
++    std::map<uint64_t, uint64_t> buffers, memories;
++    VkResult vkCreateBuffer(VkDevice, const VkBufferCreateInfo* info, void*, VkBuffer* out) {
++        if (fail(1)) return -1;
++        *out = next++; buffers[*out] = info->size; return VK_SUCCESS;
++    }
++    void vkGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* out) {
++        *out = {(buffers.at(buffer) + 255) & ~uint64_t(255), 256, 1};
++    }
++    VkResult vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* info, void*, VkDeviceMemory* out) {
++        if (fail(3)) return -1;
++        *out = next++; memories[*out] = info->allocationSize; return VK_SUCCESS;
++    }
++    VkResult vkMapMemory(VkDevice, VkDeviceMemory memory, uint64_t, uint64_t, int, void** out) {
++        assert(memories.count(memory)); if (fail(4)) return -1;
++        *out = this; return VK_SUCCESS;
++    }
++    VkResult vkBindBufferMemory(VkDevice, VkBuffer b, VkDeviceMemory m, uint64_t) {
++        assert(buffers.at(b) <= memories.at(m)); return fail(5) ? -1 : VK_SUCCESS;
++    }
++    void vkUnmapMemory(VkDevice, VkDeviceMemory memory) { assert(memories.count(memory)); }
++    void vkDestroyBuffer(VkDevice, VkBuffer buffer, void*) { assert(buffers.erase(buffer) == 1); }
++    void vkFreeMemory(VkDevice, VkDeviceMemory memory, void*) { assert(memories.erase(memory) == 1); }
++};
++static bool getStagingMemoryTypeIndex(VulkanDispatch*, VkDevice, const VkPhysicalDeviceMemoryProperties*,
++                                    VkMemoryRequirements, uint32_t* out) { *out = 0; return !fail(2); }
++struct VkEmulation {
++@STAGING@
++    static constexpr VkDeviceSize kMaxStagingBufferSize = 128ull * 1024 * 1024;
++    VulkanDispatch* mDvk;
++    VkDevice mDevice = 1;
++    struct { VkPhysicalDeviceMemoryProperties memProps; } mDeviceInfo;
++    DebugUtilsHelper mDebugUtilsHelper;
++    StagingBuffer mStaging;
++    bool ensureStagingBufferSizeLocked(VkDeviceSize size);
++    explicit VkEmulation(VulkanDispatch* vk) : mDvk(vk) {}
++};
++@FUNCTIONS@
++static void check(VkEmulation& e, bool accepted, uint64_t requested) {
++    ++checks;
++    const auto& s = e.mStaging;
++    if (s.mMappedPtr) {
++        assert(s.mBufferSize == e.mDvk->buffers.at(s.mBuffer));
++        assert(s.mAllocationSize == e.mDvk->memories.at(s.mMemory));
++    }
++    if (accepted) { assert(s.mMappedPtr && requested <= s.mBufferSize); }
++}
++int main() {
++    constexpr uint64_t initial = 16ull * 1024 * 1024, max = VkEmulation::kMaxStagingBufferSize;
++    {
++        VulkanDispatch vk; VkEmulation e(&vk);
++        for (uint64_t n : {initial, 2 * initial + 4, 2 * initial + 64, max - 4, max}) {
++            check(e, e.ensureStagingBufferSizeLocked(n), n);
++            for (uint64_t delta : {uint64_t(0), uint64_t(4), uint64_t(60)}) {
++                const auto capacity = e.mStaging.mBufferSize;
++                check(e, e.ensureStagingBufferSizeLocked(capacity - delta), capacity - delta);
++            }
++        }
++        assert(!e.ensureStagingBufferSizeLocked(max + 4));
++        assert(e.mStaging.mBufferSize == max);
++        e.mStaging.destroy(&vk, 1);
++        assert(e.mStaging.mBufferSize == 0 && e.mStaging.mAllocationSize == 0);
++        assert(vk.buffers.empty() && vk.memories.empty());
++    }
++    for (int stage = 1; stage <= 5; ++stage) for (int failures : {1, 2}) {
++        VulkanDispatch vk; VkEmulation e(&vk);
++        check(e, e.ensureStagingBufferSizeLocked(initial), initial);
++        failStage = stage; failuresLeft = failures;
++        assert(!e.ensureStagingBufferSizeLocked(2 * initial + 4));
++        check(e, false, 2 * initial + 4);
++        assert(e.mStaging.mBufferSize == (failures == 1 ? initial : 0));
++        if (failures == 2) {
++            assert(!e.mStaging.mMappedPtr && e.mStaging.mAllocationSize == 0);
++            assert(vk.buffers.empty() && vk.memories.empty());
++        }
++        check(e, e.ensureStagingBufferSizeLocked(2 * initial + 64), 2 * initial + 64);
++        e.mStaging.destroy(&vk, 1);
++        assert(vk.buffers.empty() && vk.memories.empty());
++    }
++    printf("staging: %d capacity checks; all five creation failures and restore failures passed\n", checks);
++}
++'''.replace("@STAGING@", staging).replace("@FUNCTIONS@", functions)
++with tempfile.TemporaryDirectory(prefix="modavd-staging-") as tmp:
++    cpp = Path(tmp) / "probe.cpp"
++    cpp.write_text(code)
++    exe = Path(tmp) / "probe.exe"
++    subprocess.run(["cl", "/nologo", "/std:c++20", "/EHsc", str(cpp),
++                    "/Fe:" + str(exe), "/Fo:" + str(Path(tmp) / "probe.obj")], cwd=tmp, check=True)
++    subprocess.run([str(exe)], check=True)
