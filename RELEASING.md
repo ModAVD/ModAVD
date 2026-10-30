@@ -1,7 +1,7 @@
 # ModAVD 发版检查清单
 
 维护者的自动构建和包装入口位于维护仓库的 `tools/build/build-sdk.ps1`、`tools/pubrel/release.ps1`。
-公开仓库保留可复现的源码清单、补丁、Release 说明及校验代码；外部构建方法见 [docs/build.md](docs/build.md)。
+公开仓库保留可复现的源码清单、补丁、Release 说明及校验代码；外部构建方法见文档站的[从源码构建](https://modavd.github.io/develop/build)。
 
 ## 版本号
 
