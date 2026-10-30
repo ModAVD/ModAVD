@@ -1,0 +1,30 @@
+From f5e93f623338b588cbcd04de4df9b60723a2c118 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 14:01:04 +0200
+Subject: [PATCH 02/65] build: accept Visual Studio Build Tools (VCTools
+ workload)
+
+Change-Id: I693042e62bc090aae295aecd54b959db0ddfc21a
+---
+ android/build/python/aemu/process/environment.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/android/build/python/aemu/process/environment.py b/android/build/python/aemu/process/environment.py
+index 0952be430..4ef3186dc 100644
+--- a/android/build/python/aemu/process/environment.py
++++ b/android/build/python/aemu/process/environment.py
+@@ -99,8 +99,14 @@ class WindowsEnvironment(BaseEnvironment):
+                 str(
+                     prgrfiles / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+                 ),
++                # Also accept the standalone Build Tools (VCTools workload):
++                # it ships the same MSVC toolchain and Windows SDK.
++                "-products",
++                "*",
+                 "-requires",
+                 "Microsoft.VisualStudio.Workload.NativeDesktop",
++                "Microsoft.VisualStudio.Workload.VCTools",
++                "-requiresAny",
+                 "-sort",
+                 "-format",
+                 "json",

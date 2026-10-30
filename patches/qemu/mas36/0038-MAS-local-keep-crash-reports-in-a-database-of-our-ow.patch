@@ -1,0 +1,42 @@
+From 4576e4c2c5233bd6b061c44b0fa3d4646f0e8850 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 01:05:49 +0200
+Subject: [PATCH 38/65] MAS local: keep crash reports in a database of our own
+
+Not for upstream.
+
+Every emulator build of the same version shares the crash database
+%TEMP%\AndroidEmulator\emu-crash-<version>.db. Official builds and our
+older builds delete each report they have no upload consent for when
+they start, so the first boot of any of them after a crash of ours
+removed the minidump before it could be collected (seen on 10-05: an
+older build printed "No consent for crashreport ..., deleting." and the
+dump was gone).
+
+Name the default database emu-crash-<version>-mas.db, which none of
+those builds opens. ANDROID_EMU_CRASH_REPORTING_DATABASE still
+overrides it, and crashreport.exe uses the same default.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: If36077242396347a2f9df79565f30ce4ef675b4b
+---
+ .../crashreport/src/android/crashreport/CrashReporter.cpp    | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/android/emu/crashreport/src/android/crashreport/CrashReporter.cpp b/android/emu/crashreport/src/android/crashreport/CrashReporter.cpp
+index 7b7e990da..b51dac350 100644
+--- a/android/emu/crashreport/src/android/crashreport/CrashReporter.cpp
++++ b/android/emu/crashreport/src/android/crashreport/CrashReporter.cpp
+@@ -57,8 +57,11 @@ namespace android {
+ namespace crashreport {
+ 
+ const constexpr char kCrashOnExitFileName[] = "crash-on-exit";
++// MAS: a database of our own. Official builds of the same version use
++// "emu-crash-<version>.db" and delete every report they have no upload
++// consent for when they start, which would take our minidumps with them.
+ const constexpr char kCrashpadDatabase[] =
+-        "emu-crash-" EMULATOR_VERSION_STRING_SHORT ".db";
++        "emu-crash-" EMULATOR_VERSION_STRING_SHORT "-mas.db";
+ 
+ using DefaultStringAnnotation = crashpad::StringAnnotation<1024>;
+ LazyInstance<CrashReporter> sCrashReporter = LAZY_INSTANCE_INIT;

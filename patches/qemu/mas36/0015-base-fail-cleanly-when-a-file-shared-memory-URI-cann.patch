@@ -1,0 +1,82 @@
+From 08d626e9aaf902ffd1effbf4a071a427b2893377 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:11 +0200
+Subject: [PATCH 15/65] base: fail cleanly when a file:// shared memory URI
+ cannot be parsed
+
+On Windows, SharedMemory converts a file:// handle to a path with
+PathCreateFromUrlW() into a MAX_PATH buffer and only checks the result
+with assert(), which is compiled out in release builds (NDEBUG). When
+the conversion fails, e.g. with E_POINTER because the decoded path is
+longer than MAX_PATH, the buffer is left untouched: the uninitialized
+stack array is converted to a string (reading past it if it holds no
+NUL) and later handed to CreateFileW() as the file name, with
+OPEN_ALWAYS for READ_WRITE access.
+
+The handle string comes from the gRPC EmulatorController:
+getScreenshot() and streamScreenshot() pass the client supplied
+ImageTransport handle to SharedMemoryLibrary::borrow().
+
+Initialize the buffer, leave the name empty when the conversion fails
+and let openInternal() reject a file-backed region without a name.
+Callers already handle a region that fails to open; getScreenshot()
+then answers INVALID_ARGUMENT.
+
+Also reset mFile to invalidHandle() when CreateFileW() fails, so that
+close() does not pass INVALID_HANDLE_VALUE (the current-process pseudo
+handle) to CloseHandle(). That call has no effect, so this is cleanup
+only.
+
+Test: TBD
+Change-Id: Ib551e97904b9fc7bbe4e969e07533fb378282d29
+---
+ .../android/base/memory/SharedMemory_win32.cpp   | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp b/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
+index fe501cda5..67a878f8b 100644
+--- a/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
++++ b/android/emu/base/memory/src/android/base/memory/SharedMemory_win32.cpp
+@@ -23,15 +23,20 @@ namespace base {
+ SharedMemory::SharedMemory(const std::string& name, size_t size) : mSize(size) {
+     const std::string kFileUri = "file://";
+     if (name.find(kFileUri, 0) == 0) {
++        mShareType = ShareType::FILE_BACKED;
+         // Convert URI to path using win32 api.
+         const Win32UnicodeString srcUri(name);
+-        WCHAR path[MAX_PATH];
++        WCHAR path[MAX_PATH] = {};
+         DWORD cPath = MAX_PATH;
+         auto HR = PathCreateFromUrlW(srcUri.c_str(), path, &cPath, NULL);
+-        assert(HR == S_OK);
++        if (HR != S_OK) {
++            // |path| is not written on failure (e.g. E_POINTER when the
++            // decoded path does not fit in MAX_PATH). Leave |mName| empty so
++            // that openInternal() fails instead of using garbage as a path.
++            return;
++        }
+         const Win32UnicodeString destPath(path);
+         mName = PathUtils::recompose(PathUtils::decompose(destPath.toString()));
+-        mShareType = ShareType::FILE_BACKED;
+     } else {
+         mShareType = ShareType::SHARED_MEMORY;
+         mName = "SHM_" + name;
+@@ -58,6 +63,9 @@ int SharedMemory::openInternal(AccessMode access, bool doMapping) {
+     if (mCreate) {
+         return EEXIST;
+     }
++    if (mShareType == ShareType::FILE_BACKED && mName.empty()) {
++        return -ERROR_INVALID_NAME;
++    }
+     LARGE_INTEGER memory;
+     memory.QuadPart = (LONGLONG)mSize;
+ 
+@@ -86,6 +94,8 @@ int SharedMemory::openInternal(AccessMode access, bool doMapping) {
+                             FILE_FLAG_RANDOM_ACCESS, NULL);
+         if (mFile == INVALID_HANDLE_VALUE) {
+             int err = -GetLastError();
++            // close() treats any non-null |mFile| as an open handle.
++            mFile = invalidHandle();
+             close();
+             return err;
+         }

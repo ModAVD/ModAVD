@@ -1,0 +1,53 @@
+From 3a94985eb25c50a7dca8cae8c612659bf3d92188 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 28 Sep 2026 00:12:23 +0200
+Subject: [PATCH 30/65] whpx: forget the TSC lead when the TSC is set on reset
+ or loadvm
+
+Follow-up to 4898a1aaf. The lead is measured against the virtual clock the VM stopped with; loadvm (and an incoming migration) replace both the TSC and the virtual clock, so the stored reference no longer applies and the resume wait could run on up to the lead cap. whpx_set_tsc() now drops it: after loadvm the TSC starts with whatever relation to the virtual clock the snapshot carries.
+
+Assisted-by: Claude Opus 5.5
+Change-Id: I6fc048e43fd99fb0ea7e731140e774929076e05f
+---
+ target/i386/whpx-all.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index 1e5effb9e..12f9ee8d0 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -309,6 +309,12 @@ enum {
+     WHPX_SET_FULL_STATE,
+ };
+ 
++/* TSC and virtual clock across a VM stop, see whpx_vm_state_change() */
++static int64_t whpx_vclock_offset;  /* cpu_get_clock() - get_clock() */
++static bool whpx_vclock_offset_valid;
++static int64_t whpx_vclock_stopped; /* cpu_get_clock() while stopped */
++static int64_t whpx_tsc_lead;       /* ns the TSC ran on alone at stop */
++
+ static int whpx_get_tsc(CPUState *cpu)
+ {
+     struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+@@ -353,6 +359,9 @@ static int whpx_set_tsc(CPUState *cpu)
+         }
+     }
+ 
++    /* The TSC and the virtual clock now come from reset or loadvm. */
++    whpx_tsc_lead = 0;
++
+     tsc_val.Reg64 = env->tsc;
+     hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+         whpx->partition, cpu->cpu_index, &tsc_reg, 1, &tsc_val);
+@@ -2018,11 +2027,6 @@ static void whpx_cpu_update_state(void *opaque, int running, RunState state)
+  * so keep it suspended on resume until the virtual clock has run as long
+  * as the TSC ran alone on stop.
+  */
+-static int64_t whpx_vclock_offset;  /* cpu_get_clock() - get_clock() */
+-static bool whpx_vclock_offset_valid;
+-static int64_t whpx_vclock_stopped; /* cpu_get_clock() while stopped */
+-static int64_t whpx_tsc_lead;       /* ns the TSC ran on alone at stop */
+-
+ static void whpx_vm_state_change(void *opaque, int running, RunState state)
+ {
+     struct whpx_state *whpx = &whpx_global;

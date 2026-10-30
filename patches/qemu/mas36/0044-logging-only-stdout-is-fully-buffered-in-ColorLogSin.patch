@@ -1,0 +1,36 @@
+From e15d86c908be254363ab9f02b29ac1b33a545f91 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 04:39:26 +0200
+Subject: [PATCH 44/65] logging: only stdout is fully buffered in
+ ColorLogSink's comment
+
+The comment on the flush in ColorLogSink::Send() says that stdout and
+stderr are fully buffered on Windows. Since "os-win32: stop fully
+buffering stderr" (Change-Id I9d4fde9201c4ce6d4830f58030645ba133f0bbc2)
+only stdout is; stderr is left as the CRT sets it up. The sinks write
+to std::cout, so the flush itself is still needed. Comment only.
+
+This follows "logging: flush ColorLogSink after every line" (Change-Id
+Iee79c0717831c698ec6b20c7e10574c50d3f6f23), which added the comment.
+
+Test: comment only, no code change
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I6841b3d957fd062b5e026e2afd27483bafacd488
+---
+ .../emu/base/logging/src/android/base/logging/ColorLogSink.cpp  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp b/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
+index f12ab1d06..41b61ccdf 100644
+--- a/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
++++ b/android/emu/base/logging/src/android/base/logging/ColorLogSink.cpp
+@@ -102,7 +102,7 @@ void ColorLogSink::Send(const absl::LogEntry& entry) {
+ 
+     *mOutputStream << line;
+ 
+-    // Push the line out now. On Windows stdout/stderr are fully buffered
++    // Push the line out now. On Windows stdout is fully buffered
+     // (see os_set_line_buffering() in os-win32.c), so without this the most
+     // recent lines sit in the CRT buffer until 4 KiB have accumulated. When
+     // the process then dies through abort() or a crash handler, neither of

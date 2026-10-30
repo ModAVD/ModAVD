@@ -1,0 +1,50 @@
+From f58b533ec2196de4c86134d96a2eef27d4a5b330 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 28 Oct 2026 14:41:20 +0100
+Subject: [PATCH 61/65] MAS local: cap the inodes of a new data partition at 1M
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+make_ext4fs gives a filesystem one inode per 16 KiB unless told
+otherwise, so a 64 GiB data partition gets 4,194,304 inodes and a 1 GiB
+inode table. The table starts out unzeroed and the guest's ext4lazyinit
+zeroes it during the first minute after boot. /data is mounted through
+dm-default-key (metadata encryption), so those zeroes reach the disk as
+ciphertext: the qcow2 disk allocates the whole table, and QEMU's
+detect-zeroes cannot see them (measured: a fresh instance was 2332 MB
+after first boot with detect-zeroes on, 2342 MB without it).
+
+Compute at most 1,048,576 inodes, as many as a 16 GiB filesystem gets.
+Smaller partitions keep their count; a 64 GiB one gets a 256 MiB inode
+table. Instances with one to three games installed used 10k-44k inodes.
+Only partitions created from now on change.
+
+Change-Id: I09eb756ab6b2589ce5a33c8c288ef50362c74dae
+---
+ android/third_party/ext4_utils/src/make_ext4fs.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/android/third_party/ext4_utils/src/make_ext4fs.c b/android/third_party/ext4_utils/src/make_ext4fs.c
+index 23bc76afb..4d2a498b9 100644
+--- a/android/third_party/ext4_utils/src/make_ext4fs.c
++++ b/android/third_party/ext4_utils/src/make_ext4fs.c
+@@ -402,9 +402,17 @@ static u32 compute_blocks_per_group()
+ 	return info.block_size * 8;
+ }
+ 
++/* MAS: at most as many inodes as a 16 GiB filesystem gets. /data sits on
++ * dm-default-key (metadata encryption), so the guest's ext4lazyinit writes
++ * the whole inode table as ciphertext on first boot and the qcow2 disk
++ * allocates all of it: 1 GiB for a 64 GiB partition, 256 MiB with the cap.
++ * Instances with games installed used 10k-44k inodes. */
++#define MAX_COMPUTED_INODES (1024 * 1024)
++
+ static u32 compute_inodes()
+ {
+-	return DIV_ROUND_UP(info.len, info.block_size) / 4;
++	u64 inodes = DIV_ROUND_UP(info.len, info.block_size) / 4;
++	return inodes > MAX_COMPUTED_INODES ? MAX_COMPUTED_INODES : inodes;
+ }
+ 
+ static u32 compute_inodes_per_group()

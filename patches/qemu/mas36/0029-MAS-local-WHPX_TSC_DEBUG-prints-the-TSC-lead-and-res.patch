@@ -1,0 +1,40 @@
+From 52ea735e7164e5dc1f2c0d1c927c1c58acd46633 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 28 Sep 2026 00:10:49 +0200
+Subject: [PATCH 29/65] MAS local: WHPX_TSC_DEBUG prints the TSC lead and
+ resume gaps (not for upstream)
+
+Diagnostics for the pause/resume TSC catch-up: with WHPX_TSC_DEBUG set, every resume prints how long the TSC ran alone at the last stop (lead), how far the virtual clock had run when the handler was entered (what v14 left as the step: lead - gap_entry) and when the partition's time was resumed (what is left now: lead - gap_resume).
+
+Change-Id: I183500a05de16bcb5751c769339cfc1ba98787d5
+---
+ target/i386/whpx-all.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index 35d92fec7..1e5effb9e 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -2052,6 +2052,8 @@ static void whpx_vm_state_change(void *opaque, int running, RunState state)
+          * WHvResumePartitionTime the first WHvRunVirtualProcessor call
+          * resumes it.
+          */
++        int64_t dbg_lead = whpx_tsc_lead;
++        int64_t dbg_entry = cpu_get_clock() - whpx_vclock_stopped;
+         while (whpx_tsc_lead > 0) {
+             left = whpx_vclock_stopped + whpx_tsc_lead - cpu_get_clock();
+             if (left <= 0) {
+@@ -2067,6 +2069,13 @@ static void whpx_vm_state_change(void *opaque, int running, RunState state)
+             warn_report("WHPX: Failed to resume partition time,"
+                         " hr=%08lx", hr);
+         }
++        /* MAS local diagnostics, not for upstream */
++        if (getenv("WHPX_TSC_DEBUG") && whpx_vclock_offset_valid) {
++            fprintf(stderr, "whpx-tsc: resume lead_ns=%lld gap_entry_ns=%lld"
++                    " gap_resume_ns=%lld\n", (long long)dbg_lead,
++                    (long long)dbg_entry,
++                    (long long)(cpu_get_clock() - whpx_vclock_stopped));
++        }
+         whpx_vclock_offset = cpu_get_clock() - get_clock();
+         whpx_vclock_offset_valid = true;
+     }

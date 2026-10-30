@@ -1,0 +1,77 @@
+From d6c4c249386f1f62f6b1b349ca679fa99c478c07 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 10:18:02 +0200
+Subject: [PATCH 18/65] slirp: use SO_ERROR to tell whether a non-blocking
+ connect failed
+
+When a host connect() for a guest SYN fails (refused, or no answer
+until the host's connect timeout), slirp should reset the guest's
+connection. It tested the result with a zero-byte send() after clearing
+SS_ISFCONNECTING. On Windows that send() fails with ENOTCONN on a failed
+socket, which the code takes for "still connecting" and skips; as the
+flag is already cleared, the socket is never looked at again and the
+guest gets no RST. The guest then waits for its own SYN timeout
+(applications see a long hang instead of "connection refused").
+
+WSAPoll reports a finished connect with POLLWRNORM, plus POLLERR and
+POLLHUP if it failed (refused after about 2 s, timed out after 21 s on
+Windows 11), so slirp does get G_IO_OUT; only the result check was
+wrong. Read SO_ERROR instead: keep waiting only while it says the
+connect is still in progress, and otherwise clear SS_ISFCONNECTING and,
+on an error, mark the socket SS_NOFDREF so tcp_input() drops the
+connection with a reset.
+
+Change-Id: I8d4b1269e6a1b5fdaf96d84097a0e0364c350b3d
+---
+ slirp/slirp.c | 33 ++++++++++++++++++++++-----------
+ 1 file changed, 22 insertions(+), 11 deletions(-)
+
+diff --git a/slirp/slirp.c b/slirp/slirp.c
+index 9c6231c70..8b137b461 100644
+--- a/slirp/slirp.c
++++ b/slirp/slirp.c
+@@ -928,22 +928,33 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
+                      * Check for non-blocking, still-connecting sockets
+                      */
+                     if (so->so_state & SS_ISFCONNECTING) {
+-                        /* Connected */
+-                        so->so_state &= ~SS_ISFCONNECTING;
++                        int err = 0;
++                        socklen_t errlen = sizeof(err);
+ 
+-                        ret = send(so->s, (const void *) &ret, 0, 0);
+-                        if (ret < 0) {
+-                            /* XXXXX Must fix, zero bytes is a NOP */
+-                            if (errno == EAGAIN || errno == EWOULDBLOCK ||
+-                                errno == EINPROGRESS || errno == ENOTCONN) {
+-                                continue;
+-                            }
++                        /*
++                         * The connect has finished; SO_ERROR tells how. A
++                         * zero-byte send() cannot: on Windows it fails with
++                         * ENOTCONN after a refused or timed-out connect, which
++                         * was taken for "still connecting" after
++                         * SS_ISFCONNECTING had already been cleared, so the
++                         * guest never got a RST and waited for its own SYN
++                         * timeout.
++                         */
++                        if (getsockopt(so->s, SOL_SOCKET, SO_ERROR,
++                                       &err, &errlen) < 0) {
++                            err = errno;
++                        }
++                        if (err == EINPROGRESS || err == EWOULDBLOCK ||
++                            err == EAGAIN) {
++                            continue;
++                        }
+ 
+-                            /* else failed */
++                        so->so_state &= ~SS_ISFCONNECTING;
++                        if (err) {
++                            /* Failed: tcp_input() resets the guest's connection */
+                             so->so_state &= SS_PERSISTENT_MASK;
+                             so->so_state |= SS_NOFDREF;
+                         }
+-                        /* else so->so_state &= ~SS_ISFCONNECTING; */
+ 
+                         /*
+                          * Continue tcp_input

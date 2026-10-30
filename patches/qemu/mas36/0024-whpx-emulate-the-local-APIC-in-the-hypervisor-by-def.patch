@@ -1,0 +1,51 @@
+From 9015ea8979e8f0e8f554cd26a227c54c643c998c Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 16:41:38 +0200
+Subject: [PATCH 24/65] whpx: emulate the local APIC in the hypervisor by
+ default
+
+Validated on Windows 11 with Honkai Impact 3rd, Arknights and Reverse:
+1999: LAPIC exits drop from 21-64k/s to 0, total exits by 55-75%, the
+game's main thread spends 5-11% instead of 13-40% of its time in the
+kernel, and heavy battles on 6 vCPUs go from 55-58 to 61.7 fps with p99
+frame time 36 -> 19-20 ms. Cold boots, reboots, pause, hard kills and
+the regression bench pass.
+
+Make it the default where the host supports it; Windows 10 hosts keep
+the APIC in QEMU as before. ANDROID_EMU_WHPX_KERNEL_IRQCHIP=0 turns it
+off, =2 forces it on Windows 10.
+
+Change-Id: Ic761c527fb4f696e8471bd5ce96ddd3aa40b68cb
+---
+ target/i386/whpx-all.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/target/i386/whpx-all.c b/target/i386/whpx-all.c
+index ace627b71..33a8bf4f4 100644
+--- a/target/i386/whpx-all.c
++++ b/target/i386/whpx-all.c
+@@ -2577,10 +2577,13 @@ static void whpx_disable_xsave(struct whpx_state *whpx)
+ 
+ /*
+  * MAS: let the hypervisor emulate the local APICs, so that IPIs, EOIs and
+- * the APIC timer no longer exit to QEMU. Opt-in until validated:
+- *   ANDROID_EMU_WHPX_KERNEL_IRQCHIP=1  on, where the host supports it; kept
++ * the APIC timer no longer exit to QEMU. On by default where the host
++ * supports it:
++ *   (unset) or ANDROID_EMU_WHPX_KERNEL_IRQCHIP=1
++ *                                      on, where the host supports it; kept
+  *                                      off on Windows 10 (upstream QEMU
+  *                                      3b124791bdce does the same with a PIC)
++ *   ANDROID_EMU_WHPX_KERNEL_IRQCHIP=0  off
+  *   ANDROID_EMU_WHPX_KERNEL_IRQCHIP=2  on, Windows 10 included
+  *   -machine kernel-irqchip=on         required: fail if unavailable
+  *   -machine kernel-irqchip=off        off, whatever the variable says
+@@ -2590,7 +2593,7 @@ static int whpx_init_kernel_irqchip(MachineState *ms, struct whpx_state *whpx)
+ {
+     const char *env = getenv("ANDROID_EMU_WHPX_KERNEL_IRQCHIP");
+     bool required = machine_kernel_irqchip_required(ms);
+-    bool wanted = required || (env && (env[0] == '1' || env[0] == '2'));
++    bool wanted = required || !env || env[0] != '0';
+     bool any_windows = required || (env && env[0] == '2');
+     WHV_CAPABILITY_FEATURES features;
+     WHV_PROCESSOR_PERFMON_FEATURES perfmon;

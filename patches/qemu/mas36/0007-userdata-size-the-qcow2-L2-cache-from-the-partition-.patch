@@ -1,0 +1,34 @@
+From 8b9cd3bfd644e19b00fd265a00ccf8984d90b47f Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:14 +0200
+Subject: [PATCH 07/65] userdata: size the qcow2 L2 cache from the partition
+ size, not the base file
+
+Patch: 04-userdata-l2-cache.diff
+
+Change-Id: I7a80151e5cfa6afe17d481dce6690451531b7660
+---
+ android-qemu2-glue/main.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
+index c8514b84a..340bd6414 100644
+--- a/android-qemu2-glue/main.cpp
++++ b/android-qemu2-glue/main.cpp
+@@ -832,6 +832,16 @@ private:
+             // larger images.
+             System::FileSize diskSize;
+             if (System::get()->pathFileSize(filePath, &diskSize)) {
++                // MAS: for userdata, filePath is the raw base image (tens of
++                // MB), not the overlay's virtual size, so a 64G /data got the
++                // 1 MB minimum (covers 8 GB with 64K clusters). Size the cache
++                // for the configured partition size instead.
++                if (type == IMAGE_TYPE_USER_DATA &&
++                    m_hw->disk_dataPartition_size > 0 &&
++                    (System::FileSize)m_hw->disk_dataPartition_size >
++                            diskSize) {
++                    diskSize = m_hw->disk_dataPartition_size;
++                }
+                 // L2 cache size should be "disk_size_GB / 131072" as per QEMU
+                 // docs with a default of 1MB. Round it up just in case.
+                 const int l2CacheSize =

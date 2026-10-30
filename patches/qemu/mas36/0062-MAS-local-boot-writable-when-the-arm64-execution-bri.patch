@@ -1,0 +1,51 @@
+From 071ec7a375a2e662b175d4b81cf314d443aab68d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Thu, 29 Oct 2026 03:05:15 +0100
+Subject: [PATCH 62/65] MAS local: boot writable when the arm64 execution
+ bridge is installed
+
+The ModAVD arm64 execution bridge (native bridge shim, companion and an
+init rc) is installed into the instance's own system/vendor overlays,
+and those are only attached when the system image is writable. Booted
+the usual way (AUTO-MAS, no -writable-system) the instance gets the
+pristine system image back and every arm64-only game crashes again.
+
+The bridge installer now drops a marker file, modavd-writable-system,
+into the AVD directory and removes it on uninstall. When it exists the
+emulator boots that instance with a writable system image, whoever
+launches it. Instances without the marker are untouched.
+
+Change-Id: I9c06dd227b112dc108fcd2969de84319ae0d31d7
+---
+ android/android-emu/android/main-common.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/android/android-emu/android/main-common.c b/android/android-emu/android/main-common.c
+index a1f0a0c2b..23fcea9bb 100644
+--- a/android/android-emu/android/main-common.c
++++ b/android/android-emu/android/main-common.c
+@@ -1048,6 +1048,24 @@ static bool emulator_handleCommonEmulatorOptions(AndroidOptions* opts,
+             android_op_wipe_data = opts->wipe_data;
+         }
+         android_op_writable_system = opts->writable_system;
++        // MAS local: an instance with the ModAVD arm64 execution bridge keeps
++        // the bridge in its own system/vendor overlays, which are only
++        // attached when the system image is writable; without them every
++        // arm64-only game crashes again. The bridge installer drops this
++        // marker into the AVD directory (and its uninstall removes it), so
++        // such an instance always boots writable, whoever launches it.
++        // Instances without the marker are untouched.
++        if (!android_op_writable_system) {
++            char* marker = path_join(avdInfo_getContentPath(avd),
++                                     "modavd-writable-system");
++            if (marker && path_exists(marker)) {
++                android_op_writable_system = true;
++                dprint("ModAVD: %s exists, booting with a writable system "
++                       "image (arm64 execution bridge installed)",
++                       marker);
++            }
++            free(marker);
++        }
+ 
+         uint64_t defaultBytes = hw->disk_dataPartition_size;
+         if (defaultBytes == 0 || opts->partition_size) {

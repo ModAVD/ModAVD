@@ -1,0 +1,50 @@
+From c345e847168bab137a649ec16dbd0acdeee8f855 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Thu, 29 Oct 2026 05:02:21 +0100
+Subject: [PATCH 64/65] MAS local: lay out the resize inode the way online
+ resize expects
+
+inode_attach_resize put reserved GDT block r at double-indirect slot
+(r + bg_desc_blocks) modulo bg_desc_reserve_blocks. The kernel's online
+resize (reserve_backup_gdb, add_new_gdb) and e2fsprogs use the modulo of
+the slots per block instead. The two agree only when the reserve is a
+full block of slots (1024 with 4 KiB blocks, any file system of more than
+128 groups). With less, e.g. a 16 GB data partition (1023 reserved
+blocks), the last reserved block lands in slot 0. Growing such a
+partition online then stops at the first new group that carries a
+superblock backup: "reserve_backup_gdb: reserved block 1024 not at
+offset 1023", leaving 16 GB grown to 30.4 GB instead of 32 GB.
+
+e2fsck only checks the first quarter of the slots, so it never reported
+it. Data partitions created before this keep the old layout.
+
+Change-Id: Id5c3e6fa90a6d17a4b6b951f691fe48c2424098a
+---
+ android/third_party/ext4_utils/src/indirect.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/android/third_party/ext4_utils/src/indirect.c b/android/third_party/ext4_utils/src/indirect.c
+index 56f26d03d..d26bc605f 100644
+--- a/android/third_party/ext4_utils/src/indirect.c
++++ b/android/third_party/ext4_utils/src/indirect.c
+@@ -454,10 +454,16 @@ void inode_attach_resize(struct ext4_inode *inode,
+ 			info.block_size * info.bg_desc_reserve_blocks,
+ 			get_block(alloc, 0));
+ 
+-	for (i = 0; i < info.bg_desc_reserve_blocks; i++) {
+-		int r = (i - aux_info.bg_desc_blocks) % info.bg_desc_reserve_blocks;
+-		if (r < 0)
+-			r += info.bg_desc_reserve_blocks;
++	/* Reserved GDT block r sits at double-indirect slot (bg_desc_blocks + r) modulo
++	 * the slots per block, which is where the kernel's online resize
++	 * (reserve_backup_gdb, add_new_gdb) and e2fsprogs look for it. Taking the modulo
++	 * of bg_desc_reserve_blocks instead only agrees when that is a full block of
++	 * slots: with fewer (any file system of 128 groups or less, e.g. a 16 GB data
++	 * partition) the last reserved block lands in slot 0, and an online resize
++	 * stops at the first new group that carries a superblock backup ("reserved
++	 * block ... not at offset ..."). */
++	for (u32 r = 0; r < info.bg_desc_reserve_blocks; r++) {
++		i = (aux_info.bg_desc_blocks + r) % aux_info.blocks_per_ind;
+ 
+ 		dind_block_data[i] = get_block(alloc, r);
+ 

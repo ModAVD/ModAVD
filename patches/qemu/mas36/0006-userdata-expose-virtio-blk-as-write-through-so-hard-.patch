@@ -1,0 +1,38 @@
+From 554cf9efb71fc291f3c519a99d0a7cc8add7ef06 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:13 +0200
+Subject: [PATCH 06/65] userdata: expose virtio-blk as write-through so hard
+ kills never lose qcow2 metadata
+
+Patch: 01-userdata-write-through.diff
+
+Change-Id: Icade72037aac6b59944badffe43a9f7b3e794c88
+---
+ android-qemu2-glue/main.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
+index 0d771bf1c..c8514b84a 100644
+--- a/android-qemu2-glue/main.cpp
++++ b/android-qemu2-glue/main.cpp
+@@ -771,6 +771,20 @@ private:
+                                      m_driveIndex++, bufferString.c_str());
+                 deviceParam = StringFormat("%s,drive=userdata",
+                                            kTarget.storageDeviceType);
++                // MAS: present /data as a write-through disk. The guest then
++                // sends no cache flushes (same guest-side effect as mounting
++                // /data with nobarrier: no flush round trips per fsync), while
++                // QEMU completes every write only after the data and the
++                // qcow2 metadata reached the host OS cache (FUA is emulated
++                // as a flush_to_os; cache=unsafe still skips the host fsync).
++                // Unlike guest nobarrier, killing the emulator process then
++                // loses nothing that the guest saw completed.
++                // ANDROID_EMU_USERDATA_WRITEBACK=1 restores the upstream
++                // write-back device.
++                if (System::get()->envGet("ANDROID_EMU_USERDATA_WRITEBACK") !=
++                    "1") {
++                    deviceParam += ",write-cache=off,config-wce=off";
++                }
+                 break;
+             case IMAGE_TYPE_SD_CARD:
+                 if (m_hw->hw_sdCard_path != NULL &&

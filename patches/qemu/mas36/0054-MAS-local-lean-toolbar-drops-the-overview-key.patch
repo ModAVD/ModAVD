@@ -1,0 +1,39 @@
+From fac53907dbc6dc3e217b807e25bc966336038d5d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Fri, 16 Oct 2026 16:26:43 +0200
+Subject: [PATCH 54/65] MAS local: lean toolbar drops the overview key
+
+The images run without the Pixel launcher, which is what provides Recents,
+so the overview key did nothing and testers took it for broken.
+ANDROID_EMU_FULL_TOOLBAR=1 still shows the full toolbar.
+
+Change-Id: Ife1312ddfad43d00615293f0cae9b648cf57be97
+---
+ .../modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 444bb5124..66b9b8243 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -207,8 +207,10 @@ namespace fc = android::featurecontrol;
+ namespace xr_service = android::xr::xr_service;
+ 
+ // Instances here run unattended for automation, so the side toolbar keeps only
+-// power, volume and the three navigation keys. ANDROID_EMU_FULL_TOOLBAR=1 shows
+-// the full toolbar again.
++// power, volume, back and home. No overview: the images run without the Pixel
++// launcher, which is what provides Recents, so the key did nothing and testers
++// took it for broken (10-16). ANDROID_EMU_FULL_TOOLBAR=1 shows the full
++// toolbar again.
+ static bool leanToolbar() {
+     static const bool lean =
+             System::get()->getEnvironmentVariable("ANDROID_EMU_FULL_TOOLBAR") !=
+@@ -666,7 +668,6 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+                 mToolsUi->power_button,       mToolsUi->volume_up_button,
+                 mToolsUi->volume_down_button, mToolsUi->back_button,
+                 mToolsUi->home_button,        mToolsUi->all_apps_button,
+-                mToolsUi->overview_button,
+         };
+         for (QPushButton* button : findChildren<QPushButton*>()) {
+             if (std::find(std::begin(keep), std::end(keep), button) ==

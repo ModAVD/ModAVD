@@ -4,12 +4,14 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 版本 | qemu | gfxstream | Crashpad |
 | --- | --- | --- | --- |
+| 0.36.0（`Pkg.BuildId=mas-36`） | qemu/mas36 | gfxstream/mas35 | crashpad/module-version22 |
 | 0.35.0（`Pkg.BuildId=mas-35`） | qemu/mas35 | gfxstream/mas35 | crashpad/module-version22 |
 | 37.2.10-mas32（`Pkg.BuildId=mas-32`；0.32.1 相同） | qemu/mas32 | gfxstream/fixq28 | crashpad/module-version22 |
 | 37.2.10-mas30（`Pkg.BuildId=mas-30`） | qemu/fixq30 | gfxstream/fixq28 | crashpad/module-version22 |
 
 | 目录 | AOSP 仓库 | 基准（AOSP 公开提交） | 补丁数 | 回放后的树 = 编译时分支头 | 许可证 |
 | --- | --- | --- | --- | --- | --- |
+| `qemu/mas36` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 65 | `a46fc099df1403d982c601f2f53329e8332a2f6a` | 按所改文件，见下文：46 个 GPL-2.0，13 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas35` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 60 | `a1e36334f096ce5268a7df2b750f1a4a09b83c52` | 按所改文件，见下文：43 个 GPL-2.0，11 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas32` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 57 | `bc694d86d778732785a75364479fc03fad0250bc` | 按所改文件，见下文：42 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
 | `qemu/fixq30` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 55 | `5aedc70819651ef386cef810afa6c2be3c028467` | 按所改文件，见下文：40 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
@@ -17,6 +19,8 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 | `gfxstream/fixq28` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 22 | `d027890c4799a8537ce1e981fec784a99a269ade` | Apache-2.0 |
 | `crashpad/module-version22` | `platform/external/crashpad` | `dd7db6790d73210abaef36a04f2a2bd52cf22b89` | 1 | `377d2d398368c38d43f4ecbca084c89a68c10530` | Apache-2.0 |
 
+- `qemu/mas36` 的 0001–0060 与 `qemu/mas35` 是同一批提交（补丁文件头里的序号不同），0061–0065 是 mas-36 新增的：新建数据盘的 inode 数封顶、有开机标记 `modavd-writable-system` 时按可写系统镜像开机、数据盘改大不清数据、resize inode 按在线扩容的要求排布、`aio-win32` 注销句柄时不再读空指针。
+- 0.36.0 的 gfxstream、Crashpad 补丁与 0.35.0 逐字节相同，沿用 `gfxstream/mas35`、`crashpad/module-version22`；两份 mas-36 清单的注释里写的 `patches/gfxstream/mas36`、`patches/crashpad/mas36` 就是这两个目录。
 - `qemu/mas35` 的 0001–0057 与 `qemu/mas32` 是同一批提交（补丁文件头里的序号不同），0058–0060 是 mas-35 新增的宿主输入法：goldfish pipe 服务 `modavd_ime`、控制台命令 `ime`、窗口文字模式。
 - `gfxstream/mas35` 的 0001–0022 与 `gfxstream/fixq28` 是同一批提交，0023 是 mas-35 新增的：暂存缓冲按需增长。
 - `qemu/mas32` 的 0001–0055 与 `qemu/fixq30` 是同一批提交（补丁文件头里的序号不同），0056、0057 是 mas-32 新增的。
@@ -35,19 +39,19 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 许可证 | 补丁 |
 | --- | --- |
-| Apache-2.0 | 0002、0003、0008、0012、0036、0038、0042、0043、0050、0051、0052 |
-| 两者都有，按文件分 | 0005、0014（`EmulatorService.cpp` 为 Apache-2.0，`SharedMemory_win32.cpp` 为 GPL-2.0）；0016（`android-qemu2-glue/netsim/libslirp_driver.cpp` 为 Apache-2.0，`util/main-loop.c` 为 GPL-2.0）；0039（`CrashSytemInit.cpp` 为 Apache-2.0，`CrashUploadTool.cpp`、`CrashUploader.cpp` 为 GPL-2.0）；仅 mas35：0058（新文件 `ModavdImePipe.h`、`ModavdImePipe.cpp` 为 Apache-2.0，`qemu-setup.cpp` 为 GPL-2.0，`android/emu/hardware/CMakeLists.txt` 没有文件头），0060（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`shortcut-key-store` 为 GPL-2.0） |
-| GPL-2.0 | 其余的：qemu/fixq30 有 40 个，qemu/mas32 有 42 个（含 0055 的代码部分，见下；0056、0057 只改 `block/file-win32.c`），qemu/mas35 有 43 个（多出的 0059 只改 `console.cpp`） |
+| Apache-2.0 | 0002、0003、0008、0012、0036、0038、0042、0043、0050、0051、0052；仅 mas36：0061、0064（只改 `android/third_party/ext4_utils/src/` 下的 `make_ext4fs.c`、`indirect.c`） |
+| 两者都有，按文件分 | 0005、0014（`EmulatorService.cpp` 为 Apache-2.0，`SharedMemory_win32.cpp` 为 GPL-2.0）；0016（`android-qemu2-glue/netsim/libslirp_driver.cpp` 为 Apache-2.0，`util/main-loop.c` 为 GPL-2.0）；0039（`CrashSytemInit.cpp` 为 Apache-2.0，`CrashUploadTool.cpp`、`CrashUploader.cpp` 为 GPL-2.0）；仅 mas35、mas36：0058（新文件 `ModavdImePipe.h`、`ModavdImePipe.cpp` 为 Apache-2.0，`qemu-setup.cpp` 为 GPL-2.0，`android/emu/hardware/CMakeLists.txt` 没有文件头），0060（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`shortcut-key-store` 为 GPL-2.0） |
+| GPL-2.0 | 其余的：qemu/fixq30 有 40 个，qemu/mas32 有 42 个（含 0055 的代码部分，见下；0056、0057 只改 `block/file-win32.c`），qemu/mas35 有 43 个（多出的 0059 只改 `console.cpp`），qemu/mas36 有 46 个（又多出 0062 `main-common.c`、0063 `android-qemu2-glue/main.cpp`、0065 `util/aio-win32.c`） |
 
-这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0054 按 `fac53907`，0055 按 `5aedc708`，0056–0057 按 `bc694d86`，0058–0060 按 `a1e36334`）。
+这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0054 按 `fac53907`，0055 按 `5aedc708`，0056–0057 按 `bc694d86`，0058–0060 按 `a1e36334`，0061–0065 按 `a46fc099`）。
 
 **0055（换成 ModAVD 图标）**：改的是顶层 `CMakeLists.txt`（没有文件头，按仓库 `LICENSE` 属 GPL-2.0 或更新版本）和 `android/android-ui/modules/aemu-ui-window/include/android/icons.h`（GPL-2.0 文件头），这些代码改动按 GPL-2.0。补丁里的图片——`android/images/emulator_icon.ico`、`emulator_icon_32/128/256.png`，以及 `icons.h` 里由这些图片转成的数据——是同人创作图像，画的是《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有；**这些图片不随 GPL-2.0 或 Apache-2.0 授权**，见仓库 README 的「图标与美术」。
 
-回放示例（以 mas-35 的 qemu 为例）：
+回放示例（以 mas-36 的 qemu 为例）：
 
 ```sh
 git clone https://android.googlesource.com/platform/external/qemu
 cd qemu
-git checkout -b mas35 f0c183f1cc7456ecd6f3607f2f47893768ae4334
-git am --keep-cr ../patches/qemu/mas35/*.patch
+git checkout -b mas36 f0c183f1cc7456ecd6f3607f2f47893768ae4334
+git am --keep-cr ../patches/qemu/mas36/*.patch
 ```

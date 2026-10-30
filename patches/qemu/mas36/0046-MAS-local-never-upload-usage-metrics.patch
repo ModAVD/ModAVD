@@ -1,0 +1,58 @@
+From 9d359e72affdbce081fb067890e76ea42118015d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 12:32:07 +0200
+Subject: [PATCH 46/65] MAS local: never upload usage metrics
+
+Not for upstream: it is the opposite of the upstream design.
+
+With -metrics-collection, MetricsReporter::start() created a
+PlaystoreMetricsWriter. It queues every usage event of the session and,
+when the writer is destroyed at exit, gzips them into a LogRequest
+(installation id, OS name and version, emulator version, the events) and
+posts it to https://play.googleapis.com/log with libcurl.
+
+This build never sends usage metrics, so -metrics-collection no longer
+creates any writer: it behaves like -no-metrics and logs one line saying
+that the metrics are not uploaded. Nothing else creates a
+PlaystoreMetricsWriter. -metrics-to-console and -metrics-to-file still
+write the metrics locally, and the Android Studio opt-in still only
+writes spool files.
+
+Crash reports are covered by "MAS local: never upload crash reports"
+(-metrics-collection also counted as crash upload consent there).
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I2b439198e9e9696d423d7af6d050484afdb99afa
+---
+ .../metrics/src/android/metrics/MetricsReporter.cpp   | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/android/emu/metrics/src/android/metrics/MetricsReporter.cpp b/android/emu/metrics/src/android/metrics/MetricsReporter.cpp
+index f23fbd383..0eace2ced 100644
+--- a/android/emu/metrics/src/android/metrics/MetricsReporter.cpp
++++ b/android/emu/metrics/src/android/metrics/MetricsReporter.cpp
+@@ -29,7 +29,6 @@
+ #include "android/metrics/MetricsLogging.h"          // for D
+ #include "android/metrics/MetricsPaths.h"            // for getSpoolDirectory
+ #include "android/metrics/NullMetricsReporter.h"     // for NullMetricsRep...
+-#include "android/metrics/PlaystoreMetricsWriter.h"  // for PlaystoreMetri...
+ #include "android/metrics/StudioConfig.h"            // for getAnonymizati...
+ #include "android/metrics/TextMetricsWriter.h"       // for TextMetricsWriter
+ #include "android/utils/debug.h"                     // for dwarning
+@@ -103,9 +102,13 @@ void MetricsReporter::start(const std::string& sessionId,
+ 
+     } else if (getConsoleAgents()
+             ->settings->android_cmdLineOptions()->metrics_collection) {
+-        D("Writing metrics to play store");
+-        writer = PlaystoreMetricsWriter::create(sessionId,
+-                base::pj(getSpoolDirectory(), "backoff_cookie.proto"));
++        // MAS local: never send usage metrics. Upstream creates a
++        // PlaystoreMetricsWriter here, which posts the collected events to
++        // https://play.googleapis.com/log when the emulator exits. Treat the
++        // flag like -no-metrics instead; -metrics-to-console and
++        // -metrics-to-file still write the metrics locally.
++        dinfo("Usage metrics are not uploaded: this build never sends them, "
++              "so -metrics-collection is ignored.");
+ 
+     } else if (getConsoleAgents()
+             ->settings->android_cmdLineOptions()->metrics_to_file != nullptr) {

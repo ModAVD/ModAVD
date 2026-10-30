@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ModAVD mas-36（Pkg.BuildId=mas-36，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-10-30 生成。
+     manifest 源：https://android.googlesource.com/platform/manifest 分支 emu-main-dev（repo init 时 depth=1）。
+     revision 为编译时各项目的 HEAD；qemu / gfxstream / crashpad 三个是本地补丁分支上的提交，公开服务器上没有，要用 manifest-aosp-base.xml 取基准再按 patches/ 回放。
+-->
+<manifest>
+  <remote name="aosp" fetch="https://android.googlesource.com/" review="https://android-review.googlesource.com/"/>
+  <default revision="emu-main-dev" remote="aosp" sync-j="4"/>
+  <project name="platform/build/bazel" path="build/bazel" revision="0d382f91916499455604916a191e3bcf0cddf4fe" upstream="emu-main-dev" dest-branch="emu-main-dev">
+    <linkfile src="toplevel.bazelrc" dest=".bazelrc"/>
+    <linkfile src="toplevel.bazelversion" dest=".bazelversion"/>
+  </project>
+  <project name="platform/build" path="build/make" revision="0984226dbac1a947ad34490e0647cf7e5c5e6d14" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="device/google/cuttlefish" path="device/google/cuttlefish" revision="e14cb71de2fd7443ff923c00e783fe97943e7640" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/abseil-cpp" path="external/abseil-cpp" revision="000dabbd0c985dae5c40eb3a9531d4c8ee3f9d18" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/adt-infra" path="external/adt-infra" revision="8e119fed69931ef12011d65292e00a98b0f8849d" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/angle" path="external/angle" revision="901e32aa9923b05c3a2af846f8a28fc79c93d0be" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/astc-codec" path="external/astc-codec" revision="17ae36822a8084f45ae51f9031e81f8318254f33" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/boringssl" path="external/boringssl" revision="54ed1d5a4e7cdacd82f95a0aec1e89a488db84e6" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/external/c-ares" path="external/cares" revision="42cf8dee534419f1826f474d2f5fd67ac94a1706" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <!-- external/crashpad：AOSP 基准 dd7db6790d73210abaef36a04f2a2bd52cf22b89，补丁系列 patches/crashpad/mas36 = 基准 + 1 个提交，HEAD 377d2d398368c38d43f4ecbca084c89a68c10530 -->
+  <project name="platform/external/crashpad" path="external/crashpad" revision="377d2d398368c38d43f4ecbca084c89a68c10530" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/external/curl" path="external/curl" revision="1da4b04273638c8afe6f88bd7a7ccfb693640773" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/deqp" path="external/deqp" revision="f39b329be1bd88a6e358a9ee15d0d09e10865921" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/dtc" path="external/dtc" revision="793ba05b3773657925e47630181c9a1bcd297b7f" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/flatbuffers" path="external/flatbuffers" revision="696f46b5ac8fc8a326f8361d8007d9d9ba341ab0" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/fmtlib" path="external/fmtlib" revision="e488b7aacbf0059d473d0e464497b66b93c98a71" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/gfxstream-protocols" path="external/gfxstream-protocols" revision="9bc1eed18fdb082e78966ecb9324a08f7cd8d76f" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/bluetooth/glib" path="external/glib" revision="9f3ee561eee2bc195845201a4931d4709ff597e5" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/google-benchmark" path="external/google-benchmark" revision="1bff076dad8a0cbb740e7f68586d59c3bb3e1bfd" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/google-breakpad" path="external/google-breakpad" revision="5f320a2fd0f8192fcce0407fc8b721351e518789" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/googletest" path="external/googletest" revision="e81bfbe1acc9f2b1672d7c566e136f8d3a214cba" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/grpc-grpc" path="external/grpc" revision="fea7de5acfa2da17203f8eea78f974b41bcb6807" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/libpng" path="external/libpng" revision="7b1535de9846d23a766ee63a1d0ddfd5808e0a18" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="trusty/external/qemu-libslirp" path="external/libslirp" revision="f5b10930fefe77d285189cd2438f69c679466e01" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/libusb" path="external/libusb" revision="23f123a3f531572d14a253db3451c950e21d2447" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/libxml2" path="external/libxml2" revision="27570c2a5b96dc5aea1a0085f610f37ab744f643" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/lz4" path="external/lz4" revision="1733cd0bd46619829b46b1667f3af091d9337c34" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/mesa3d" path="external/mesa3d" revision="2984e76c01eb572cf8f70cf8e175eadae6de4a30" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/mobly-bundled-snippets" path="external/mobly-bundled-snippets" revision="b0bdd3a435593ede2e353d4ff80cc3d949cf5529" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/moltenvk" path="external/moltenvk" revision="4d44e42aacc0734d4c55e26602e5aded66f73f6c" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/nasm" path="external/nasm" revision="645e4f02c622ba67eb754000cc00c9db8be31f85" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/perfetto" path="external/perfetto" revision="37518c39e3db120322359090db3d54f6ac100078" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/protobuf" path="external/protobuf" revision="623d88a75a0b17ad2cc4be8fa79c3b97e7384a40" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <!-- external/qemu：AOSP 基准 f0c183f1cc7456ecd6f3607f2f47893768ae4334，补丁系列 patches/qemu/mas36 = 基准 + 65 个提交，HEAD a46fc099df1403d982c601f2f53329e8332a2f6a -->
+  <project name="platform/external/qemu" path="external/qemu" revision="a46fc099df1403d982c601f2f53329e8332a2f6a" upstream="emu-main-dev" dest-branch="emu-main-dev">
+    <copyfile src="android/vscode/emu.code-workspace" dest="emu.code-workspace"/>
+    <linkfile src="toplevel.MODULE.bazel" dest="MODULE.bazel"/>
+    <linkfile src="toplevel.MODULE.bazel.lock" dest="MODULE.bazel.lock"/>
+  </project>
+  <project name="platform/external/rapidjson" path="external/rapidjson" revision="4d42830893d6728eba192789c0629d76a359fca0" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/regex-re2" path="external/regex-re2" revision="3b76205b4a5ab7fd9a11df8ac930d21cf52ad189" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/tink" path="external/tink" revision="f416fdeb6d1ebafda566d4ecff80eace51a750f2" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/tinyobjloader" path="external/tinyobjloader" revision="d16a940067fbc191364fc1d3e2a2d907209c9320" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/virglrenderer" path="external/virglrenderer" revision="5d6e453751926c5209c7bad5ef7a6285feef5bb6" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/webrtc" path="external/webrtc" revision="34c5ae008bf811fce3006818f26f922b3647237a" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/wpa_supplicant_8" path="external/wpa_supplicant_8" revision="db64ab725acee6991a7ee9746d960731cca0b563" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/external/zlib" path="external/zlib" revision="5a4f1701693dff36e495d13dd14b70e15abe0d01" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/hardware/google/aemu" path="hardware/google/aemu" revision="b556b00ac5fffde13c5cbad1b659c528832f9da6" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="pdk"/>
+  <!-- hardware/google/gfxstream：AOSP 基准 04d0287b04f72d908c621a919fa2ea5c563b1a66，补丁系列 patches/gfxstream/mas36 = 基准 + 23 个提交，HEAD 28437bb6c4b3fdef705d1919813467af465a718d -->
+  <project name="platform/hardware/google/gfxstream" path="hardware/google/gfxstream" revision="28437bb6c4b3fdef705d1919813467af465a718d" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="pdk"/>
+  <project name="platform/prebuilts/android-emulator-build/archive" path="prebuilts/android-emulator-build/archive" revision="9b0bdade8b09267282fb901d21219ab6af013c60" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/common" path="prebuilts/android-emulator-build/common" revision="77441b3b04746081afbd0aa6f360b6704da58cc2" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/mesa" path="prebuilts/android-emulator-build/mesa" revision="be7c00f399b415511d73308f0af0c0310512aced" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/mesa-deps" path="prebuilts/android-emulator-build/mesa-deps" revision="17837fdb1889014fa01cbbbda56afc9b6034815f" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/qemu-android-deps" path="prebuilts/android-emulator-build/qemu-android-deps" revision="b06aee625002d0738c5576bbf437b9378229bef0" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/qt" path="prebuilts/android-emulator-build/qt" revision="f2d41b8d15c2a628e95c2e755ed92186d03b763c" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/prebuilts/android-emulator-build/system-images" path="prebuilts/android-emulator-build/system-images" revision="6d526de777b61fdbdaae61a24b1002db80870016" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1">
+    <linkfile src="android-sdk" dest="prebuilts/android/android-sdk"/>
+  </project>
+  <project name="platform/prebuilts/bazel/windows-x86_64" path="prebuilts/bazel/windows-x86_64" revision="1c6b2b08c3719423b6f1059581f14b6eeb2426d6" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="notdefault,platform-windows" clone-depth="1"/>
+  <project name="platform/prebuilts/clang/host/windows-x86" path="prebuilts/clang/host/windows-x86" revision="28707216dd908300d0ae7616697bd65842eb0dd6" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="notdefault,platform-windows" clone-depth="1"/>
+  <project name="platform/prebuilts/cmake/windows-x86" path="prebuilts/cmake/windows-x86" revision="7e749a06ad6ad862a30bcb15c2cab42cbb865e44" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="notdefault,platform-windows" clone-depth="1"/>
+  <project name="platform/prebuilts/ninja/windows-x86" path="prebuilts/ninja/windows-x86" revision="da5e168e07dda6b4cdc5f5144468ae97f43808b1" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="notdefault,platform-windows" clone-depth="1"/>
+  <project name="platform/prebuilts/python/windows-x86" path="prebuilts/python/windows-x86" revision="7119932cd3cea23f16db62e683b69c23e415ff09" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="notdefault,platform-windows" clone-depth="1"/>
+  <project name="platform/prebuilts/studio/jdk" path="prebuilts/studio/jdk" revision="ab98332f5597d8e2eecbe4c4b35a3d1272bc4783" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/external/pkg-config" path="third_party/pkg-config" revision="110660333d9126a57154408fff5f675867cfd1f7" upstream="emu-main-dev" dest-branch="emu-main-dev" clone-depth="1"/>
+  <project name="platform/tools/buildSrc" path="tools/buildSrc" revision="84f5a11087cc9fcd353ccd6cfc490fb2a226948e" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/tools/emulator" path="tools/emulator" revision="187a7f78ca7360295be5ae9e6e7f80bee0675252" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/tools/netsim" path="tools/netsim" revision="350cb06552eafca597f3868612234c1bc2d2cad0" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+  <project name="platform/tools/repohooks" path="tools/repohooks" revision="ee593394dd36395f0f9433b738abf1859e92193d" upstream="emu-main-dev" dest-branch="emu-main-dev" groups="developers,tools"/>
+  <project name="platform/tools/rootcanal" path="tools/rootcanal" revision="8e3819a6928aa76eda71407860e95bd8291cfe5f" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
+</manifest>

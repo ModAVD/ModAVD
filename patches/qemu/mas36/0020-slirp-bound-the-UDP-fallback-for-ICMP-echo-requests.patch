@@ -1,0 +1,121 @@
+From b11b2554718bae110258540fe980148e99b347c2 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 27 Sep 2026 12:51:51 +0200
+Subject: [PATCH 20/65] slirp: bound the UDP fallback for ICMP echo requests
+
+Where no ICMP socket can be created (always on Windows), icmp_input()
+sends each guest echo request as a UDP datagram to port 7 of the target
+on a socket of its own. A reply, or an ICMP error for it, closes that
+socket, but most hosts do not run the echo service and drop the
+datagram, so the socket and its ephemeral port stayed around for the
+full SO_EXPIRE of 240 s. A guest that probes many hosts traceroute-style
+(one game sends ~3200 echoes in 10 s every time it connects) left
+qemu holding close to 9000 UDP sockets.
+
+Expire these sockets after SO_EXPIREFAST (10 s), longer than any ping
+waits for a reply, and keep at most 64 of them: past that, the oldest
+outstanding request is given up as lost to make room for the new one,
+so a new ping always goes out. Answered pings close their socket
+immediately and do not count against the limit.
+
+Change-Id: Ida3263c0d45ea1d161f92468499fa681e484b364
+---
+ slirp/ip_icmp.c | 34 ++++++++++++++++++++++++++++++++++
+ slirp/slirp.h   |  2 ++
+ slirp/udp.c     |  4 ++++
+ 3 files changed, 40 insertions(+)
+
+diff --git a/slirp/ip_icmp.c b/slirp/ip_icmp.c
+index 1395c5e6e..79758e9de 100644
+--- a/slirp/ip_icmp.c
++++ b/slirp/ip_icmp.c
+@@ -38,6 +38,9 @@
+ /* Be nice and tell them it's just a pseudo-ping packet */
+ static const char icmp_ping_msg[] = "This is a pseudo-PING packet used by Slirp to emulate ICMP ECHO-REQUEST packets.\n";
+ 
++/* Echo requests that may be waiting for a reply as UDP at once */
++#define ICMP_UDP_ECHO_MAX 64
++
+ /* list of actions for icmp_send_error() on RX of an icmp message */
+ static const int icmp_flush[19] = {
+ /*  ECHO REPLY (0)  */   0,
+@@ -133,6 +136,22 @@ void icmp_detach(struct socket *so)
+     sofree(so);
+ }
+ 
++/*
++ * Close the oldest echo request that icmp_input() sent as UDP. udb has the
++ * newest sockets first, so search it from the tail.
++ */
++static void icmp_udp_echo_drop_oldest(Slirp *slirp)
++{
++    struct socket *so;
++
++    for (so = slirp->udb.so_prev; so != &slirp->udb; so = so->so_prev) {
++        if (so->so_type == IPPROTO_ICMP) {
++            udp_detach(so);
++            return;
++        }
++    }
++}
++
+ /*
+  * Process a received ICMP message.
+  */
+@@ -183,6 +202,18 @@ icmp_input(struct mbuf *m, int hlen)
+       if (icmp_send(so, m, hlen) == 0) {
+         return;
+       }
++      /*
++       * No ICMP socket (always the case on Windows): the echo goes out as a
++       * UDP datagram to port 7 instead, one host socket per request. A guest
++       * that probes many hosts (traceroute-style, hundreds of echoes a
++       * second) would otherwise pile up thousands of host sockets and
++       * ephemeral ports. A reply closes the socket at once, so only
++       * unanswered requests count against the limit; past it, the oldest
++       * one is given up as lost to make room for this one.
++       */
++      if (slirp->icmp_udp_echo_count >= ICMP_UDP_ECHO_MAX) {
++        icmp_udp_echo_drop_oldest(slirp);
++      }
+       if (udp_attach(so, AF_INET) == -1) {
+ 	DEBUG_MISC((dfd,"icmp_input udp_attach errno = %d-%s\n",
+ 		    errno,strerror(errno)));
+@@ -190,6 +221,9 @@ icmp_input(struct mbuf *m, int hlen)
+ 	m_free(m);
+ 	goto end_error;
+       }
++      /* A reply that has not come back in 10 s is not coming back. */
++      so->so_expire = curtime + SO_EXPIREFAST;
++      slirp->icmp_udp_echo_count++;
+       so->so_m = m;
+       so->so_ffamily = AF_INET;
+       so->so_faddr = ip->ip_dst;
+diff --git a/slirp/slirp.h b/slirp/slirp.h
+index 4bc6d6920..4ef24d994 100644
+--- a/slirp/slirp.h
++++ b/slirp/slirp.h
+@@ -213,6 +213,8 @@ struct Slirp {
+     /* icmp states */
+     struct socket icmp;
+     struct socket *icmp_last_so;
++    /* echo requests sent as UDP (on udb) for lack of an ICMP socket */
++    unsigned int icmp_udp_echo_count;
+ 
+     /* tftp states */
+     char *tftp_prefix;
+diff --git a/slirp/udp.c b/slirp/udp.c
+index 40b1480cc..227907172 100644
+--- a/slirp/udp.c
++++ b/slirp/udp.c
+@@ -332,6 +332,10 @@ udp_reattach(struct socket *so, unsigned short af)
+ void
+ udp_detach(struct socket *so)
+ {
++	if (so->so_type == IPPROTO_ICMP) {
++		/* an echo request that icmp_input() sent as UDP */
++		so->slirp->icmp_udp_echo_count--;
++	}
+ 	closesocket(so->s);
+ 	sofree(so);
+ }

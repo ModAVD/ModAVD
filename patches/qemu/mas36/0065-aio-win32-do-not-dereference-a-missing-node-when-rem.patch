@@ -1,0 +1,45 @@
+From a46fc099df1403d982c601f2f53329e8332a2f6a Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Fri, 30 Oct 2026 11:45:40 +0100
+Subject: [PATCH 65/65] aio-win32: do not dereference a missing node when
+ removing a handler
+
+When both io_read and io_write are NULL, aio_set_fd_handler() calls
+WSAEventSelect(node->pfd.fd, NULL, 0) before it checks whether the
+lookup found a node. Removing the handler of a socket that has none
+reads through a NULL pointer.
+
+The emulator crashed this way (0xC0000005, minidump) while the guest
+rebooted after "adb root" and "adb remount": BaseSocketServer::onAccept()
+-> stopListening() -> QemuLooper::FdWatch::removeEvents() ->
+qemu_set_fd_handler(fd, NULL, NULL, NULL) with no node for that socket.
+
+Detach the event only when there is a node, inside the check the rest
+of the branch already relies on. Removing a handler that is not
+registered is then a no-op, as in upstream QEMU.
+
+Change-Id: Id22b4c4d323cdfa47f1d81ca80cd7216d4d7f028
+---
+ util/aio-win32.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/util/aio-win32.c b/util/aio-win32.c
+index 5c0f9d05a..3de5105b5 100644
+--- a/util/aio-win32.c
++++ b/util/aio-win32.c
+@@ -56,11 +56,11 @@ void aio_set_fd_handler(AioContext *ctx,
+ 
+     /* Are we deleting the fd handler? */
+     if (!io_read && !io_write) {
+-        assert(!node->io_notify);
+-        /* Detach the event */
+-        WSAEventSelect(node->pfd.fd, NULL, 0);
+-
+         if (node) {
++            assert(!node->io_notify);
++            /* Detach the event */
++            WSAEventSelect(node->pfd.fd, NULL, 0);
++
+             /* If aio_poll is in progress, just mark the node as deleted */
+             if (qemu_lockcnt_count(&ctx->list_lock)) {
+                 node->deleted = 1;

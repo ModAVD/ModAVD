@@ -1,0 +1,38 @@
+From d1c5a21ac1750b2ae35a0c6ca97ad06854bf1f0c Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 26 Sep 2026 16:49:15 +0200
+Subject: [PATCH 08/65] screen: share the video frame (SHM_videmulator<port>)
+ from startup by default
+
+Patch: 02-share-vid-default.diff
+
+Change-Id: Ib451617be0a68b5067e5331abbe9ba6407cf4f3e
+---
+ android-qemu2-glue/qemu-setup.cpp | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/android-qemu2-glue/qemu-setup.cpp b/android-qemu2-glue/qemu-setup.cpp
+index 98fd0540e..99746805c 100644
+--- a/android-qemu2-glue/qemu-setup.cpp
++++ b/android-qemu2-glue/qemu-setup.cpp
+@@ -643,7 +643,19 @@ bool qemu_android_emulation_setup() {
+     // Note, the webrtc module could have started the shared memory module
+     // with a differrent fps suggestion. (Fps is mainly used by clients as a
+     // suggestion on how often to check for new frames)
+-    if (getConsoleAgents()->settings->android_cmdLineOptions()->share_vid) {
++    //
++    // MAS: share the video by default (same code path as -share-vid and the
++    // console command `screenrecord webrtc start`). The region
++    // videmulator<console port> then exists from startup and is filled from
++    // the first frame the guest composes, so clients never see the all-zero
++    // (black) region a late `webrtc start` leaves on a static screen.
++    // ANDROID_EMU_SHARE_VID=0 restores the upstream opt-in behaviour.
++    const char* shareVidEnv = std::getenv("ANDROID_EMU_SHARE_VID");
++    const bool shareVidByDefault =
++            getConsoleAgents()->settings->android_qemu_mode() &&
++            !(shareVidEnv && !strcmp(shareVidEnv, "0"));
++    if (getConsoleAgents()->settings->android_cmdLineOptions()->share_vid ||
++        shareVidByDefault) {
+         if (!getConsoleAgents()->record->startSharedMemoryModule(60)) {
+             dwarning(
+                     "Unable to setup a shared memory handler, last errno: "

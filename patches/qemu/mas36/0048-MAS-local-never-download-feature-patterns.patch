@@ -1,0 +1,54 @@
+From df7208316f1aae06e5dfa20901295554c7640834 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 14:58:55 +0200
+Subject: [PATCH 48/65] MAS local: never download feature patterns
+
+Not for upstream: it is the opposite of the upstream design.
+
+At every start feature_update_from_server() applies the cached server
+feature patterns (emu-last-feature-flags.protobuf in the user directory,
+or lib/emu-original-feature-flags.protobuf shipped with the emulator if
+there is no cache) and then starts a thread that, when the cache is at
+least 24 hours old, fetches
+https://dl.google.com/dl/android/studio/metadata/emulator-feature-flags.protobuf
+with libcurl and writes it to the cache for the next start.
+
+This build never fetches it. The cached or shipped patterns are applied
+exactly as before, and the download only ever affected later starts, so
+the features of every start stay what they are now; the cache just stops
+being refreshed. feature_update_from_server() logs one line saying the
+patterns are not downloaded.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I3665ce2ab9ec600d35b81f58c8d2a3ba7ef26247
+---
+ .../src/android/featurecontrol/feature_control.cpp       | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/android/emu/feature/src/android/featurecontrol/feature_control.cpp b/android/emu/feature/src/android/featurecontrol/feature_control.cpp
+index cc2c6d6ff..83f54d33f 100644
+--- a/android/emu/feature/src/android/featurecontrol/feature_control.cpp
++++ b/android/emu/feature/src/android/featurecontrol/feature_control.cpp
+@@ -15,6 +15,7 @@
+ #include <unordered_map>
+ #include <utility>
+ 
++#include "android/utils/debug.h"
+ #include "host-common/FeatureControl.h"
+ #include "host-common/Features.h"
+ 
+@@ -59,7 +60,13 @@ void feature_reset_enabled_to_default(Feature feature) {
+ 
+ void feature_update_from_server() {
+     android::featurecontrol::applyCachedServerFeaturePatterns();
+-    android::featurecontrol::asyncUpdateServerFeaturePatterns();
++    // MAS local: never download feature patterns. Upstream calls
++    // asyncUpdateServerFeaturePatterns() here, which at most once a day
++    // fetches emulator-feature-flags.protobuf from dl.google.com into the
++    // cache that the line above reads at the next start. The cached (or
++    // shipped) patterns are still applied as before.
++    dinfo("Feature patterns are not downloaded: this build never fetches "
++          "them and keeps using the cached or shipped ones.");
+ }
+ 
+ const char* feature_name(Feature feature) {
