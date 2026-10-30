@@ -115,16 +115,21 @@
 
 ## 升级
 
-先在 AUTO-MAS 里关掉所有魔改 AVD 实例，再用新包里的 `sdk\emulator` 整个替换旧的同名文件夹。实例、游戏和登录状态都在 `avd\` 里，不受影响。从内测包升级也是这样，见 [docs/upgrade.md](docs/upgrade.md)。
+先在 AUTO-MAS 里关掉所有魔改 AVD 实例，稍等半分钟，再把新包整个解压到旧的根目录、覆盖同名文件（覆盖时提示文件被占用，是模拟器的附属进程还没退出，再等一会儿重试）。0.36.0 起包根多了 `ModAVD.exe`（管理器）和 `tools\` 里的 `modavd.exe`（命令行）、`modavd-bridge.ps1`，`components\` 里多了宿主输入法 `modavd-ime.apk`，只换 `sdk\emulator` 会少了它们。实例、游戏和登录状态都在 `avd\` 里，新包里没有这个文件夹，不会被动到；AUTO-MAS 里也不用重新添加。想顺便清掉新版拿掉的旧文件，就先删掉旧的 `sdk\emulator\` 再解压。逐项说明和从内测包升级见 [docs/upgrade.md](docs/upgrade.md)。
 
 ## 许可证与源码
 
-- **本仓库的内容**（脚本、文档）：Apache License 2.0，见 [LICENSE](LICENSE)。Copyright 2026 qiyinxi。`assets/` 下的图片和程序图标除外，见[图标与美术](#图标与美术)。
+- **除 `package/`、`assets/` 和 `patches/` 下的 `.patch` 补丁以外，本仓库的内容**（README 等文档、`docs/`、`scripts/`、`.github/` 等）：Apache License 2.0，见根目录的 [LICENSE](LICENSE)。Copyright 2026 qiyinxi。`package/` 按 AGPL-3.0-or-later（见下一条），补丁按各自所改文件的许可证（见「补丁」一条），`assets/` 下的图片和程序图标见[图标与美术](#图标与美术)。
+- **ModAVD 自己的程序**：0.36.0 起都是 GNU Affero General Public License 第 3 版或更新版本（AGPL-3.0-or-later）。
+  - 包里的脚本（补全组件、收集问题信息、复制配置信息、装执行桥）：本仓库的 [package/](package/)，许可证全文见 [package/LICENSE](package/LICENSE)。0.35.0 及更早的包里的脚本按 Apache License 2.0 发布。
+  - arm64 执行桥（`sdk\emulator\resources\modavd\`，0.36.0 起）：源码在同一个 Release 的源码包里（见下面「源码」一条）。
+  - 管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`（0.36.0 起）：在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) 仓库。
+  - 宿主输入法 `components\modavd-ime.apk`（0.36.0 起）：在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) 仓库。
 - **补丁**：每个补丁按它所改文件的许可证发布，与上游文件头一致：
   - QEMU 仓库（`platform/external/qemu`）里，改 QEMU 本体文件的、改带 GPL-2.0 文件头的文件的，按 GPL-2.0；改带 Apache-2.0 文件头的文件的（`android/`、`android-qemu2-glue/` 下的一部分），按 Apache License 2.0。逐个补丁的许可证见 [patches/BASE.md](patches/BASE.md)。
   - gfxstream 和 Crashpad 的补丁按 Apache License 2.0 发布，与它们本身相同。
 - **Release 里的程序**：含有 QEMU（GPL-2.0）、FFmpeg（GPL-2.0 或更新版本，静态链接）、Qt 6.5.3（LGPL-3.0）、GLib 和 libusb（LGPL-2.1）等第三方组件。`qemu-system` 等程序整体按 GPL-2.0 发布。每个组件的许可证见包里的 `LICENSES\NOTICE.txt`，摘要见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-- **源码**：同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里有完整的对应源码：编进程序的 24 个仓库在编译时的确切版本（每个仓库一个 `.tar.xz`，QEMU 仓库里含构建脚本）、FFmpeg / libvpx / libxml2 / pixman 的源码包、SeaBIOS 和 iPXE 源码、Qt 6.5.3 源码、`netsimd.exe` 静态链接的 GLib 2.82.2 及其构建模块和 netsim 源码、两份仓库清单（本仓库的 [manifests/](manifests/) 里也有），以及逐个说明这些文件的 `SOURCES.txt`。补丁在本仓库的 [patches/](patches/)。
+- **源码**：同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里有完整的对应源码：编进程序的 24 个仓库在编译时的确切版本（每个仓库一个 `.tar.xz`，QEMU 仓库里含构建脚本）、FFmpeg / libvpx / libxml2 / pixman 的源码包、SeaBIOS 和 iPXE 源码、Qt 6.5.3 源码、`netsimd.exe` 静态链接的 GLib 2.82.2 及其构建模块和 netsim 源码、两份仓库清单（本仓库的 [manifests/](manifests/) 里也有）；0.36.0 起还有 `modavd-src-<提交>.tar.xz`，是 ModAVD 自己的程序（管理器和命令行、arm64 执行桥、宿主输入法）的源码，按 AGPL-3.0-or-later 发布，`LICENSE` 和 `NOTICE` 在归档里；以及逐个说明这些文件的 `SOURCES.txt`。补丁在本仓库的 [patches/](patches/)。
 - **Google 的组件**：adb 和系统镜像不在 Release 里，由「补全组件.bat」从官方渠道下载，受《Android 软件开发套件许可协议》约束，下载前要你同意。
 
 ## 反馈
@@ -163,7 +168,7 @@ ModAVD is a modified build of the AOSP Android Emulator (37.2.10) for running un
 - The emulator itself does not contact servers on its own: no usage metrics, no crash report upload, no update check, no feature-flag download. Crash dumps stay on your machine. (The only exception is the map on the Location page of the extended controls, if you open it in windowed mode.) The Android system and its apps use the network as usual.
 - Requirements: Windows 10/11 64-bit, an x86_64 CPU with virtualization enabled, and the Windows Hypervisor Platform (WHPX) feature.
 - Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then add the folder in AUTO-MAS.
-- Licenses: our scripts and documents are Apache-2.0. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
+- Licenses: everything in this repository except `package/`, `assets/` and the `.patch` files under `patches/` (README and the other documents, `docs/`, `scripts/`, `.github/`, ...) is Apache-2.0 (root `LICENSE`). From 0.36.0, ModAVD's own programs are AGPL-3.0-or-later: the bundled scripts in `package/` (full text in `package/LICENSE`; the scripts in 0.35.0 and earlier packages are Apache-2.0), the arm64 execution bridge (source in the release's source bundle), the manager and CLI (repository ModAVD/ModAVDManager) and the host IME (repository ModAVD/ModAVDHostIME); from 0.36.0 the source bundle also has their code in `modavd-src-<commit>.tar.xz`, with `LICENSE` and `NOTICE`. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
 - Icon and artwork: the images under `assets/` and the program icon built into the binaries are fan art of Eyjafjalla from Arknights (character © Shanghai Hypergryph). They are not covered by the Apache License 2.0 of this repository or by any other license here. This project is not affiliated with or endorsed by Hypergryph.
 - Feedback: open an issue. Do not attach crash dumps (the `crash` folder of the problem report) to public issues; send them by e-mail to qiyinxi@foxmail.com with the issue number.
 - This is an unofficial project, not affiliated with or endorsed by Google. Android is a trademark of Google LLC.

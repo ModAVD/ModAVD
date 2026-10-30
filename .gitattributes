@@ -3,3 +3,8 @@
 
 scripts/*.py text eol=lf
 scripts/*.json text eol=lf
+
+# 随包脚本和 Release 主包里发出的文件逐字节相同，原样保存，不做换行符转换。比对的基准是包里的字节，也就是维护者本地仓库
+# 工作区里的文件（那边 core.autocrlf=true 检出，.bat 和多数 .ps1 是 CRLF），不是那边 Git 里存的内容（LF）。
+# .ps1 是 UTF-8 带 BOM，给 PowerShell 5.1 用；.bat 是 CRLF，给 cmd 用
+package/** -text
