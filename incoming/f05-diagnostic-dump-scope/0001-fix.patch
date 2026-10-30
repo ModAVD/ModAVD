@@ -1,0 +1,110 @@
+From ce78729bc5ebeccbb9771f287b53d436d2e91508 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 22:07:00 +0800
+Subject: [PATCH] diagnostics: restrict crash collection to ModAVD databases
+
+Apply the product name filter before age and count limits. Includes a Windows PowerShell 5.1 fixture against the actual collection block.
+---
+ tools/collect-info.ps1             |  3 +-
+ tools/tests/collect-dump-scope.ps1 | 71 ++++++++++++++++++++++++++++++
+ 2 files changed, 73 insertions(+), 1 deletion(-)
+ create mode 100644 tools/tests/collect-dump-scope.ps1
+
+diff --git a/tools/collect-info.ps1 b/tools/collect-info.ps1
+index 70d0022..424f7e0 100644
+--- a/tools/collect-info.ps1
++++ b/tools/collect-info.ps1
+@@ -588,6 +588,7 @@ Invoke-Step '模拟器日志' {
+ 
+ Invoke-Step '模拟器崩溃转储' {
+     Section '模拟器崩溃转储'
++    L '收集范围：仅 ModAVD 的 emu-crash-<version>-mas.db；近 7 天内最新 3 份'
+     $bases = @()
+     foreach ($b in @((Join-Path $env:LOCALAPPDATA 'Temp\AndroidEmulator'), (Join-Path $env:TEMP 'AndroidEmulator'))) {
+         if ($b -and (Test-Path -LiteralPath $b)) {
+@@ -598,7 +599,7 @@ Invoke-Step '模拟器崩溃转储' {
+     $since = (Get-Date).AddDays(-7)
+     $dumps = @()
+     foreach ($b in $bases) {
+-        foreach ($db in @(Get-ChildItem -LiteralPath $b -Directory -Filter 'emu-crash-*.db' -ErrorAction SilentlyContinue)) {
++        foreach ($db in @(Get-ChildItem -LiteralPath $b -Directory -Filter 'emu-crash-*-mas.db' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^emu-crash-[0-9]+\.[0-9]+\.[0-9]+-mas\.db$' })) {
+             $dumps += @(Get-ChildItem -LiteralPath $db.FullName -Recurse -File -Filter '*.dmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $since })
+         }
+     }
+diff --git a/tools/tests/collect-dump-scope.ps1 b/tools/tests/collect-dump-scope.ps1
+new file mode 100644
+index 0000000..9296e99
+--- /dev/null
++++ b/tools/tests/collect-dump-scope.ps1
+@@ -0,0 +1,71 @@
++﻿# Copyright 2026 Ji Mao Cai
++# SPDX-License-Identifier: Apache-2.0
++
++# Run with Windows PowerShell 5.1. Only the dump-collection block is evaluated.
++$ErrorActionPreference = 'Stop'
++$path = Join-Path (Split-Path $PSScriptRoot -Parent) 'collect-info.ps1'
++$tokens = $null; $errors = $null
++$ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
++if ($errors.Count) { throw $errors[0] }
++$command = $ast.FindAll({ param($n)
++    $n -is [Management.Automation.Language.CommandAst] -and
++    $n.GetCommandName() -eq 'Invoke-Step' -and
++    $n.CommandElements[1].Value -eq ([string][char]0x6a21 + [char]0x62df + [char]0x5668 + [char]0x5d29 + [char]0x6e83 + [char]0x8f6c + [char]0x50a8)
++}, $true)
++if (@($command).Count -ne 1) { throw 'Dump collection block not found' }
++$block = $command[0].CommandElements[2].ScriptBlock.GetScriptBlock()
++function Section($text) {}
++function L($text) { $script:messages += $text }
++function Format-Size($bytes) { return [string]$bytes }
++function Copy-Shared($from, $to) { $script:selected += $from; return $true }
++$savedLocal = $env:LOCALAPPDATA; $savedTemp = $env:TEMP
++$tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
++$fixture = Join-Path $tempParent ('modavd-dumps-' + [guid]::NewGuid().ToString('N'))
++try {
++    $env:LOCALAPPDATA = Join-Path $fixture 'local'
++    $env:TEMP = Join-Path $fixture 'temp'
++    $Stage = Join-Path $fixture 'output'
++    $DumpMaxBytes = 1MB
++    $script:selected = @(); $script:messages = @()
++    $roots = @((Join-Path $env:LOCALAPPDATA 'Temp\AndroidEmulator'), (Join-Path $env:TEMP 'AndroidEmulator'))
++    $dbs = @('emu-crash-37.2.10.db', 'emu-crash-37.2.10-mas.db', 'emu-crash-37.1.0-mas.db', 'emu-crash-37.2.10-other-mas.db')
++    foreach ($root in $roots) {
++        foreach ($db in $dbs) {
++            $dir = Join-Path $root ($db + '\reports')
++            [void](New-Item -ItemType Directory -Path $dir -Force)
++            foreach ($n in 1..4) {
++                $file = Join-Path $dir ($n.ToString() + '.dmp')
++                [IO.File]::WriteAllBytes($file, [byte[]]@(1, 2, 3))
++                $age = if ($db -eq 'emu-crash-37.2.10.db') { -$n } else { -10 - $n }
++                [IO.File]::SetLastWriteTime($file, (Get-Date).AddMinutes($age))
++            }
++            $old = Join-Path $dir 'expired.dmp'
++            [IO.File]::WriteAllBytes($old, [byte[]]@(0))
++            [IO.File]::SetLastWriteTime($old, (Get-Date).AddDays(-8))
++        }
++    }
++    & $block
++    if ($script:selected.Count -ne 3) { throw 'Expected three product dumps' }
++    foreach ($file in $script:selected) {
++        if ($file -notmatch 'emu-crash-[0-9]+\.[0-9]+\.[0-9]+-mas\.db\\' -or $file.EndsWith('expired.dmp')) {
++            throw 'Selected a foreign or expired dump'
++        }
++    }
++    # Repeat with no databases, then with both scan roots resolving to the same directory.
++    $env:LOCALAPPDATA = Join-Path $fixture 'missing'; $env:TEMP = Join-Path $fixture 'also-missing'
++    $script:selected = @(); & $block
++    if ($script:selected.Count) { throw 'Missing roots produced dumps' }
++    $env:LOCALAPPDATA = Join-Path $fixture 'local'; $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
++    $script:selected = @(); & $block
++    if ($script:selected.Count -ne 3 -or @($script:selected | Select-Object -Unique).Count -ne 3) {
++        throw 'Duplicate roots produced duplicate dumps'
++    }
++    Write-Output 'dump scope: mixed products, versions, expiry, missing and duplicate roots passed'
++} finally {
++    $env:LOCALAPPDATA = $savedLocal; $env:TEMP = $savedTemp
++    $resolved = [IO.Path]::GetFullPath($fixture)
++    if ($resolved.StartsWith((Join-Path $tempParent 'modavd-dumps-'), [StringComparison]::OrdinalIgnoreCase) -and
++        (Test-Path -LiteralPath $resolved)) {
++        Remove-Item -LiteralPath $resolved -Recurse -Force
++    }
++}
