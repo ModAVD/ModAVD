@@ -1,0 +1,111 @@
+From 174b6e3f9a9d0c9cb560806a8be0cae0eb06f564 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 08:16:14 +0800
+Subject: [PATCH] host: propagate synchronous readback failure through
+ IColorBuffer
+
+Return the backend result through IColorBuffer and ColorBuffer. Skip channel conversion and publishing an updated frame when synchronous readback fails. Based on gfxstream/mas35.
+---
+ host/color_buffer.cpp                            | 16 ++++++++--------
+ host/color_buffer.h                              |  2 +-
+ .../gfxstream/host/color_buffer_interface.h      |  2 +-
+ host/frame_buffer.cpp                            |  5 ++++-
+ 4 files changed, 14 insertions(+), 11 deletions(-)
+
+diff --git a/host/color_buffer.cpp b/host/color_buffer.cpp
+index af9e1e3..8e196ac 100644
+--- a/host/color_buffer.cpp
++++ b/host/color_buffer.cpp
+@@ -71,7 +71,7 @@ class ColorBuffer::Impl : public LazySnapshotObj<ColorBuffer::Impl> {
+     uint32_t getHeight() const { return mHeight; }
+     GfxstreamFormat getFormat() const { return mFormat; }
+ 
+-    void readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++    bool readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                      void* outPixels, uint64_t outPixelsSize);
+     void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, Rect rect,
+                            GfxstreamFormat pixelsFormat, void* outPixels,
+@@ -278,24 +278,24 @@ void ColorBuffer::Impl::restore() {
+ #endif
+ }
+ 
+-void ColorBuffer::Impl::readToBytes(int x, int y, int width, int height,
++bool ColorBuffer::Impl::readToBytes(int x, int y, int width, int height,
+                                     GfxstreamFormat pixelsFormat, void* outPixels,
+                                     uint64_t outPixelsSize) {
+     touch();
+ 
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     if (mColorBufferGl) {
+-        mColorBufferGl->readPixels(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
+-        return;
++        return mColorBufferGl->readPixels(x, y, width, height, pixelsFormat, outPixels,
++                                         outPixelsSize);
+     }
+ #endif
+ 
+     if (mColorBufferVk) {
+-        mColorBufferVk->readToBytes(x, y, width, height, outPixels, outPixelsSize);
+-        return;
++        return mColorBufferVk->readToBytes(x, y, width, height, outPixels, outPixelsSize);
+     }
+ 
+     GFXSTREAM_FATAL("%s: No ColorBuffer impl", __func__);
++    return false;
+ }
+ 
+ void ColorBuffer::Impl::readToBytesScaled(
+@@ -569,9 +569,9 @@ uint32_t ColorBuffer::getHeight() const { return mImpl->getHeight(); }
+ 
+ GfxstreamFormat ColorBuffer::getFormat() const { return mImpl->getFormat(); }
+ 
+-void ColorBuffer::readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++bool ColorBuffer::readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                               void* outPixels, uint64_t outPixelsSize) {
+-    mImpl->readToBytes(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
++    return mImpl->readToBytes(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
+ }
+ 
+ void ColorBuffer::readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation,
+diff --git a/host/color_buffer.h b/host/color_buffer.h
+index faf2d0f..c557545 100644
+--- a/host/color_buffer.h
++++ b/host/color_buffer.h
+@@ -68,7 +68,7 @@ class ColorBuffer : public IColorBuffer, public LazySnapshotObj<ColorBuffer> {
+     uint32_t getHeight() const override;
+     GfxstreamFormat getFormat() const;
+ 
+-    void readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++    bool readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                      void* outPixels, uint64_t outPixelsSize) override;
+     void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, const Rect& rect,
+                            GfxstreamFormat pixelsFormat, void* outPixels,
+diff --git a/host/common/include/gfxstream/host/color_buffer_interface.h b/host/common/include/gfxstream/host/color_buffer_interface.h
+index e73c7eb..62d131f 100644
+--- a/host/common/include/gfxstream/host/color_buffer_interface.h
++++ b/host/common/include/gfxstream/host/color_buffer_interface.h
+@@ -56,7 +56,7 @@ class IColorBuffer {
+     virtual bool flushFromBackend(Backend backend) = 0;
+     virtual bool importHandle(void* handle, bool preserveContent) = 0;
+ 
+-    virtual void readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
++    virtual bool readToBytes(int x, int y, int width, int height, GfxstreamFormat pixelsFormat,
+                              void* outPixels, uint64_t outPixelsSize) = 0;
+     virtual void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation,
+                                    const Rect& rect, GfxstreamFormat pixelsFormat, void* outPixels,
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 9b01589..458e1da 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -1601,7 +1601,10 @@ static bool readbackColorBufferWithoutWorker(ColorBuffer* cb, unsigned char* img
+         return false;
+     }
+     const uint64_t size = 4ull * width * height;
+-    cb->readToBytes(0, 0, static_cast<int>(width), static_cast<int>(height), format, img, size);
++    if (!cb->readToBytes(0, 0, static_cast<int>(width), static_cast<int>(height), format, img,
++                         size)) {
++        return false;
++    }
+     const bool swapRedBlue = srcBgra != readBgra;
+     if (swapRedBlue || srcNoAlpha) {
+         for (uint64_t i = 0; i < size; i += 4) {
