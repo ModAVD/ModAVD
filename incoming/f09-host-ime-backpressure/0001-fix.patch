@@ -1,197 +1,25 @@
-From 094ab7ea220b181739e05ca91387759327131c7e Mon Sep 17 00:00:00 2001
+From e4a0737e895267dfc19d324b4207c0ce76f4c364 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 22:26:41 +0800
-Subject: [PATCH] host IME: enqueue complete input events and handle send
- failure in the UI
+Date: Sat, 31 Oct 2026 08:16:15 +0800
+Subject: [PATCH] ime: enqueue host input events atomically
 
-Batch replacement, commit and composition frames atomically under the pipe lock. Guard UI retries with a host-only focus generation and expose backpressure as retryable. Keep failed input until explicit retry, copy recovery or discard; advance composition state only after successful enqueue. Includes production transport and UI-body fault-injection probes; real Qt/Windows/Android IME validation remains outstanding.
+Serialize delete, commit, preedit and finish-composing into a single bounded batch. Check queue capacity and append under one lock, so a failed send queues no prefix. Use the batch path for multi-frame commits. Keep protocol v1, focus state and Qt UI behavior unchanged. Based on qemu/mas36.
 ---
- .../android/skin/qt/emulator-qt-window.cpp    |  88 ++++--
- .../src/android/skin/qt/emulator-qt-window.h  |   3 +-
- .../include/android/emulation/ModavdImePipe.h |  23 ++
- .../src/android/emulation/ModavdImePipe.cpp   | 144 ++++++++--
- tests/modavd/ime-backpressure.py              | 250 ++++++++++++++++++
- 5 files changed, 460 insertions(+), 48 deletions(-)
- create mode 100644 tests/modavd/ime-backpressure.py
+ .../include/android/emulation/ModavdImePipe.h |  17 +++
+ .../src/android/emulation/ModavdImePipe.cpp   | 124 ++++++++++++++----
+ 2 files changed, 117 insertions(+), 24 deletions(-)
 
-diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
-index e6f05cc..52247da 100644
---- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
-+++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
-@@ -106,6 +106,7 @@
- #include <QPixmap>
- #include <QProgressBar>
- #include <QPushButton>
-+#include <QClipboard>
- #include <QScreen>
- #include <QScrollBar>
- #include <QSemaphore>
-@@ -1004,9 +1005,9 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
-                                     active = state.active,
-                                     inputType = state.inputType,
-                                     hasCursor = state.hasCursor, cursor,
--                                    changes]() {
-+                                    changes, generation = state.focusGeneration]() {
-                     onHostImeState(connected, active, inputType, hasCursor,
--                                   cursor, changes);
-+                                   cursor, changes, generation);
-                 });
-             });
- }
-@@ -3407,7 +3408,15 @@ void EmulatorQtWindow::onHostImeState(bool connected,
-                                       uint32_t inputType,
-                                       bool hasCursor,
-                                       QRect guestCursor,
--                                      unsigned changes) {
-+                                      unsigned changes, uint64_t focusGeneration) {
-+    if (mHostImeTextMode && mHostImeFocusGeneration != focusGeneration) {
-+        const bool resetting = mHostImeResetting;
-+        mHostImeResetting = true;
-+        QGuiApplication::inputMethod()->reset();
-+        mHostImeResetting = resetting;
-+        mHostImeComposing = false;
-+    }
-+    mHostImeFocusGeneration = focusGeneration;
-     mHostImeInputType = inputType;
-     mHostImeHasCursor = hasCursor;
-     mHostImeGuestCursor = guestCursor;
-@@ -3735,42 +3744,77 @@ void EmulatorQtWindow::hostImeForwardNativeKey(quint32 scancode) {
- }
- 
- void EmulatorQtWindow::handleInputMethodEvent(QInputMethodEvent* event) {
--    event->accept();
-     if (!mHostImeTextMode || mHostImeResetting) {
-+        event->accept();
-         return;
-     }
-     const QString commit = event->commitString();
-     const QString preedit = event->preeditString();
--
-+    const uint64_t generation = mHostImeFocusGeneration;
-+    ModavdImePipe::InputEvent input;
-+    bool composing = mHostImeComposing;
-+    bool supportedReplacement = true;
-     if (event->replacementStart() != 0 || event->replacementLength() != 0) {
--        // Without composing text the replacement is relative to the cursor,
--        // which deleteSurroundingText() can do when it covers the cursor.
--        const int start = event->replacementStart();
--        const int length = event->replacementLength();
--        if (!mHostImeComposing && start <= 0 && length >= -start) {
--            ModavdImePipe::sendDelete(-start, length + start);
-+        const int64_t start = event->replacementStart();
-+        const int64_t length = event->replacementLength();
-+        if (!composing && start <= 0 && -start <= INT32_MAX &&
-+            length >= -start && length + start <= INT32_MAX) {
-+            input.deleteBefore = static_cast<int32_t>(-start);
-+            input.deleteAfter = static_cast<int32_t>(length + start);
-         } else {
--            dwarning("host IME: replacement %d+%d not applied", start, length);
-+            supportedReplacement = false;
-         }
-     }
-     if (!commit.isEmpty()) {
--        ModavdImePipe::sendCommit(commit.toStdString());
--        mHostImeComposing = false;
-+        input.hasCommit = true;
-+        input.commit = commit.toStdString();
-+        composing = false;
-     }
-     if (!preedit.isEmpty()) {
--        int cursor = -1;
-+        input.setPreedit = true;
-+        input.preedit = preedit.toStdString();
-         for (const QInputMethodEvent::Attribute& a : event->attributes()) {
-             if (a.type == QInputMethodEvent::Cursor) {
--                cursor = a.start;
-+                input.cursor = a.start;
-                 break;
-             }
-         }
--        ModavdImePipe::sendPreedit(cursor, preedit.toStdString());
--        mHostImeComposing = true;
--    } else if (commit.isEmpty() && mHostImeComposing) {
--        ModavdImePipe::sendPreedit(-1, std::string());
--        ModavdImePipe::sendFinishComposing();
--        mHostImeComposing = false;
-+        composing = true;
-+    } else if (commit.isEmpty() && composing) {
-+        input.setPreedit = true;
-+        input.finishComposing = true;
-+        composing = false;
-+    }
-+    for (;;) {
-+        bool retryable = false;
-+        std::string error = generation ? "unsupported text replacement"
-+                                       : "guest text focus is not available";
-+        if (supportedReplacement && generation &&
-+            ModavdImePipe::sendInputEvent(input, generation, &error, &retryable)) {
-+            mHostImeComposing = composing;
-+            event->accept();
-+            return;
-+        }
-+        // Keep this event's input alive until the user retries, explicitly
-+        // copies it for recovery, or chooses to discard it. Never log text.
-+        QMessageBox box(QMessageBox::Warning, tr("Host input method"),
-+                        tr("This input has not been sent. Retry after the guest resumes reading, "
-+                           "copy the unsent text to recover it manually, or discard it."),
-+                        QMessageBox::Retry | QMessageBox::Discard, this);
-+        auto* copy = box.addButton(tr("Copy unsent text"), QMessageBox::ActionRole);
-+        box.setInformativeText(QString::fromStdString(error));
-+        box.button(QMessageBox::Retry)->setEnabled(retryable &&
-+            ModavdImePipe::getState().focusGeneration == generation);
-+        mHostImeResetting = true;
-+        const int result = box.exec();
-+        mHostImeResetting = false;
-+        if (box.clickedButton() == copy) {
-+            QGuiApplication::clipboard()->setText(commit + preedit);
-+        } else if (result == QMessageBox::Retry) {
-+            continue;  // All-or-nothing enqueue makes this safe from duplicates.
-+        }
-+        event->accept();  // Explicit recovery/discard; no implicit IME resend.
-+        return;
-     }
- }
- 
-diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
-index b125127..a465c4e 100644
---- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
-+++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
-@@ -527,7 +527,7 @@ private:
-                         uint32_t inputType,
-                         bool hasCursor,
-                         QRect guestCursor,
--                        unsigned changes);
-+                        unsigned changes, uint64_t focusGeneration);
-     void setHostImeTextMode(bool on);
-     bool hostImeKeyPress(const QKeyEvent& event);
-     bool hostImeKeyRelease(const QKeyEvent& event);
-@@ -586,6 +586,7 @@ private:
-     std::unordered_set<int> mHeldModifiers;
- 
-     // Host IME text mode state, see isHostImeTextMode().
-+    uint64_t mHostImeFocusGeneration = 0;
-     int mHostImeCallbackId = 0;
-     bool mHostImeTextMode = false;
-     bool mHostImeResetting = false;  // inside QInputMethod::reset()
 diff --git a/android/emu/hardware/include/android/emulation/ModavdImePipe.h b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
-index 939925b..a8a49ed 100644
+index 939925b..0b68c05 100644
 --- a/android/emu/hardware/include/android/emulation/ModavdImePipe.h
 +++ b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
-@@ -50,6 +50,7 @@ public:
-     using Ptr = std::shared_ptr<ModavdImePipe>;
- 
-     struct State {
-+        uint64_t focusGeneration = 0;  // host-only token; changes on connection/focus
-         bool connected = false;  // the guest finished the handshake
-         uint32_t version = 0;    // protocol version announced by the guest
-         bool active = false;     // the focus is an editable text field
-@@ -95,6 +96,24 @@ public:
+@@ -95,6 +95,22 @@ public:
                      void** newPipePtr) override;
      void onGuestWantWakeOn(int flags) override;
  
 +    // One Qt input event is enqueued atomically, including replacement and
 +    // composition changes. Success means queued, not acknowledged by the guest.
-+    // Failure queues nothing; retryable is true only for queue backpressure.
++    // Failure queues nothing.
 +    struct InputEvent {
 +        int32_t deleteBefore = 0;
 +        int32_t deleteAfter = 0;
@@ -203,50 +31,24 @@ index 939925b..a8a49ed 100644
 +        bool finishComposing = false;
 +    };
 +    static bool sendInputEvent(const InputEvent& input,
-+                               uint64_t expectedFocusGeneration,
-+                               std::string* error = nullptr,
-+                               bool* retryable = nullptr);
++                               std::string* error = nullptr);
 +
      // Host -> guest. Each returns false and fills |error| (if not null) when
      // no guest is connected or the frame can't be sent.
      static bool sendCommit(const std::string& text,
-@@ -127,11 +146,15 @@ private:
+@@ -127,6 +143,7 @@ private:
                            std::string* error);
      bool queueFrameLocked(const uint8_t* payload, size_t size);
      bool queueFrame(const std::vector<uint8_t>& payload, std::string* error);
-+    bool queueBatch(const std::vector<uint8_t>& frames,
-+                    uint64_t expectedFocusGeneration, std::string* error,
-+                    bool* retryable);
++    bool queueBatch(const std::vector<uint8_t>& frames, std::string* error);
      bool handleFrameLocked(Update* update);
      void closeFromHostLocked();
      void detach();
- 
-     mutable android::base::Lock mLock;  // protects the members below
-+    uint64_t mFocusGeneration = 0;
-     bool mClosed = false;      // closed by the guest or the host
-     bool mHandshaked = false;  // the guest's 'V' arrived
- 
 diff --git a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
-index 75fe1ef..64e0079 100644
+index 75fe1ef..341c101 100644
 --- a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
 +++ b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
-@@ -16,6 +16,7 @@
- 
- #include <string.h>
- #include <algorithm>
-+#include <atomic>
- #include <utility>
- 
- #include "aemu/base/memory/LazyInstance.h"
-@@ -26,6 +27,7 @@ namespace emulation {
- 
- namespace {
- 
-+std::atomic<uint64_t> sNextFocusGeneration{1};
- constexpr uint32_t kProtocolVersion = 1;
- constexpr size_t kMaxPayloadSize = 65536;
- // Host -> guest bytes allowed to pile up for a guest that stopped reading.
-@@ -53,6 +55,44 @@ void putU32(std::vector<uint8_t>* out, uint32_t value) {
+@@ -53,6 +53,44 @@ void putU32(std::vector<uint8_t>* out, uint32_t value) {
      }
  }
  
@@ -291,70 +93,19 @@ index 75fe1ef..64e0079 100644
  uint32_t getU32(const uint8_t* p) {
      return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 |
             uint32_t(p[3]) << 24;
-@@ -90,6 +130,7 @@ void notify(const ModavdImePipe::State& state, unsigned changes) {
- 
- // What the frames of one onGuestSend() call reported.
- struct ModavdImePipe::Update {
-+    uint64_t focusGeneration = 0;
-     bool connected = false;
-     uint32_t version = 0;
-     bool focus = false;
-@@ -101,7 +142,8 @@ struct ModavdImePipe::Update {
- };
- 
- ModavdImePipe::ModavdImePipe(void* hwPipe, Service* svc)
--    : AndroidPipe(hwPipe, svc) {}
-+    : AndroidPipe(hwPipe, svc),
-+      mFocusGeneration(sNextFocusGeneration.fetch_add(1)) {}
- 
- void ModavdImePipe::onGuestClose(PipeCloseReason reason) {
-     // Holds the last reference; declared first so it goes away last.
-@@ -240,6 +282,9 @@ int ModavdImePipe::onGuestSend(const AndroidPipeBuffer* buffers,
-         android::base::AutoLock lock(sGlobals->lock);
-         if (sGlobals->pipe.get() == this) {
-             State& state = sGlobals->state;
-+            if (update.connected || update.focus) {
-+                state.focusGeneration = update.focusGeneration;
-+            }
-             if (update.connected) {
-                 state.connected = true;
-                 state.version = update.version;
-@@ -311,6 +356,7 @@ bool ModavdImePipe::handleFrameLocked(Update* update) {
-         std::vector<uint8_t> reply{'V'};
-         putU32(&reply, kProtocolVersion);
-         queueFrameLocked(reply.data(), reply.size());
-+        update->focusGeneration = mFocusGeneration;
-         update->connected = true;
-         update->version = version;
-         return true;
-@@ -324,6 +370,8 @@ bool ModavdImePipe::handleFrameLocked(Update* update) {
-             if (size < 10 || p[1] > 1) {
-                 return false;
-             }
-+            mFocusGeneration = sNextFocusGeneration.fetch_add(1);
-+            update->focusGeneration = mFocusGeneration;
-             update->focus = true;
-             update->active = p[1] == 1;
-             update->inputType = getU32(p + 2);
-@@ -389,6 +437,34 @@ bool ModavdImePipe::queueFrame(const std::vector<uint8_t>& payload,
+@@ -389,6 +427,28 @@ bool ModavdImePipe::queueFrame(const std::vector<uint8_t>& payload,
      return true;
  }
  
 +bool ModavdImePipe::queueBatch(const std::vector<uint8_t>& frames,
-+                               uint64_t expectedFocusGeneration, std::string* error,
-+                               bool* retryable) {
++                               std::string* error) {
 +    android::base::AutoLock lock(mLock);
 +    if (mClosed || !mHandshaked) {
 +        if (error) *error = "guest input method not connected";
 +        return false;
 +    }
-+    if (expectedFocusGeneration && expectedFocusGeneration != mFocusGeneration) {
-+        if (error) *error = "guest text focus changed; retry in the intended field";
-+        return false;
-+    }
 +    if (frames.size() > kMaxPendingOut - (mOut.size() - mOutPos)) {
 +        if (error) *error = "guest input method is not reading";
-+        if (retryable) *retryable = true;
 +        return false;
 +    }
 +    // Reserve before modifying the queue; no partial commit on backpressure.
@@ -371,7 +122,7 @@ index 75fe1ef..64e0079 100644
  void ModavdImePipe::closeFromHostLocked() {
      if (mClosed) {
          return;
-@@ -435,30 +511,48 @@ bool ModavdImePipe::sendFrame(const std::vector<uint8_t>& payload,
+@@ -435,30 +495,46 @@ bool ModavdImePipe::sendFrame(const std::vector<uint8_t>& payload,
  
  // static
  bool ModavdImePipe::sendCommit(const std::string& text, std::string* error) {
@@ -402,16 +153,14 @@ index 75fe1ef..64e0079 100644
 +    InputEvent input;
 +    input.hasCommit = true;
 +    input.commit = text;
-+    return sendInputEvent(input, 0, error);
++    return sendInputEvent(input, error);
 +}
 +
 +// static
 +bool ModavdImePipe::sendInputEvent(const InputEvent& input,
-+                                   uint64_t expectedFocusGeneration, std::string* error,
-+                                   bool* retryable) {
-+    if (retryable) *retryable = false;
++                                   std::string* error) {
 +    if (input.deleteBefore < 0 || input.deleteAfter < 0 ||
-+        input.preedit.size() > kMaxPayloadSize - 5) {
++        (input.setPreedit && input.preedit.size() > kMaxPayloadSize - 5)) {
 +        if (error) *error = "invalid input event or preedit too long";
 +        return false;
 +    }
@@ -440,263 +189,7 @@ index 75fe1ef..64e0079 100644
 +        if (error) *error = "guest input method not connected";
 +        return false;
 +    }
-+    return pipe->queueBatch(frames, expectedFocusGeneration, error, retryable);
++    return pipe->queueBatch(frames, error);
  }
  
  // static
-diff --git a/tests/modavd/ime-backpressure.py b/tests/modavd/ime-backpressure.py
-new file mode 100644
-index 0000000..8e567aa
---- /dev/null
-+++ b/tests/modavd/ime-backpressure.py
-@@ -0,0 +1,250 @@
-+# Copyright 2026 Ji Mao Cai
-+# SPDX-License-Identifier: GPL-2.0-only
-+
-+"""Compile the actual IME pipe and UI event body with platform/Qt adapters.
-+
-+Run from a Visual Studio Developer PowerShell. This tests queue and recovery
-+control flow, not a running Qt window, Windows IME, or Android input method.
-+"""
-+from pathlib import Path
-+import subprocess
-+import tempfile
-+
-+root = Path(__file__).resolve().parents[2]
-+hardware = root / 'android/emu/hardware'
-+ui = (root / 'android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp').read_text(encoding='utf-8')
-+start = ui.index('void EmulatorQtWindow::handleInputMethodEvent(')
-+ui_function = ui[start:ui.index('\nQVariant EmulatorQtWindow::hostImeQuery(', start)]
-+headers = {
-+ 'aemu/base/synchronization/Lock.h': '''#pragma once
-+#include <mutex>
-+namespace android { namespace base {
-+struct Lock { std::mutex mutex; };
-+struct AutoLock { std::unique_lock<std::mutex> lock; explicit AutoLock(Lock& l) : lock(l.mutex) {} };
-+}}''',
-+ 'aemu/base/memory/LazyInstance.h': '''#pragma once
-+namespace android { namespace base {
-+template<class T> struct LazyInstance { T* operator->() { static T value; return &value; } };
-+}}
-+#define LAZY_INSTANCE_INIT {}''',
-+ 'android/utils/debug.h': '''#pragma once
-+#define VERBOSE_INFO(...) ((void)0)
-+#define dinfo(...) ((void)0)
-+#define dwarning(...) ((void)0)''',
-+ 'host-common/android_pipe_common.h': '''#pragma once
-+#include <cstddef>
-+#include <cstdint>
-+enum AndroidPipeFlags { PIPE_FLAGS_NONE = 0 };
-+enum PipeCloseReason { PIPE_CLOSE_GRACEFUL = 0 };
-+struct AndroidPipeBuffer { uint8_t* data; size_t size; };
-+enum { PIPE_POLL_HUP = 1, PIPE_POLL_OUT = 2, PIPE_POLL_IN = 4,
-+       PIPE_WAKE_READ = 1, PIPE_WAKE_WRITE = 2, PIPE_ERROR_IO = -1, PIPE_ERROR_AGAIN = -2 };''',
-+ 'host-common/AndroidPipe.h': '''#pragma once
-+#include <memory>
-+#include "host-common/android_pipe_common.h"
-+namespace android {
-+class AndroidPipe {
-+public:
-+ class Service { public:
-+  explicit Service(const char*) {} virtual ~Service() = default;
-+  virtual AndroidPipe* create(void*, const char*, AndroidPipeFlags) = 0;
-+  static void add(std::unique_ptr<Service>) {}
-+ };
-+ AndroidPipe(void*, Service*) {} virtual ~AndroidPipe() = default;
-+ virtual void onGuestClose(PipeCloseReason) = 0;
-+ virtual unsigned onGuestPoll() const = 0;
-+ virtual int onGuestRecv(AndroidPipeBuffer*, int) = 0;
-+ virtual int onGuestSend(const AndroidPipeBuffer*, int, void**) = 0;
-+ virtual void onGuestWantWakeOn(int) = 0;
-+ void abortPendingOperation() {} void closeFromHost() {} void signalWake(int) {}
-+};
-+}''',
-+}
-+code = r'''
-+#include "android/emulation/ModavdImePipe.h"
-+#include <cassert>
-+#include <cstdio>
-+#include <cstring>
-+#include <functional>
-+#include <string>
-+#include <thread>
-+#include <vector>
-+using android::emulation::ModavdImePipe;
-+using Frames = std::vector<std::vector<uint8_t>>;
-+static void u32(std::vector<uint8_t>& b, uint32_t n) {
-+    for (int i = 0; i < 4; ++i) b.push_back(uint8_t(n >> (i * 8)));
-+}
-+static uint32_t get(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 |
-+    uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
-+static void send(android::AndroidPipe* pipe, std::vector<uint8_t> payload) {
-+    std::vector<uint8_t> bytes; u32(bytes, uint32_t(payload.size()));
-+    bytes.insert(bytes.end(), payload.begin(), payload.end());
-+    AndroidPipeBuffer b{bytes.data(), bytes.size()}; assert(pipe->onGuestSend(&b, 1, nullptr) == bytes.size());
-+}
-+static Frames drain(android::AndroidPipe* pipe) {
-+    std::vector<uint8_t> bytes; uint8_t buffer[8192]; AndroidPipeBuffer b{buffer, sizeof(buffer)};
-+    for (;;) {
-+        int n = pipe->onGuestRecv(&b, 1);
-+        if (n == PIPE_ERROR_AGAIN || n == PIPE_ERROR_IO) break;
-+        assert(n > 0); bytes.insert(bytes.end(), buffer, buffer + n);
-+    }
-+    Frames frames;
-+    for (size_t pos = 0; pos < bytes.size();) {
-+        assert(pos + 4 <= bytes.size()); uint32_t n = get(bytes.data() + pos); pos += 4;
-+        assert(n > 0 && n <= 65536 && pos + n <= bytes.size());
-+        frames.emplace_back(bytes.begin() + pos, bytes.begin() + pos + n); pos += n;
-+    }
-+    return frames;
-+}
-+static void focus(android::AndroidPipe* pipe) { send(pipe, {'F', 1, 1, 0, 0, 0, 0, 0, 0, 0}); }
-+static android::AndroidPipe* connect(ModavdImePipe::Service& svc) {
-+    auto* pipe = svc.create(nullptr, nullptr, PIPE_FLAGS_NONE);
-+    send(pipe, {'V', 1, 0, 0, 0}); assert(drain(pipe).size() == 1); focus(pipe); return pipe;
-+}
-+static std::string text(const Frames& frames) {
-+    std::string result;
-+    for (const auto& f : frames) { assert(f[0] == 'C'); result.append(f.begin() + 1, f.end()); }
-+    return result;
-+}
-+static void fill() { assert(ModavdImePipe::sendCommit(std::string(1048496, 'z'))); }
-+
-+// Minimal Qt adapters: production event handling below is compiled unchanged.
-+struct QString {
-+    std::string value;
-+    QString() = default; QString(const char* s) : value(s) {} QString(std::string s) : value(std::move(s)) {}
-+    bool isEmpty() const { return value.empty(); }
-+    std::string toStdString() const { return value; }
-+    static QString fromStdString(const std::string& s) { return QString(s); }
-+    QString operator+(const QString& other) const { return QString(value + other.value); }
-+};
-+struct QInputMethodEvent {
-+    enum { Cursor = 1 };
-+    struct Attribute { int type, start; };
-+    QString commit, preedit; int start = 0, length = 0; bool accepted = false;
-+    std::vector<Attribute> attrs;
-+    QString commitString() const { return commit; } QString preeditString() const { return preedit; }
-+    int replacementStart() const { return start; } int replacementLength() const { return length; }
-+    const std::vector<Attribute>& attributes() const { return attrs; } void accept() { accepted = true; }
-+};
-+struct QClipboard { QString value; void setText(const QString& s) { value = s; } };
-+struct QGuiApplication { static QClipboard* clipboard() { static QClipboard value; return &value; } };
-+struct QPushButton { bool enabled = true; void setEnabled(bool on) { enabled = on; } };
-+static int dialogs, choice;
-+static bool retryEnabled;
-+static std::function<void()> onDialog;
-+struct QMessageBox {
-+    enum { Warning = 1, Retry = 2, Discard = 4, ActionRole = 8 };
-+    QPushButton retry, copy; QPushButton* clicked = nullptr;
-+    template<class T> QMessageBox(int, QString, QString, int, T*) {}
-+    QPushButton* addButton(QString, int) { return &copy; }
-+    QPushButton* button(int) { return &retry; }
-+    void setInformativeText(QString) {}
-+    int exec() {
-+        assert(++dialogs < 5); retryEnabled = retry.enabled;
-+        const int selected = choice;
-+        if (onDialog) { auto action = std::move(onDialog); onDialog = {}; action(); }
-+        if (selected == Retry) { assert(retry.enabled); return Retry; }
-+        if (selected == ActionRole) clicked = &copy;
-+        return Discard;
-+    }
-+    QPushButton* clickedButton() { return clicked; }
-+};
-+struct EmulatorQtWindow {
-+    bool mHostImeTextMode = true, mHostImeResetting = false, mHostImeComposing = false;
-+    uint64_t mHostImeFocusGeneration = 0;
-+    QString tr(const char* s) { return QString(s); }
-+    void handleInputMethodEvent(QInputMethodEvent* event);
-+};
-+@UI_FUNCTION@
-+static int checks;
-+static void resetDialog(int selected) { dialogs = 0; choice = selected; retryEnabled = false; onDialog = {}; }
-+int main() {
-+    ModavdImePipe::Service svc; auto* pipe = connect(svc);
-+    std::string error;
-+    assert(ModavdImePipe::sendCommit(""));
-+    auto empty = drain(pipe); assert(empty.size() == 1 && empty[0].size() == 1 && empty[0][0] == 'C'); ++checks;
-+    assert(!ModavdImePipe::sendCommit(std::string(2 * 1024 * 1024, 'x'), &error));
-+    assert(!error.empty() && drain(pipe).empty()); ++checks;
-+    std::string unicode(65534, 'a'); unicode += "\xe5\xbc\xa0\xe4\xb8\x89";
-+    assert(ModavdImePipe::sendCommit(unicode));
-+    auto frames = drain(pipe); assert(frames.size() == 2 && text(frames) == unicode);
-+    assert(frames[1][1] == 0xe5); ++checks;
-+    fill();
-+    ModavdImePipe::InputEvent input; input.deleteBefore = 1; input.hasCommit = true;
-+    input.commit = "commit"; input.setPreedit = true; input.preedit = "preedit";
-+    auto generation = ModavdImePipe::getState().focusGeneration;
-+    assert(!ModavdImePipe::sendInputEvent(input, generation, &error));
-+    assert(text(drain(pipe)) == std::string(1048496, 'z'));
-+    assert(ModavdImePipe::sendInputEvent(input, generation, &error));
-+    frames = drain(pipe); assert(frames.size() == 3 && frames[0][0] == 'D' && frames[1][0] == 'C' && frames[2][0] == 'P'); ++checks;
-+    input.preedit.assign(65536, 'p');
-+    assert(!ModavdImePipe::sendInputEvent(input, generation, &error)); assert(drain(pipe).empty());
-+    input.preedit.clear(); input.deleteBefore = -1;
-+    assert(!ModavdImePipe::sendInputEvent(input, generation, &error)); assert(drain(pipe).empty()); ++checks;
-+    input.deleteBefore = 1; focus(pipe);
-+    assert(!ModavdImePipe::sendInputEvent(input, generation, &error)); assert(drain(pipe).empty()); ++checks;
-+    auto* old = pipe; pipe = connect(svc);
-+    assert(!ModavdImePipe::sendInputEvent(input, generation, &error)); assert(drain(pipe).empty());
-+    old->onGuestClose(PIPE_CLOSE_GRACEFUL); ++checks;
-+    // Multiple large commits cannot interleave their frames.
-+    std::vector<std::thread> threads;
-+    for (char c : {'a', 'b', 'c', 'd'}) threads.emplace_back([c] { assert(ModavdImePipe::sendCommit(std::string(80000, c))); });
-+    for (auto& t : threads) t.join();
-+    frames = drain(pipe); assert(frames.size() == 8);
-+    for (size_t i = 0; i < frames.size(); i += 2) assert(frames[i][1] == frames[i+1][1]); ++checks;
-+    EmulatorQtWindow window; window.mHostImeFocusGeneration = ModavdImePipe::getState().focusGeneration;
-+    QInputMethodEvent event; event.commit = "commit"; event.preedit = "preedit";
-+    event.start = -1; event.length = 1; event.attrs.push_back({QInputMethodEvent::Cursor, 2});
-+    resetDialog(QMessageBox::Discard); window.handleInputMethodEvent(&event);
-+    assert(event.accepted && window.mHostImeComposing && dialogs == 0);
-+    frames = drain(pipe); assert(frames.size() == 3 && get(frames[2].data() + 1) == 2); ++checks;
-+    QInputMethodEvent cancel; window.handleInputMethodEvent(&cancel);
-+    frames = drain(pipe); assert(frames.size() == 2 && frames[0][0] == 'P' && frames[1][0] == 'E');
-+    assert(!window.mHostImeComposing); ++checks;
-+    window.mHostImeComposing = true; fill(); resetDialog(QMessageBox::Retry);
-+    onDialog = [&] { assert(window.mHostImeComposing); assert(text(drain(pipe)) == std::string(1048496, 'z')); };
-+    window.handleInputMethodEvent(&cancel);
-+    frames = drain(pipe); assert(frames.size() == 2 && frames[1][0] == 'E' && !window.mHostImeComposing); ++checks;
-+    fill(); resetDialog(QMessageBox::Retry);
-+    onDialog = [&] { assert(!window.mHostImeComposing); assert(text(drain(pipe)) == std::string(1048496, 'z')); };
-+    window.handleInputMethodEvent(&event);
-+    assert(dialogs == 1 && window.mHostImeComposing);
-+    frames = drain(pipe); assert(frames.size() == 3 && frames[0][0] == 'D'); ++checks;
-+    // Copy recovery is explicit; no text is queued or copied automatically.
-+    window.mHostImeComposing = false; fill(); resetDialog(QMessageBox::ActionRole);
-+    QGuiApplication::clipboard()->value = "untouched"; window.handleInputMethodEvent(&event);
-+    assert(dialogs == 1 && !window.mHostImeComposing);
-+    assert(QGuiApplication::clipboard()->value.value == "commitpreedit");
-+    assert(text(drain(pipe)) == std::string(1048496, 'z')); ++checks;
-+    fill(); resetDialog(QMessageBox::Discard); QGuiApplication::clipboard()->value = "untouched";
-+    window.handleInputMethodEvent(&event);
-+    assert(!window.mHostImeComposing && QGuiApplication::clipboard()->value.value == "untouched");
-+    assert(text(drain(pipe)) == std::string(1048496, 'z')); ++checks;
-+    fill(); resetDialog(QMessageBox::Retry);
-+    onDialog = [&] { focus(pipe); drain(pipe); choice = QMessageBox::ActionRole; };
-+    window.handleInputMethodEvent(&event);
-+    assert(dialogs == 2 && !retryEnabled && drain(pipe).empty()); ++checks;
-+    focus(pipe); resetDialog(QMessageBox::ActionRole); window.handleInputMethodEvent(&event);
-+    assert(!retryEnabled && drain(pipe).empty()); ++checks;
-+    window.mHostImeFocusGeneration = ModavdImePipe::getState().focusGeneration;
-+    QInputMethodEvent tooLarge; tooLarge.commit = std::string(2 * 1024 * 1024, 'x');
-+    resetDialog(QMessageBox::ActionRole); window.handleInputMethodEvent(&tooLarge);
-+    assert(!retryEnabled && drain(pipe).empty()); ++checks;
-+    pipe->onGuestClose(PIPE_CLOSE_GRACEFUL);
-+    resetDialog(QMessageBox::ActionRole); window.handleInputMethodEvent(&event);
-+    assert(!retryEnabled); ++checks;
-+    printf("IME: %d atomic queue, focus, retry and explicit recovery scenarios passed\n", checks);
-+}
-+'''.replace('@UI_FUNCTION@', ui_function)
-+with tempfile.TemporaryDirectory(prefix='modavd-ime-') as tmp:
-+    tmp = Path(tmp)
-+    for name, text in headers.items():
-+        p = tmp / 'include' / name
-+        p.parent.mkdir(parents=True, exist_ok=True)
-+        p.write_text(text)
-+    cpp = tmp / 'probe.cpp'; cpp.write_text(code)
-+    exe = tmp / 'probe.exe'
-+    subprocess.run(['cl', '/nologo', '/std:c++17', '/EHsc', '/I' + str(tmp / 'include'),
-+                    '/I' + str(hardware / 'include'), str(hardware / 'src/android/emulation/ModavdImePipe.cpp'),
-+                    str(cpp), '/Fe:' + str(exe), '/Fo:' + str(tmp) + '/'], cwd=tmp, check=True)
-+    subprocess.run([str(exe)], check=True)
