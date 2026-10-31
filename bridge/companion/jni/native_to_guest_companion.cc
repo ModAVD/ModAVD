@@ -1595,17 +1595,22 @@ void* NdkDlopenWrapper(const char* filename, int flags) {
 // app process through COW; the wrappers themselves are target-gated.
 using RawSyscallFn = long (*)(long, ...);
 static_assert(SYS_clone == 56 && CLONE_VM == 0x100, "The syscall trampoline requires Linux x86_64");
+static_assert((CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | CLONE_PIDFD) == 0x1181000,
+              "The clone guard requires unchanged host TLS and cached tid");
 extern "C" {
 RawSyscallFn modavd_original_syscall = nullptr;
 __attribute__((used, visibility("hidden"))) long ModavdGuardClone(long nr, long flags, long stack,
                                                                   long ptid, long ctid, long tls);
 // Keep all registers and the optional sixth stack argument intact on every
-// non-clone syscall. Only the known five-argument clone ABI enters C++.
+// unsupported syscall. A clone that can change host TLS or write the cached tid
+// must not enter C++: the loader's recursive-mutex unlock reads that cached tid.
 __attribute__((naked)) long ModavdSyscallWrapper(long, ...) {
   __asm__ volatile(
       "cmp $56, %rdi\n"
       "jne 1f\n"
       "test $0x100, %rsi\n"
+      "jnz 1f\n"
+      "test $0x1181000, %rsi\n"
       "jnz 1f\n"
       "test %rdx, %rdx\n"
       "jnz 1f\n"
@@ -1707,9 +1712,10 @@ namespace {
 // thread busy, none waiting on the network (60 s of capture: one packet). The game's
 // main logic thread sat in pipe_read and another one in kernel_clone, each waiting on a
 // child it had forked to run a command. Both children were single-threaded copies of
-// the game that never reached exec: blocked in futex_wait on a std::mutex in
-// libndk_translation's .bss (0x241d78, 0x242fb8 in the API-34 build), called from the
-// translator's own run loop. In the parent both mutexes were free; in each child its
+// the game that never reached exec: blocked in futex_wait on the code-pool or
+// translation-cache mutex in libndk_translation's .bss (0x241d78, 0x242fb8 in the
+// API-34 build), called from the translator's own run loop. In the parent both
+// mutexes were free; in each child its
 // copy was locked (2). The classic fork-in-a-threaded-process deadlock: the game's
 // arm64 code forks through the translator, the child goes on running translated code,
 // and the first time it needs a translator lock that another thread happened to hold
@@ -1719,7 +1725,12 @@ namespace {
 // process, hold those translator mutexes across fork(). The prepare handler takes all
 // of them (try-lock; on a miss release what it has, yield and retry, so it cannot
 // deadlock against a translator thread holding one and waiting for the other); the
-// parent and child handlers release what it took. If they cannot all be had within
+// parent and child handlers release what they took. Before accepting those locks,
+// require cache quiescence: no active translations and no dispatch slot marked
+// Translating, Invalidating or Wrapping. An inherited marker has no worker in the
+// child to finish it. InvalidateEntriesBeingTranslatedUnsafe is NOT recovery: it
+// only changes Translating to Invalidating, leaving the same infinite wait.
+// If the locks cannot all be had within
 // kForkLockWaitNs (a forking thread that holds one itself would be such a case), the
 // fork goes on unprotected, exactly as before, and the miss is logged. The offsets are
 // valid only for the build-id below; any other translator build is left alone.
@@ -1727,14 +1738,27 @@ constexpr unsigned char kNdkForkLocksBuildId[16] = {
     0x55, 0x3b, 0xa8, 0x2b, 0x76, 0xbb, 0x5a, 0x11,
     0xfd, 0x1d, 0x67, 0xb2, 0xc7, 0xe0, 0x1b, 0x75,
 };
+constexpr int kForkTranslationCacheLock = 1;
 constexpr uintptr_t kNdkForkLockOffs[] = {
     0x241d78,  // Default code pool.
-    0x242fb8,  // Wrapper code pool.
+    0x242fb8,  // TranslationCache; its mutex is the first member.
     0x242f00,  // Thread table, also taken by ResetCurrentGuestThreadAfterFork.
 };
 constexpr int kNumForkLocks = sizeof(kNdkForkLockOffs) / sizeof(kNdkForkLockOffs[0]);
 constexpr long kForkLockWaitNs = 200L * 1000 * 1000;
 pthread_mutex_t* g_fork_locks[kNumForkLocks] = {};
+using TranslationCacheInstanceFn = void* (*)();
+void* g_fork_translation_cache = nullptr;
+uintptr_t g_fork_transient_entries[3] = {};  // Actual dispatcher stubs, resolved by name.
+struct CacheScanStats {
+  size_t entries = 0;
+  size_t visited = 0;
+  long ns = 0;
+  uintptr_t first_node = 0;
+  uintptr_t previous_key = 0;
+  bool has_previous_key = false;
+};
+enum class CacheState { kQuiescent, kBusy, kUnknown };
 std::atomic<bool> g_fork_safety{false};
 // Who holds the locks for a fork in progress. Only a prepare handler that got ALL of
 // them sets these, and they are guarded by the locks themselves.
@@ -1742,6 +1766,8 @@ std::atomic<bool> g_fork_held{false};
 std::atomic<pid_t> g_fork_owner{0};
 std::atomic<int> g_fork_misses{0};
 std::atomic<int> g_fork_misses_logged{0};
+std::atomic<int> g_fork_unknown_scans{0};
+std::atomic<int> g_fork_unknown_scans_logged{0};
 
 long MonoNs() {
   timespec ts;
@@ -1749,20 +1775,91 @@ long MonoNs() {
   return ts.tv_sec * 1000000000L + ts.tv_nsec;
 }
 
+uintptr_t CacheWord(uintptr_t address) {
+  uintptr_t value;
+  memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+  return value;
+}
+
+// Read-only API-34 layout, verified against AddAndLockForTranslation and
+// InvalidateGuestRange: cache map root/count at +0x48/+0x50; node left/right at
+// +0/+8 and GuestCodeEntry at +0x28, whose first word points to the atomic slot.
+// The cache mutex must be held throughout. Bound depth and node count so a
+// structural mismatch is refused, never mistaken for an idle cache.
+CacheState ScanForkCacheNode(uintptr_t node, uintptr_t parent, unsigned depth, CacheScanStats& stats) {
+  if (node == 0) return CacheState::kQuiescent;
+  if (depth > 64 || stats.visited >= stats.entries || (node & 7) != 0)
+    return CacheState::kUnknown;
+  if (CacheWord(node + 0x10) != parent) return CacheState::kUnknown;
+  ++stats.visited;
+  const uintptr_t left_node = CacheWord(node);
+  const uintptr_t right_node = CacheWord(node + 8);
+  if (left_node != 0 && left_node == right_node) return CacheState::kUnknown;
+  const CacheState left = ScanForkCacheNode(left_node, node, depth + 1, stats);
+  if (left != CacheState::kQuiescent) return left;
+  const uintptr_t key = CacheWord(node + 0x20);
+  if (stats.has_previous_key && key <= stats.previous_key) return CacheState::kUnknown;
+  if (!stats.has_previous_key) stats.first_node = node;
+  stats.previous_key = key;
+  stats.has_previous_key = true;
+  const uintptr_t slot = CacheWord(node + 0x28);
+  if (slot == 0 || (slot & 7) != 0) return CacheState::kUnknown;
+  const uintptr_t code = __atomic_load_n(reinterpret_cast<const uintptr_t*>(slot), __ATOMIC_RELAXED);
+  if (code == 0) return CacheState::kUnknown;
+  for (uintptr_t transient : g_fork_transient_entries) {
+    if (code == transient) return CacheState::kBusy;
+  }
+  return ScanForkCacheNode(right_node, node, depth + 1, stats);
+}
+
+CacheState ScanForkCache(CacheScanStats& stats) {
+  const uintptr_t cache = reinterpret_cast<uintptr_t>(g_fork_translation_cache);
+  if (cache == 0) return CacheState::kUnknown;
+  for (uintptr_t transient : g_fork_transient_entries) {
+    if (transient == 0) return CacheState::kUnknown;
+  }
+  stats.entries = CacheWord(cache + 0x50);
+  if (CacheWord(cache + 0x38) != 0) return CacheState::kBusy;
+  const uintptr_t root = CacheWord(cache + 0x48);
+  const uintptr_t begin = CacheWord(cache + 0x40);
+  if ((stats.entries == 0) != (root == 0) || root == cache + 0x48 ||
+      (stats.entries == 0 ? begin != cache + 0x48 : begin == 0 || begin == cache + 0x48))
+    return CacheState::kUnknown;
+  const CacheState state = ScanForkCacheNode(root, cache + 0x48, 1, stats);
+  if (state != CacheState::kQuiescent) return state;
+  return stats.visited == stats.entries &&
+                 (stats.entries == 0 || stats.first_node == begin)
+             ? CacheState::kQuiescent
+             : CacheState::kUnknown;
+}
+
+bool TryForkLocks(CacheScanStats* measured = nullptr) {
+  int got = 0;
+  for (; got < kNumForkLocks; ++got) {
+    if (pthread_mutex_trylock(g_fork_locks[got]) != 0) break;
+  }
+  if (got == kNumForkLocks) {
+    CacheScanStats stats;
+    const long begin = MonoNs();
+    const CacheState state = ScanForkCache(stats);
+    stats.ns = MonoNs() - begin;
+    if (measured != nullptr) *measured = stats;
+    if (state == CacheState::kQuiescent) {
+      g_fork_held = true;
+      g_fork_owner = gettid();
+      return true;
+    }
+    if (state == CacheState::kUnknown) g_fork_unknown_scans.fetch_add(1, std::memory_order_relaxed);
+  }
+  while (got > 0) pthread_mutex_unlock(g_fork_locks[--got]);
+  return false;
+}
+
 void ForkPrepare() {
   if (!g_fork_safety.load(std::memory_order_acquire)) return;
   const long deadline = MonoNs() + kForkLockWaitNs;
   for (;;) {
-    int got = 0;
-    for (; got < kNumForkLocks; ++got) {
-      if (pthread_mutex_trylock(g_fork_locks[got]) != 0) break;
-    }
-    if (got == kNumForkLocks) {
-      g_fork_held = true;
-      g_fork_owner = gettid();
-      return;
-    }
-    while (got > 0) pthread_mutex_unlock(g_fork_locks[--got]);
+    if (TryForkLocks()) return;
     if (MonoNs() >= deadline) {
       g_fork_misses.fetch_add(1, std::memory_order_relaxed);
       return;
@@ -1781,13 +1878,20 @@ void ForkParent() {
   if (g_fork_held && g_fork_owner == gettid()) ForkRelease();
   const int misses = g_fork_misses.load(std::memory_order_relaxed);
   if (misses > g_fork_misses_logged.exchange(misses, std::memory_order_relaxed)) {
-    LOGE("fork safety: could not take the translator locks within %ld ms before a fork (%d so far); "
+    LOGE("fork safety: could not take the translator locks with a quiescent cache within the %ld ms "
+         "retry budget (%d so far); "
          "that child may hang as before", kForkLockWaitNs / 1000000, misses);
+  }
+  const int unknown = g_fork_unknown_scans.load(std::memory_order_relaxed);
+  if (unknown > g_fork_unknown_scans_logged.exchange(unknown, std::memory_order_relaxed)) {
+    LOGE("fork safety: cache layout or dispatcher stubs could not be validated (%d scans); "
+         "those attempts were refused", unknown);
   }
 }
 
 // In the child only the forking thread exists. If our prepare got the locks, they are
-// held by it on behalf of this fork: release them so translated code can take them.
+// held by it on behalf of a cache-quiescent fork. Do not mutate inherited cache
+// entries; only release the mutexes before the translator resets its thread table.
 void ForkChild() {
   if (g_fork_held) ForkRelease();
 }
@@ -1802,12 +1906,60 @@ void InstallForkSafety(uintptr_t base) {
   for (int i = 0; i < kNumForkLocks; ++i) {
     g_fork_locks[i] = reinterpret_cast<pthread_mutex_t*>(base + kNdkForkLockOffs[i]);
   }
+  // Resolve and initialise in ordinary parent context, never in the fork child.
+  TranslatorDyn dyn;
+  dl_iterate_phdr(&FindTranslatorDynCallback, &dyn);
+  const auto get_cache = reinterpret_cast<TranslationCacheInstanceFn>(LookupExport(
+      dyn, "_ZN15ndk_translation16TranslationCache11GetInstanceEv"));
+  const uintptr_t transient_entries[] = {
+      LookupExport(dyn, "ndk_translation_entry_Translating"),
+      LookupExport(dyn, "ndk_translation_entry_Invalidating"),
+      LookupExport(dyn, "ndk_translation_entry_Wrapping"),
+  };
+  if (dyn.base != base || get_cache == nullptr || transient_entries[0] == 0 ||
+      transient_entries[1] == 0 || transient_entries[2] == 0) {
+    LOGE("fork safety: cache quiescence exports missing; not installed");
+    return;
+  }
+  void* cache = get_cache();
+  if (cache != g_fork_locks[kForkTranslationCacheLock]) {
+    LOGE("fork safety: translation-cache instance differs from the verified mutex; not installed");
+    return;
+  }
+  g_fork_translation_cache = cache;
+  memcpy(g_fork_transient_entries, transient_entries, sizeof(transient_entries));
   if (pthread_atfork(&ForkPrepare, &ForkParent, &ForkChild) != 0) {
     LOGE("fork safety: pthread_atfork failed; not installed");
     return;
   }
   g_fork_safety.store(true, std::memory_order_release);
-  LOGI("fork safety: holding %d translator locks across fork()", kNumForkLocks);
+  LOGI("fork safety: holding %d translator locks across fork(); cache quiescence enabled",
+       kNumForkLocks);
+}
+
+struct RawCloneCall {
+  long nr, flags, stack, ptid, ctid, tls;
+  bool held = false;
+  long prepared = 0;
+  long result = -1;
+  int saved_errno = 0;
+  CacheScanStats cache_scan{};
+};
+
+// API 34's dl_iterate_phdr holds the loader's recursive mutex across this call.
+// Never wait for a translator mutex here: a translator thread may already hold
+// one while waiting to dlopen. A failed attempt must immediately leave the loader
+// scope so that thread can finish. The caller retries only after it is outside.
+int RawCloneUnderLoaderLock(struct dl_phdr_info*, size_t, void* opaque) {
+  auto& call = *static_cast<RawCloneCall*>(opaque);
+  if (TryForkLocks(&call.cache_scan)) {
+    call.held = true;
+    call.prepared = MonoNs();
+    call.result = modavd_original_syscall(call.nr, call.flags, call.stack, call.ptid, call.ctid,
+                                        call.tls);
+    call.saved_errno = errno;
+  }
+  return 1;  // Stop iteration and release exactly this loader-lock nesting level.
 }
 
 extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(long nr, long flags,
@@ -1816,23 +1968,38 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
   if (!g_fork_safety.load(std::memory_order_acquire)) {
     return modavd_original_syscall(nr, flags, stack, ptid, ctid, tls);
   }
-  const pid_t owner = gettid();
   const long begin = MonoNs();
-  ForkPrepare();
-  const bool held = g_fork_held.load() && g_fork_owner.load() == owner;
-  const long prepared = MonoNs();
-  const long result = modavd_original_syscall(nr, flags, stack, ptid, ctid, tls);
-  const int saved = errno;
-  if (result == 0) {
-    if (held) ForkChild();  // Before ResetCurrentGuestThreadAfterFork takes the table lock.
+  const long deadline = begin + kForkLockWaitNs;
+  RawCloneCall call{nr, flags, stack, ptid, ctid, tls};
+  for (;;) {
+    // Enter without translator locks. This public loader-lock acquisition itself
+    // can block; the 200 ms deadline bounds retries, not the whole loader API.
+    dl_iterate_phdr(&RawCloneUnderLoaderLock, &call);
+    if (call.held) break;
+    if (MonoNs() >= deadline) {
+      g_fork_misses.fetch_add(1, std::memory_order_relaxed);
+      call.prepared = MonoNs();
+      call.result = modavd_original_syscall(nr, flags, stack, ptid, ctid, tls);
+      call.saved_errno = errno;
+      break;
+    }
+    sched_yield();
+  }
+  // The loader scope is now gone in parent and child. The raw-clone subset above
+  // leaves the host cached tid unchanged, so its recursive unlock used the same
+  // owner in both. Bionic fork's atfork handlers never take this loader scope.
+  if (call.result == 0) {
+    if (call.held) ForkChild();  // Before ResetCurrentGuestThreadAfterFork takes the table lock.
   } else {
     ForkParent();
     const long released = MonoNs();
-    LOGI("raw clone guard: flags=%lx held=%d result=%ld wait_us=%ld protected_us=%ld", flags, held,
-         result, (prepared - begin) / 1000, (released - prepared) / 1000);
+    LOGI("raw clone guard: flags=%lx held=%d result=%ld wait_us=%ld protected_us=%ld "
+         "cache_entries=%zu scan_nodes=%zu scan_us=%ld", flags, call.held, call.result,
+         (call.prepared - begin) / 1000, (released - call.prepared) / 1000,
+         call.cache_scan.entries, call.cache_scan.visited, call.cache_scan.ns / 1000);
   }
-  errno = saved;
-  return result;
+  errno = call.saved_errno;
+  return call.result;
 }
 
 }  // namespace

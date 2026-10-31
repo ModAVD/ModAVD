@@ -32,17 +32,33 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 
 《如鸢》国服的启动路径会经过旧版转译层的 `CloneGuestThread`：它把空栈的 `CLONE_VM | CLONE_VFORK` 请求转成独立地址空间的 raw clone，直接经 `syscall` 调用宿主内核。这个调用不经过 Bionic `fork()`，原来的 `pthread_atfork` 回调不会运行；子进程会继承其他父线程持有的转译层互斥锁，父线程则停在 `kernel_clone` 等子进程退出。调查见 [Issue #20](https://github.com/ModAVD/ModAVD/issues/20)。
 
-伴生库现在也接管转译层自己的 `syscall` GOT 槽。只有已启用 fork 保护、不带 `CLONE_VM` 且宿主栈为空的 `SYS_clone` 才进入保护函数，复用 `ForkPrepare` / `ForkParent` / `ForkChild`。除了两个 code pool 的锁，还保护子进程重置时需要的 thread table 锁；子进程返回转译层之前就释放它们。锁偏移只对经过 build-id 核对的 API 34 转译层启用，未知版本不使用这些偏移。
+伴生库现在也接管转译层自己的 `syscall` GOT 槽。只有已启用 fork 保护、不带 `CLONE_VM`、宿主栈为空，且不带 `CLONE_SETTLS` / `CLONE_PARENT_SETTID` / `CLONE_CHILD_SETTID` / `CLONE_PIDFD` 的 `SYS_clone` 才进入保护函数。这些标志可能改变宿主 TLS，或通过 tid / pidfd 输出地址覆盖缓存的 tid，必须在汇编入口直接透传。保护的三把转译锁分别属于默认 code pool、TranslationCache 和子进程重置时需要的 thread table。锁偏移只对经过 build-id 核对的 API 34 转译层启用，未知版本不使用这些偏移。
 
-其余系统调用经 x86_64 汇编尾跳转原样转发，保留零到六个可变参数以及返回值；名单外应用撤回全部五个 GOT 槽。没有修改 Google 二进制或游戏文件，也没有改变 clone 标志和参数。父线程在 `CLONE_VFORK` 等待子进程期间仍持有这些锁；日志的 `wait_us` 是取锁耗时，`protected_us` 覆盖取锁完成至父进程释放锁的时间。取锁失败沿用原有 200 ms 上限、告警和回退。
+只解锁还不够：fork 快照中可以有其他线程尚未完成的缓存转换，子进程里没有那个 worker，便一直停在 `Translating`、`Invalidating` 或 `Wrapping` 入口。`InvalidateEntriesBeingTranslatedUnsafe` 只把 `Translating` 改成 `Invalidating` 并清空进行中集合，仍依赖原 worker 收尾，不能作为 fork 子进程恢复。
 
-原生测试直接编译实际保护实现，覆盖 syscall 参数转发、目标开关、共享 VM / 独立宿主栈透传、父子和错误返回、锁竞争，以及真实内核 fork / vfork 后的子进程解锁。编译后在测试实例运行：
+保护现在先在三锁下确认缓存静止：进行中计数必须为 0，主 map 的每个实际 dispatch slot 都不能是上述三种入口。不满足就释放本次取得的三锁、退出 loader callback，再让原 worker 前进后重试；成功才 fork。父子进程都不改写缓存。主 map 的只读布局和 stub 符号由精确 API 34 build-id `553ba82b76bb5a11fd1d67b2c7e01b75` 限定，实例地址与缓存锁地址也交叉检查；符号缺失不启用，结构无法判定则拒绝该次保护并记录。普通 Bionic `fork()` 的 prepare 使用同一个完整条件。
+
+另一轮冷启动还复现了子进程在 `ResetAllExecRegions` 的 `dlopen` 中等待继承的 linker 互斥锁。raw clone 保护因此先进入公开的 `dl_iterate_phdr`，利用它在 callback 期间持有的 linker 递归锁，再在 callback 内仅尝试一次三把转译锁及缓存检查。失败就立即释放已取得的转译锁、退出 callback，让等待 loader 的转译线程可以继续，随后在外层重试；成功才发出原 raw clone。父子进程都先退出 callback，正常释放本次新增的一层 linker 锁，再执行 `ForkParent` / `ForkChild`。这个子集保留原宿主缓存 tid，满足 linker 递归解锁的 owner 检查；不会清空或重建 linker 的内部锁。普通 Bionic `fork()` 仍用原 `pthread_atfork` 路径，不套这个 callback。
+
+其余系统调用经 x86_64 汇编尾跳转原样转发，保留零到六个可变参数以及返回值；名单外应用撤回全部五个 GOT 槽。没有修改 Google 二进制或游戏文件，也没有改变 clone 标志和参数。父线程在 `CLONE_VFORK` 等待子进程期间仍持有 linker 和三把转译锁。原 200 ms 预算限制取锁或缓存繁忙后的重试，超时仍告警并执行未保护的原调用，原挂起风险仍然存在；`dl_iterate_phdr` 等待 linker 本身是阻塞的，所以整个保护函数没有 200 ms 的硬上限。静止检查为 O(n) 主 map 扫描，日志 `cache_entries`、`scan_nodes`、`scan_us` 记录本次规模与成本；`wait_us` 包含 loader 等待和缓存检查，`protected_us` 包含 vfork 等待，不能当作补丁净额外耗时。
+
+原生测试直接编译实际保护实现，覆盖 syscall 参数与 TLS/tid 变更标志透传、目标开关、共享 VM / 独立宿主栈透传、父子和错误返回、锁竞争。三种模拟转换态都必须等 worker 完成才能 fork；持续繁忙则测试原调用透传、errno 和不改写状态。真实内核 fork / vfork 验证父子 cache 保持不变、子进程可再次 `dl_iterate_phdr` / `dlopen`、loader 递归层级及反向锁序退让。编译后在测试实例运行：
 
 ```powershell
 & '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\raw_clone_test.cc -llog -ldl -o '<输出>\raw-clone-test'
 & '<adb>' -P <私有端口> -s <测试实例> push '<输出>\raw-clone-test' /data/local/tmp/modavd-raw-clone-test
 & '<adb>' -P <私有端口> -s <测试实例> shell chmod 755 /data/local/tmp/modavd-raw-clone-test
 & '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/modavd-raw-clone-test
+```
+
+独立的 `cache_quiescence_test.cc` 还在自己的原生进程里加载真实 Google 库，仅构造缓存元数据、不执行合成 guest PC。它验证 `NotTranslated → Translating → Invalidating → NotTranslated` 的真实两阶段行为、fork 的 COW 隔离、`Wrapping`（进行中计数也为 0）及同一生产取锁入口的接受/拒绝，另记录 9,664 个 ready 节点的扫描时间。先确认 `/system/lib64/libndk_translation.so` SHA-256 为 `a2086fbc807f697f9b91222065c9d9000ca9727748699c0d9b751319258cbb3e`；测试本身也拒绝不同 build-id。完整收尾 API 只用于该独立测试，生产路径不调用它。
+
+```powershell
+& '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\cache_quiescence_test.cc -llog -ldl -o '<输出>\cache-quiescence-test'
+& '<adb>' -P <私有端口> -s <测试实例> push '<输出>\cache-quiescence-test' /data/local/tmp/cache-quiescence-test
+& '<adb>' -P <私有端口> -s <测试实例> shell chmod 755 /data/local/tmp/cache-quiescence-test
+& '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/cache-quiescence-test translate
+& '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/cache-quiescence-test wrap
 ```
 
 原生测试通过还需要真实游戏验证：如鸢冷启动到资源更新提示、名单内旧游戏的运行、名单外应用撤回 `5/5`。协议页或资源更新提示只能证明该阶段启动成功，不能代替登录、庭院、战斗和长期运行回归。
