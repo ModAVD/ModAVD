@@ -55,6 +55,7 @@
 #include <sys/system_properties.h>
 #include <sched.h>
 #include <time.h>
+#include <sys/syscall.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ModAvdGate", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ModAvdGate", __VA_ARGS__)
@@ -1244,7 +1245,8 @@ void RefreshHookedSlotTableIfModulesGrew() {
 constexpr char kDefaultGateTargets[] =
     "com.netease.onmyoji,com.netease.onmyoji.wyzymnqsd_cps,com.netease.onmyoji.bili,"
     "com.netease.onmyoji.huawei,com.netease.onmyoji.nearme.gamecenter,"
-    "com.netease.onmyoji.vivo,com.tencent.tmgp.yys.zqb";
+    "com.netease.onmyoji.vivo,com.tencent.tmgp.yys.zqb,com.lingxigames.yuan.cn";
+static_assert(sizeof(kDefaultGateTargets) <= 256, "Default targets must fit the gate buffers");
 
 constexpr int kGateUnknown = 0;
 constexpr int kGateTarget = 1;
@@ -1591,6 +1593,27 @@ void* NdkDlopenWrapper(const char* filename, int flags) {
 // relocations are already applied and its link_map entry already exists, but none
 // of its constructors have run). In zygote this patch is inherited by every forked
 // app process through COW; the wrappers themselves are target-gated.
+using RawSyscallFn = long (*)(long, ...);
+static_assert(SYS_clone == 56 && CLONE_VM == 0x100, "The syscall trampoline requires Linux x86_64");
+extern "C" {
+RawSyscallFn modavd_original_syscall = nullptr;
+__attribute__((used, visibility("hidden"))) long ModavdGuardClone(long nr, long flags, long stack,
+                                                                  long ptid, long ctid, long tls);
+// Keep all registers and the optional sixth stack argument intact on every
+// non-clone syscall. Only the known five-argument clone ABI enters C++.
+__attribute__((naked)) long ModavdSyscallWrapper(long, ...) {
+  __asm__ volatile(
+      "cmp $56, %rdi\n"
+      "jne 1f\n"
+      "test $0x100, %rsi\n"
+      "jnz 1f\n"
+      "test %rdx, %rdx\n"
+      "jnz 1f\n"
+      "jmp ModavdGuardClone\n"
+      "1: jmp *modavd_original_syscall(%rip)\n");
+}
+}
+
 bool InstallTranslatorHooks() {
   if (g_ndk_hooks_installed.load(std::memory_order_acquire)) return true;
   const char* kNdk = "libndk_translation.so";  // does not match ..._proxy_*.so
@@ -1620,7 +1643,17 @@ bool InstallTranslatorHooks() {
     if (real != nullptr) g_real_ndk_dlopen = reinterpret_cast<DlopenFn>(real);
     ++n;
   }
-  LOGI("translator GOT triggers installed: %d/4", n);
+  GotSearch syscall_slot;
+  syscall_slot.module_needle = kNdk;
+  syscall_slot.symbol = "syscall";
+  if (dl_iterate_phdr(&FindGotSlotCallback, &syscall_slot) && syscall_slot.slot &&
+      *syscall_slot.slot) {
+    modavd_original_syscall = reinterpret_cast<RawSyscallFn>(*syscall_slot.slot);
+    if (PatchOneGotSlot(kNdk, "syscall", reinterpret_cast<void*>(&ModavdSyscallWrapper), nullptr,
+                        "libndk!syscall"))
+      ++n;
+  }
+  LOGI("translator GOT triggers installed: %d/5", n);
   if (n > 0) g_ndk_hooks_installed.store(true, std::memory_order_release);
   return n > 0;
 }
@@ -1638,7 +1671,7 @@ int RestoreTranslatorSlot(const char* symbol, void* real) {
 // asks the bridge for its signal handlers. The process is still named "zygote64"
 // there, so the shim hands over the package name it reads from the app's
 // code-cache directory. Returns 1 when the package is on the gate list (nothing
-// changes), 0 when it is not: then the four translator GOT slots get their original
+// changes), 0 when it is not: then all five translator GOT slots get their original
 // targets back and the gate is off for good in this process. Together with the shim
 // handing ART the translator's own callbacks, a non-target app then runs the stock
 // translator with nothing of ours left on its path.
@@ -1655,8 +1688,10 @@ extern "C" __attribute__((visibility("default"))) int modavd_gate_detach_unless_
     n += RestoreTranslatorSlot("mprotect", reinterpret_cast<void*>(g_real_ndk_mprotect));
     n += RestoreTranslatorSlot("android_dlopen_ext", reinterpret_cast<void*>(g_real_ndk_android_dlopen_ext));
     n += RestoreTranslatorSlot("dlopen", reinterpret_cast<void*>(g_real_ndk_dlopen));
+    n += RestoreTranslatorSlot("syscall", reinterpret_cast<void*>(modavd_original_syscall));
   }
-  LOGI("detach: pid=%d pkg=%s not on the gate list; translator GOT restored %d/4", getpid(), pkg, n);
+  LOGI("detach: pid=%d pkg=%s not on the gate list; translator GOT restored %d/5", getpid(), pkg,
+       n);
   return 0;
 }
 
@@ -1692,15 +1727,19 @@ constexpr unsigned char kNdkForkLocksBuildId[16] = {
     0x55, 0x3b, 0xa8, 0x2b, 0x76, 0xbb, 0x5a, 0x11,
     0xfd, 0x1d, 0x67, 0xb2, 0xc7, 0xe0, 0x1b, 0x75,
 };
-constexpr uintptr_t kNdkForkLockOffs[] = {0x241d78, 0x242fb8};
+constexpr uintptr_t kNdkForkLockOffs[] = {
+    0x241d78,  // Default code pool.
+    0x242fb8,  // Wrapper code pool.
+    0x242f00,  // Thread table, also taken by ResetCurrentGuestThreadAfterFork.
+};
 constexpr int kNumForkLocks = sizeof(kNdkForkLockOffs) / sizeof(kNdkForkLockOffs[0]);
 constexpr long kForkLockWaitNs = 200L * 1000 * 1000;
 pthread_mutex_t* g_fork_locks[kNumForkLocks] = {};
 std::atomic<bool> g_fork_safety{false};
 // Who holds the locks for a fork in progress. Only a prepare handler that got ALL of
 // them sets these, and they are guarded by the locks themselves.
-bool g_fork_held = false;
-pid_t g_fork_owner = 0;
+std::atomic<bool> g_fork_held{false};
+std::atomic<pid_t> g_fork_owner{0};
 std::atomic<int> g_fork_misses{0};
 std::atomic<int> g_fork_misses_logged{0};
 
@@ -1769,6 +1808,31 @@ void InstallForkSafety(uintptr_t base) {
   }
   g_fork_safety.store(true, std::memory_order_release);
   LOGI("fork safety: holding %d translator locks across fork()", kNumForkLocks);
+}
+
+extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(long nr, long flags,
+                                                                             long stack, long ptid,
+                                                                             long ctid, long tls) {
+  if (!g_fork_safety.load(std::memory_order_acquire)) {
+    return modavd_original_syscall(nr, flags, stack, ptid, ctid, tls);
+  }
+  const pid_t owner = gettid();
+  const long begin = MonoNs();
+  ForkPrepare();
+  const bool held = g_fork_held.load() && g_fork_owner.load() == owner;
+  const long prepared = MonoNs();
+  const long result = modavd_original_syscall(nr, flags, stack, ptid, ctid, tls);
+  const int saved = errno;
+  if (result == 0) {
+    if (held) ForkChild();  // Before ResetCurrentGuestThreadAfterFork takes the table lock.
+  } else {
+    ForkParent();
+    const long released = MonoNs();
+    LOGI("raw clone guard: flags=%lx held=%d result=%ld wait_us=%ld protected_us=%ld", flags, held,
+         result, (prepared - begin) / 1000, (released - prepared) / 1000);
+  }
+  errno = saved;
+  return result;
 }
 
 }  // namespace

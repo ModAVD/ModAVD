@@ -1,6 +1,6 @@
 # arm64 执行桥
 
-让只有 arm64 版本、带加固的游戏（《阴阳师》各渠道包）能在 ModAVD 的 x86_64 系统镜像上跑起来。0.36.0 起随 Release 主包提供，装在 `sdk\emulator\resources\modavd\`；用 ModAVD 管理器或命令行开机时自动装进实例。
+让只有 arm64 版本、带加固的游戏（《阴阳师》各渠道包、《如鸢》国服）能在 ModAVD 的 x86_64 系统镜像上跑起来。执行桥从 0.36.0 起随 Release 主包提供，装在 `sdk\emulator\resources\modavd\`；用 ModAVD 管理器或命令行开机时自动装进实例。《如鸢》的 raw clone 保护是本次新增，0.36.0 的原版伴生库不含这项修复。
 
 **不修改、不打补丁、不绕过游戏或它的加固库，也不干预任何完整性或防篡改校验。** 这是转译层的兼容性工程：让游戏自己装的钩子正确执行并返回。Intel Houdini 本来就是这么做的，同一个游戏在 Houdini 上就能跑。Google 的转译层二进制我们一个字节都不改。
 
@@ -24,9 +24,28 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 
 ## 只对名单里的应用生效
 
-- 名单是逗号分隔的包名，编进伴生库（`companion/jni/native_to_guest_companion.cc` 的 `kDefaultGateTargets`），现在是《阴阳师》的 7 个渠道包。
+- 名单是逗号分隔的包名，编进伴生库（`companion/jni/native_to_guest_companion.cc` 的 `kDefaultGateTargets`），包含《阴阳师》的 7 个渠道包和《如鸢》国服 `com.lingxigames.yuan.cn`。
 - 属性 `modavd.gate.target` 设了就整体替换名单；`setprop modavd.gate.target none` 等于关掉。
 - 名单外的应用在进程派生后把转发回调和伴生库改过的槽位都撤回原样，行为和没装桥时一样。
+
+## API 34 的 raw clone 保护
+
+《如鸢》国服的启动路径会经过旧版转译层的 `CloneGuestThread`：它把空栈的 `CLONE_VM | CLONE_VFORK` 请求转成独立地址空间的 raw clone，直接经 `syscall` 调用宿主内核。这个调用不经过 Bionic `fork()`，原来的 `pthread_atfork` 回调不会运行；子进程会继承其他父线程持有的转译层互斥锁，父线程则停在 `kernel_clone` 等子进程退出。调查见 [Issue #20](https://github.com/ModAVD/ModAVD/issues/20)。
+
+伴生库现在也接管转译层自己的 `syscall` GOT 槽。只有已启用 fork 保护、不带 `CLONE_VM` 且宿主栈为空的 `SYS_clone` 才进入保护函数，复用 `ForkPrepare` / `ForkParent` / `ForkChild`。除了两个 code pool 的锁，还保护子进程重置时需要的 thread table 锁；子进程返回转译层之前就释放它们。锁偏移只对经过 build-id 核对的 API 34 转译层启用，未知版本不使用这些偏移。
+
+其余系统调用经 x86_64 汇编尾跳转原样转发，保留零到六个可变参数以及返回值；名单外应用撤回全部五个 GOT 槽。没有修改 Google 二进制或游戏文件，也没有改变 clone 标志和参数。父线程在 `CLONE_VFORK` 等待子进程期间仍持有这些锁；日志的 `wait_us` 是取锁耗时，`protected_us` 覆盖取锁完成至父进程释放锁的时间。取锁失败沿用原有 200 ms 上限、告警和回退。
+
+原生测试直接编译实际保护实现，覆盖 syscall 参数转发、目标开关、共享 VM / 独立宿主栈透传、父子和错误返回、锁竞争，以及真实内核 fork / vfork 后的子进程解锁。编译后在测试实例运行：
+
+```powershell
+& '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\raw_clone_test.cc -llog -ldl -o '<输出>\raw-clone-test'
+& '<adb>' -P <私有端口> -s <测试实例> push '<输出>\raw-clone-test' /data/local/tmp/modavd-raw-clone-test
+& '<adb>' -P <私有端口> -s <测试实例> shell chmod 755 /data/local/tmp/modavd-raw-clone-test
+& '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/modavd-raw-clone-test
+```
+
+原生测试通过还需要真实游戏验证：如鸢冷启动到资源更新提示、名单内旧游戏的运行、名单外应用撤回 `5/5`。协议页或资源更新提示只能证明该阶段启动成功，不能代替登录、庭院、战斗和长期运行回归。
 
 ## 信号顺序
 
