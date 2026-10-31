@@ -1,23 +1,21 @@
-From c4ef3bdde2cac16e47bc0aacc700dac5821b69e3 Mon Sep 17 00:00:00 2001
+From ce3e3e4a615f747a47277cdd1fd6577f0d927c97 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 22:00:02 +0800
-Subject: [PATCH] userdata: preserve the original image when qcow2 conversion
- fails
+Date: Sat, 31 Oct 2026 08:16:14 +0800
+Subject: [PATCH] userdata: preserve ext4 and continue boot after conversion
+ failure
 
-Check both converter exit codes and output, replace by a checked same-directory rename, and propagate failure to both callers. Native Windows fault-injection coverage verifies original preservation and recovery material on replacement failure.
+Check both converter results and replace completed output atomically. Preserve the original ext4 on failure, and warn at both call sites while continuing boot. Based on the qemu/mas36 release sources.
 ---
- android-qemu2-glue/main.cpp      |  99 +++++++++++++-----------
- tests/modavd/qcow2-conversion.py | 128 +++++++++++++++++++++++++++++++
- 2 files changed, 184 insertions(+), 43 deletions(-)
- create mode 100644 tests/modavd/qcow2-conversion.py
+ android-qemu2-glue/main.cpp | 101 +++++++++++++++++++++---------------
+ 1 file changed, 58 insertions(+), 43 deletions(-)
 
 diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
-index f17afa7..914f471 100644
+index 4157f34..646d0a0 100644
 --- a/android-qemu2-glue/main.cpp
 +++ b/android-qemu2-glue/main.cpp
-@@ -551,59 +551,68 @@ static bool volumeSupportsSparseFiles(const std::string& dir) {
+@@ -596,59 +596,68 @@ static bool growUserDataOverlay(const std::string& overlay, uint64_t newSize) {
+     return true;
  }
- #endif
  
 -static void convertExt4ToQcow2(std::string ext4filepath) {
 -    if (!path_exists(ext4filepath.c_str())) {
@@ -125,159 +123,27 @@ index f17afa7..914f471 100644
  }
  
  static int createUserData(AvdInfo* avd,
-@@ -648,7 +657,9 @@ static int createUserData(AvdInfo* avd,
+@@ -693,7 +702,10 @@ static int createUserData(AvdInfo* avd,
              auto qemu_img = System::get()->findBundledExecutable("qemu-img");
              std::string dataimageext4 =
                      std::string(hw->disk_dataPartition_path);
 -            convertExt4ToQcow2(dataimageext4);
 +            if (!convertExt4ToQcow2(dataimageext4)) {
-+                return 1;
++                dwarning("Continuing with the original ext4 image: %s",
++                         dataimageext4.c_str());
 +            }
          };
      }
  
-@@ -2560,7 +2571,9 @@ extern "C" int main(int argc, char** argv) {
+@@ -2605,7 +2617,10 @@ extern "C" int main(int argc, char** argv) {
                  auto qemu_img =
                          System::get()->findBundledExecutable("qemu-img");
                  std::string dataimageext4 = std::string(hw->hw_sdCard_path);
 -                convertExt4ToQcow2(dataimageext4);
 +                if (!convertExt4ToQcow2(dataimageext4)) {
-+                    return 1;
++                    dwarning("Continuing with the original ext4 image: %s",
++                             dataimageext4.c_str());
 +                }
              }
  
              // firstboot.ini could be wiped out, create again
-diff --git a/tests/modavd/qcow2-conversion.py b/tests/modavd/qcow2-conversion.py
-new file mode 100644
-index 0000000..5cd09bc
---- /dev/null
-+++ b/tests/modavd/qcow2-conversion.py
-@@ -0,0 +1,128 @@
-+# Copyright 2026 Ji Mao Cai
-+# SPDX-License-Identifier: Apache-2.0
-+
-+"""Run the real conversion control flow with injected converters and native file operations.
-+
-+Run from a Visual Studio Developer PowerShell. Fixtures are not mountable ext4
-+or qcow2 images: this tests failure handling and atomic replacement, not qemu-img.
-+"""
-+from pathlib import Path
-+import subprocess
-+import tempfile
-+
-+source = (Path(__file__).resolve().parents[2] / "android-qemu2-glue/main.cpp").read_text(encoding="utf-8")
-+start = source.index("static bool convertExt4ToQcow2(")
-+function = source[start:source.index("\nstatic int createUserData(", start)]
-+code = r'''
-+#define WIN32_LEAN_AND_MEAN
-+#include <windows.h>
-+#include <cassert>
-+#include <chrono>
-+#include <cstdio>
-+#include <cstring>
-+#include <filesystem>
-+#include <fstream>
-+#include <iterator>
-+#include <optional>
-+#include <string>
-+#include <vector>
-+#define derror(...) ((void)0)
-+#define dwarning(...) ((void)0)
-+#define dprint(...) ((void)0)
-+struct Win32UnicodeString {
-+    std::wstring text;
-+    explicit Win32UnicodeString(const std::string& s) {
-+        int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0);
-+        assert(n); text.resize(n);
-+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), text.data(), n));
-+    }
-+    const wchar_t* c_str() const { return text.c_str(); }
-+};
-+static std::string read(const std::string& path) {
-+    std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
-+    return {std::istreambuf_iterator<char>(f), {}};
-+}
-+static void write(const std::string& path, const std::string& data) {
-+    std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
-+    f.write(data.data(), data.size()); assert(f.good());
-+}
-+static bool path_exists(const char* path) { return std::filesystem::exists(std::filesystem::u8path(path)); }
-+static int path_delete_file(const char* path) { return DeleteFileW(Win32UnicodeString(path).c_str()) ? 0 : -1; }
-+enum Result { Success, FailureWithHeader, FailureWithoutOutput, LaunchFailure, BadFormat };
-+static std::vector<Result> results;
-+static int calls;
-+static bool lockOriginal, lockTemporary;
-+static HANDLE locked = INVALID_HANDLE_VALUE;
-+struct System {
-+    using ProcessExitCode = int;
-+    static constexpr int kInfinite = -1;
-+    static System* get() { static System s; return &s; }
-+    std::string findBundledExecutable(const char*) { return "test-converter"; }
-+    bool pathIsExt4(const std::string& path) {
-+        auto data = read(path); return data.size() > 1081 && data[1080] == '\x53' && data[1081] == '\xef';
-+    }
-+    bool pathIsQcow2(const std::string& path) { return read(path).substr(0, 4) == std::string("QFI\xfb", 4); }
-+    std::optional<std::string> runCommandWithResult(const std::vector<std::string>& args, int, int* exit) {
-+        assert(calls < (int)results.size());
-+        Result result = results[calls++];
-+        if (calls == 1) assert(args[2] == "-T" && args[3] == "none");
-+        else assert(args[2] == "-O");
-+        *exit = result == Success || result == BadFormat ? 0 : 1;
-+        if (result == Success) write(args.back(), std::string("QFI\xfb", 4) + std::string(8192, 'q'));
-+        if (result == FailureWithHeader) write(args.back(), std::string("QFI\xfb", 4));
-+        if (result == BadFormat) write(args.back(), "invalid");
-+        if (lockOriginal || lockTemporary) {
-+            auto path = lockOriginal ? args[args.size() - 2] : args.back();
-+            locked = CreateFileW(Win32UnicodeString(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
-+                                 nullptr, OPEN_EXISTING, 0, nullptr);
-+            assert(locked != INVALID_HANDLE_VALUE);
-+        }
-+        if (result == LaunchFailure) return std::nullopt;
-+        return std::string("injected converter");
-+    }
-+};
-+@FUNCTION@
-+static int checks;
-+static void run(const std::string& path, std::vector<Result> plan, bool success,
-+                bool replacementFailure = false, bool cleanupFailure = false) {
-+    std::string original(8192, 'x'); original[1080] = '\x53'; original[1081] = '\xef';
-+    write(path, original);
-+    results = plan; calls = 0; lockOriginal = replacementFailure; lockTemporary = cleanupFailure;
-+    assert(convertExt4ToQcow2(path) == success);
-+    if (locked != INVALID_HANDLE_VALUE) { CloseHandle(locked); locked = INVALID_HANDLE_VALUE; }
-+    assert(calls == (int)plan.size());
-+    if (success) {
-+        assert(System::get()->pathIsQcow2(path));
-+        assert(!path_exists((path + ".tmp.qcow2").c_str()));
-+    } else {
-+        assert(read(path) == original);
-+        if (replacementFailure) assert(System::get()->pathIsQcow2(path + ".tmp.qcow2"));
-+    }
-+    std::filesystem::remove(std::filesystem::u8path(path));
-+    std::filesystem::remove(std::filesystem::u8path(path + ".tmp.qcow2"));
-+    ++checks;
-+}
-+int main(int argc, char** argv) {
-+    assert(argc == 2); std::string path = argv[1];
-+    run(path, {Success}, true);
-+    run(path, {FailureWithHeader, Success}, true);
-+    run(path, {FailureWithHeader, FailureWithHeader}, false);
-+    run(path, {LaunchFailure, LaunchFailure}, false);
-+    run(path, {FailureWithoutOutput, FailureWithoutOutput}, false);
-+    run(path, {BadFormat, BadFormat}, false);
-+    run(path, {Success}, false, true);
-+    run(path, {FailureWithHeader}, false, false, true);
-+    assert(convertExt4ToQcow2(path));
-+    write(path, std::string("QFI\xfb", 4)); calls = 0;
-+    assert(convertExt4ToQcow2(path) && calls == 0);
-+    std::filesystem::remove(std::filesystem::u8path(path));
-+    printf("conversion: %d failure/success scenarios plus two no-ops passed\n", checks);
-+}
-+'''.replace("@FUNCTION@", function)
-+with tempfile.TemporaryDirectory(prefix="modavd-conversion-") as tmp:
-+    cpp = Path(tmp) / "probe.cpp"
-+    cpp.write_text(code)
-+    exe = Path(tmp) / "probe.exe"
-+    subprocess.run(["cl", "/nologo", "/std:c++17", "/EHsc", str(cpp),
-+                    "/Fe:" + str(exe), "/Fo:" + str(Path(tmp) / "probe.obj")], cwd=tmp, check=True)
-+    subprocess.run([str(exe), str(Path(tmp) / "disk.img")], check=True)
