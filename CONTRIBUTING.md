@@ -21,7 +21,7 @@
 - 文档：使用说明和开发说明都在文档站的仓库 [modavd.github.io](https://github.com/ModAVD/modavd.github.io)，每页底部有「在 GitHub 上改这一页」。本仓库的 README 写错了直接提 PR。
 - 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
-- 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。不要求你会编译或跑回归。
+- 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。
 - `patches/`、`manifests/`、`release/` 是发版工具导出的，`scripts/` 和维护者本地的发版工具逐字节一致：PR 不直接改这些，有问题先开 issue。
 - 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)：代码问题和 PR 提到那边。
 - 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。

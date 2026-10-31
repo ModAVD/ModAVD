@@ -1,5 +1,7 @@
 """Public repository checks: patch replay, release metadata, byte preservation."""
 import argparse
+import email
+import email.policy
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +26,48 @@ NOREPLY_AUTHOR = re.compile(r"[^<>\r\n]+ <(?:[0-9]+\+)?[A-Za-z0-9][A-Za-z0-9-]{0
 
 def author_allowed(author):
     return author == MAINTAINER or bool(NOREPLY_AUTHOR.fullmatch(author))
+
+
+def am_keeps_name(author):
+    """git am (mailinfo) replaces a name outside 3-60 bytes, or one with an @, by the address."""
+    name = author.rsplit(" <", 1)[0]
+    return 3 <= len(name.encode()) <= 60 and "@" not in name
+
+
+def patch_mail(data):
+    """The mail header of a git format-patch file; encoded or folded headers come back decoded."""
+    return email.message_from_bytes(data.split(b"\n\n", 1)[0], policy=email.policy.default)
+
+
+def patch_author(data):
+    """`Name <address>` from the From: header of a git format-patch file."""
+    sender = patch_mail(data)["From"]
+    addresses = sender.addresses if sender else ()
+    if len(addresses) != 1:
+        raise ValueError("needs exactly one From: address")
+    return f"{addresses[0].display_name} <{addresses[0].addr_spec}>"
+
+
+def check_incoming(root):
+    """incoming/<topic>/*.patch are merged contributions waiting for the next release, which imports them with
+    git am (authorship kept) and removes them. Tests may sit in incoming/<topic>/tests/, never in the patch."""
+    incoming = root / "incoming"
+    count = 0
+    for path in sorted(incoming.rglob("*")) if incoming.is_dir() else []:
+        rel = path.relative_to(incoming).as_posix()
+        if path.is_dir() or rel == "README.md" or re.fullmatch(r"[a-z0-9][a-z0-9._-]*/tests/.+", rel):
+            continue
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[^/]+\.patch", rel):
+            raise ValueError(f"incoming/{rel}: only incoming/<topic>/*.patch and incoming/<topic>/tests/ belong here")
+        data = path.read_bytes()
+        message = re.split(rb"(?m)^---\r?$", data, maxsplit=1)[0]
+        if not data.startswith(b"From ") or b"\ndiff --git " not in data or re.search(rb"(?im)^co-authored-by:", message):
+            raise ValueError(f"incoming/{rel}: needs git format-patch output without Co-authored-by")
+        author = patch_author(data)
+        if not author_allowed(author) or not am_keeps_name(author):
+            raise ValueError(f"incoming/{rel}: author must be a GitHub noreply address with a 3-60 byte name without @")
+        count += 1
+    return count
 
 
 def version_key(value):
@@ -189,6 +233,8 @@ def metadata(root):
         hashes = dict((line.split("  ")[1], line.split("  ")[0]) for line in lines)
         if hashes != {name: a["sha256"] for name, a in assets.items()}:
             raise ValueError("Size manifest hashes differ from checksum files")
+    if count := check_incoming(root):
+        print(f"Incoming patches OK: {count}")
 
 
 def replay(root, work):
