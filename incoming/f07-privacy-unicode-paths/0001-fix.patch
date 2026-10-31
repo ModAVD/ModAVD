@@ -1,192 +1,100 @@
-From 01db652d2c81589df37760044014ece09fbdb3ab Mon Sep 17 00:00:00 2001
+From df833a7fcca78a5b868c39d68ef2ce6dd4288a9a Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
-Date: Fri, 30 Oct 2026 22:13:46 +0800
-Subject: [PATCH] privacy: scan Unicode user paths without losing decoding
- failures
+Date: Sat, 31 Oct 2026 08:16:15 +0800
+Subject: [PATCH] privacy: preserve ASCII candidates while scanning Unicode
+ user paths
 
-Scan UTF-8 and both UTF-16 byte orders, preserving surrogate pairs and ASCII allowlist hashes. Malformed matching candidates carry an encoding diagnostic and cannot be allowlisted. Covers Unicode names, BOMs, binary embedding and exact digest/path exceptions.
+Keep legacy ASCII extraction and allowlist digests. Walk complete printable UTF-8 characters and valid UTF-16LE code units, including paired surrogates, to add Unicode rule matches. Invalid sequences stop extraction without decoding errors. Keep the original byte orders to avoid shifted LE/BE duplicates.
 ---
- scripts/privacy.py       | 45 +++++++++++++++++-------
- tests/privacy-unicode.py | 76 ++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 108 insertions(+), 13 deletions(-)
- create mode 100644 tests/privacy-unicode.py
+ scripts/privacy.py | 68 +++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 67 insertions(+), 1 deletion(-)
 
 diff --git a/scripts/privacy.py b/scripts/privacy.py
-index d6441ad..6b9bd5f 100644
+index d6441ad..6b78c45 100644
 --- a/scripts/privacy.py
 +++ b/scripts/privacy.py
-@@ -37,39 +37,55 @@ def load_rule_specs(private_file=PRIVATE_RULES_FILE):
- RULE_SPECS, PRIVATE_RULES_LOADED = load_rule_specs()
- RULES = {name: re.compile(pattern, re.I) for name, (pattern, _) in RULE_SPECS.items()}
- ANY_RULE = re.compile("|".join(rx.pattern for rx in RULES.values()), re.I)
--ASCII_CANDIDATE = re.compile(ANY_RULE.pattern.encode("ascii"), re.I)
-+UTF8_CANDIDATE = re.compile(ANY_RULE.pattern.encode("utf-8"), re.I)
+@@ -41,9 +41,62 @@ ASCII_CANDIDATE = re.compile(ANY_RULE.pattern.encode("ascii"), re.I)
  # UTF-16 prefix prefilter; full matching still uses RULES on decoded printable strings.
  PREFIXES = [prefix for _, prefixes in RULE_SPECS.values() for prefix in prefixes]
  U16_CANDIDATE = re.compile(b"|".join(re.escape(s.encode("utf-16le")) for s in PREFIXES), re.I)
--NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["ascii", "utf-16le"]]
-+U16BE_CANDIDATE = re.compile(b"|".join(re.escape(s.encode("utf-16be")) for s in PREFIXES), re.I)
-+NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["utf-8", "utf-16le", "utf-16be"]]
++UTF8_PREFIX = re.compile(b"|".join(re.escape(s.encode("ascii")) for s in PREFIXES), re.I)
+ NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["ascii", "utf-16le"]]
  
  
++def printable_end(data, pos, encoding):
++    """Return the next complete printable character boundary, or None."""
++    if encoding == "utf-8":
++        first = data[pos]
++        width = (1 if first < 0x80 else 2 if 0xc2 <= first <= 0xdf else
++                 3 if 0xe0 <= first <= 0xef else 4 if 0xf0 <= first <= 0xf4 else 0)
++    else:
++        if pos + 2 > len(data):
++            return None
++        unit = int.from_bytes(data[pos:pos+2], "little")
++        width = 4 if 0xd800 <= unit <= 0xdbff else 2
++    if not width or pos + width > len(data):
++        return None
++    try:
++        char = data[pos:pos+width].decode(encoding)
++    except UnicodeDecodeError:
++        return None
++    return pos + width if char.isprintable() else None
++
++
++def unicode_strings(data):
++    # Preserve the legacy ASCII candidates and their allowlist hashes below.
++    # Add only candidates whose rule match itself contains non-ASCII text;
++    # adjacent binary bytes must not lengthen an existing ASCII candidate.
++    # Keep the existing UTF-16LE byte order: an overlapping BE pass also sees
++    # ASCII LE strings shifted by one byte and cannot determine their origin.
++    for rx, encoding, step in [(UTF8_PREFIX, "utf-8", 1),
++                                (U16_CANDIDATE, "utf-16le", 2)]:
++        previous_end = -1
++        for match in rx.finditer(data):
++            lo, hi = match.span()
++            if lo < previous_end:
++                continue
++            while lo >= step:
++                starts = [lo-step] if step == 2 else range(max(0, lo-4), lo)
++                start = next((p for p in starts if printable_end(data, p, encoding) == lo), None)
++                if start is None and step == 2 and lo >= 4:
++                    start = lo-4 if printable_end(data, lo-4, encoding) == lo else None
++                if start is None:
++                    break
++                lo = start
++            while hi < len(data):
++                end = printable_end(data, hi, encoding)
++                if end is None:
++                    break
++                hi = end
++            previous_end = hi
++            text = data[lo:hi].decode(encoding)
++            if any(any(ord(c) > 127 for c in match.group()) for match in ANY_RULE.finditer(text)):
++                yield text
++
++
  def strings(data):
      # Find candidate strings directly, without allocating every string in large executables.
--    for rx, encoding, width in [(ASCII_CANDIDATE, "ascii", 1), (U16_CANDIDATE, "utf-16le", 2)]:
-+    for rx, encoding, width in [(UTF8_CANDIDATE, "utf-8", 1),
-+                                 (U16_CANDIDATE, "utf-16le", 2),
-+                                 (U16BE_CANDIDATE, "utf-16be", 2)]:
-         seen = set()
-         for match in rx.finditer(data):
-             lo, hi = match.span()
-             if width == 1:
--                while lo > 0 and 32 <= data[lo-1] <= 126:
-+                while lo > 0 and data[lo-1] >= 32 and data[lo-1] != 127:
-                     lo -= 1
--                while hi < len(data) and 32 <= data[hi] <= 126:
-+                while hi < len(data) and data[hi] >= 32 and data[hi] != 127:
-                     hi += 1
-             else:
--                while lo >= 2 and data[lo-1] == 0 and 32 <= data[lo-2] <= 126:
-+                # Walk code units, preserving non-ASCII characters and surrogate pairs.
-+                order = "little" if encoding == "utf-16le" else "big"
-+                def printable_unit(pos):
-+                    unit = int.from_bytes(data[pos:pos+2], order)
-+                    return unit >= 32 and not 127 <= unit <= 159 and unit != 0xfeff
-+                while lo >= 2 and printable_unit(lo-2):
-                     lo -= 2
--                while hi+1 < len(data) and data[hi+1] == 0 and 32 <= data[hi] <= 126:
-+                while hi+1 < len(data) and printable_unit(hi):
+     for rx, encoding, width in [(ASCII_CANDIDATE, "ascii", 1), (U16_CANDIDATE, "utf-16le", 2)]:
+@@ -62,7 +115,20 @@ def strings(data):
                      hi += 2
              if (lo, hi) not in seen:
                  seen.add((lo, hi))
 -                yield data[lo:hi].decode(encoding)
-+                error = None
 +                try:
-+                    text = data[lo:hi].decode(encoding)
-+                except UnicodeDecodeError as exc:
-+                    # Keep a visible marker and fail closed if this candidate matches.
-+                    # Such strings must never match a reviewed allowlist entry.
-+                    text = data[lo:hi].decode(encoding, errors="replace")
-+                    error = f"invalid {encoding} at candidate byte {exc.start}"
-+                yield text.strip("\ufeff"), error
++                    yield data[lo:hi].decode(encoding)
++                except UnicodeDecodeError:
++                    # A bytes-regex negated class can include non-ASCII bytes.
++                    # The strict character walk handles valid Unicode below.
++                    end = lo
++                    while end < len(data):
++                        next_end = printable_end(data, end, encoding)
++                        if next_end is None:
++                            break
++                        end = next_end
++                    if end > lo:
++                        yield data[lo:end].decode(encoding)
++    yield from unicode_strings(data)
      try:
          text = data.decode("utf-8-sig")
      except UnicodeDecodeError:
-         return
-     for line in text.splitlines():
-         if any(ord(c) > 127 for c in line):
--            yield line
-+            yield line, None
- 
- 
- def scan_files(files, allowlist):
-@@ -87,20 +103,23 @@ def scan_files(files, allowlist):
-         if logical_path.startswith("ModAVD-") and "/" in logical_path:
-             logical_path = logical_path.split("/", 1)[1]
-         seen = set()
--        for string in strings(data):
-+        for string, encoding_error in strings(data):
-             if not ANY_RULE.search(string):
-                 continue
-             for rule, rx in RULES.items():
-                 if not rx.search(string):
-                     continue
-                 digest = hashlib.sha256(string.encode("utf-8")).hexdigest()
--                if (rule, digest) in seen:
-+                if (rule, digest, bool(encoding_error)) in seen:
-                     continue
--                seen.add((rule, digest))
-+                seen.add((rule, digest, bool(encoding_error)))
-                 if file_sha is None:
-                     file_sha = hashlib.sha256(data).hexdigest()
-                 entry = {"file": name, "path": logical_path, "rule": rule, "file_sha256": file_sha, "string_sha256": digest}
--                if (file_sha, rule, digest) in allowed_keys or (logical_path, rule, digest) in allowed_paths:
-+                if encoding_error:
-+                    entry["encoding_error"] = encoding_error
-+                if not encoding_error and ((file_sha, rule, digest) in allowed_keys or
-+                                           (logical_path, rule, digest) in allowed_paths):
-                     report["allowed"].append(entry)
-                 else:
-                     matches = list(rx.finditer(string))
-diff --git a/tests/privacy-unicode.py b/tests/privacy-unicode.py
-new file mode 100644
-index 0000000..dcc48cf
---- /dev/null
-+++ b/tests/privacy-unicode.py
-@@ -0,0 +1,76 @@
-+# Copyright 2026 Ji Mao Cai
-+# SPDX-License-Identifier: Apache-2.0
-+
-+"""Unicode and allowlist regression tests against the actual release scanner."""
-+import hashlib
-+import importlib.util
-+import json
-+from pathlib import Path
-+import tempfile
-+import unittest
-+
-+spec = importlib.util.spec_from_file_location('privacy', Path(__file__).resolve().parents[1] / 'scripts/privacy.py')
-+privacy = importlib.util.module_from_spec(spec)
-+spec.loader.exec_module(privacy)
-+
-+class PrivacyTests(unittest.TestCase):
-+    def setUp(self):
-+        self.tmp = tempfile.TemporaryDirectory()
-+        self.addCleanup(self.tmp.cleanup)
-+        self.root = Path(self.tmp.name)
-+        self.allow = self.root / 'allow.json'
-+        self.allow.write_text('{"exceptions": []}', encoding='utf-8')
-+
-+    def scan(self, data, exceptions=()):
-+        file = self.root / 'fixture.bin'
-+        file.write_bytes(data)
-+        self.allow.write_text(json.dumps({'exceptions': list(exceptions)}), encoding='utf-8')
-+        return privacy.scan_files([(file, 'fixture.bin')], self.allow)
-+
-+    @staticmethod
-+    def path(user):
-+        return 'C:' + chr(92) + 'Users' + chr(92) + user + chr(92) + 'project'
-+
-+    def test_unicode_encodings_and_binary_embedding(self):
-+        for user in ('Alice', '\u5f20\u4e09', '\u00e9clair', '\U0001f680', '\U0001d11e', '\u0645\u062d\u0645\u062f'):
-+            for encoding in ('utf-8', 'utf-8-sig', 'utf-16le', 'utf-16be'):
-+                encoded = self.path(user).encode(encoding)
-+                for prefix, suffix in ((b'', b''), (b'\xff\x00\x01', b'\x00\x00\xfe'),
-+                                       ((b'\xff\xfe' if encoding == 'utf-16le' else b'\xfe\xff') if encoding.startswith('utf-16') else b'', b'\x00\x00')):
-+                    with self.subTest(user=user, encoding=encoding, prefix=prefix):
-+                        result = self.scan(prefix + encoded + suffix)
-+                        self.assertTrue(result['failures'])
-+                        self.assertTrue(any(user in item['sample'] for item in result['failures']))
-+
-+    def test_malformed_matching_candidates_fail_closed(self):
-+        prefix = self.path('')[:-len('project')-1]
-+        for data in (prefix.encode('utf-8') + b'\xff\x00',
-+                     prefix.encode('utf-16le') + b'\x00\xd8\x00\x00',
-+                     prefix.encode('utf-16be') + b'\xd8\x00\x00\x00'):
-+            with self.subTest(data=data):
-+                result = self.scan(data)
-+                self.assertTrue(result['failures'])
-+                self.assertTrue(any('encoding_error' in item for item in result['failures']))
-+                # Even a path-bound matching digest cannot allow malformed text.
-+                entry = dict(result['failures'][0]); entry.pop('file_sha256')
-+                self.assertFalse(self.scan(data, [entry])['allowed'])
-+
-+    def test_exact_allowlist_semantics(self):
-+        data = self.path('Example').encode('utf-8')
-+        entry = self.scan(data)['failures'][0]
-+        result = self.scan(data, [entry])
-+        self.assertEqual(len(result['allowed']), 1)
-+        self.assertFalse(result['failures'])
-+        changed = self.path('Different').encode('utf-8')
-+        self.assertTrue(self.scan(changed, [entry])['failures'])
-+        path_entry = dict(entry); path_entry.pop('file_sha256')
-+        self.assertFalse(self.scan(b'\x00' + data + b'\x00', [path_entry])['failures'])
-+        self.assertTrue(self.scan(data + b'new-tail', [path_entry])['failures'])
-+
-+    def test_unrelated_and_ascii_digest(self):
-+        self.assertFalse(self.scan(b'\xff\x00Users\x00\xfe')['failures'])
-+        data = self.path('Example').encode('utf-8')
-+        self.assertEqual(self.scan(data)['failures'][0]['string_sha256'], hashlib.sha256(data).hexdigest())
-+
-+if __name__ == '__main__':
-+    unittest.main()
