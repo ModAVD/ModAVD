@@ -1,0 +1,195 @@
+From e4a0737e895267dfc19d324b4207c0ce76f4c364 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 08:16:15 +0800
+Subject: [PATCH] ime: enqueue host input events atomically
+
+Serialize delete, commit, preedit and finish-composing into a single bounded batch. Check queue capacity and append under one lock, so a failed send queues no prefix. Use the batch path for multi-frame commits. Keep protocol v1, focus state and Qt UI behavior unchanged. Based on qemu/mas36.
+---
+ .../include/android/emulation/ModavdImePipe.h |  17 +++
+ .../src/android/emulation/ModavdImePipe.cpp   | 124 ++++++++++++++----
+ 2 files changed, 117 insertions(+), 24 deletions(-)
+
+diff --git a/android/emu/hardware/include/android/emulation/ModavdImePipe.h b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
+index 939925b..0b68c05 100644
+--- a/android/emu/hardware/include/android/emulation/ModavdImePipe.h
++++ b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
+@@ -95,6 +95,22 @@ public:
+                     void** newPipePtr) override;
+     void onGuestWantWakeOn(int flags) override;
+ 
++    // One Qt input event is enqueued atomically, including replacement and
++    // composition changes. Success means queued, not acknowledged by the guest.
++    // Failure queues nothing.
++    struct InputEvent {
++        int32_t deleteBefore = 0;
++        int32_t deleteAfter = 0;
++        bool hasCommit = false;
++        std::string commit;
++        bool setPreedit = false;
++        int32_t cursor = -1;
++        std::string preedit;
++        bool finishComposing = false;
++    };
++    static bool sendInputEvent(const InputEvent& input,
++                               std::string* error = nullptr);
++
+     // Host -> guest. Each returns false and fills |error| (if not null) when
+     // no guest is connected or the frame can't be sent.
+     static bool sendCommit(const std::string& text,
+@@ -127,6 +143,7 @@ private:
+                           std::string* error);
+     bool queueFrameLocked(const uint8_t* payload, size_t size);
+     bool queueFrame(const std::vector<uint8_t>& payload, std::string* error);
++    bool queueBatch(const std::vector<uint8_t>& frames, std::string* error);
+     bool handleFrameLocked(Update* update);
+     void closeFromHostLocked();
+     void detach();
+diff --git a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
+index 75fe1ef..341c101 100644
+--- a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
++++ b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
+@@ -53,6 +53,44 @@ void putU32(std::vector<uint8_t>* out, uint32_t value) {
+     }
+ }
+ 
++bool appendFrame(std::vector<uint8_t>* frames,
++                  const std::vector<uint8_t>& payload, std::string* error) {
++    if (payload.empty() || payload.size() > kMaxPayloadSize ||
++        frames->size() + 4 + payload.size() > kMaxPendingOut) {
++        if (error) *error = "input event too large";
++        return false;
++    }
++    putU32(frames, static_cast<uint32_t>(payload.size()));
++    frames->insert(frames->end(), payload.begin(), payload.end());
++    return true;
++}
++
++bool appendCommit(std::vector<uint8_t>* frames, const std::string& text,
++                   std::string* error) {
++    if (text.size() > kMaxPendingOut) {
++        if (error) *error = "input event too large";
++        return false;
++    }
++    constexpr size_t kMaxText = kMaxPayloadSize - 1;
++    size_t pos = 0;
++    do {
++        size_t n = std::min(kMaxText, text.size() - pos);
++        if (pos + n < text.size()) {
++            size_t cut = n;
++            while (cut > 0 &&
++                   (static_cast<uint8_t>(text[pos + cut]) & 0xC0) == 0x80) {
++                --cut;
++            }
++            if (cut > 0) n = cut;
++        }
++        std::vector<uint8_t> payload{'C'};
++        payload.insert(payload.end(), text.begin() + pos, text.begin() + pos + n);
++        if (!appendFrame(frames, payload, error)) return false;
++        pos += n;
++    } while (pos < text.size());
++    return true;
++}
++
+ uint32_t getU32(const uint8_t* p) {
+     return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 |
+            uint32_t(p[3]) << 24;
+@@ -389,6 +427,28 @@ bool ModavdImePipe::queueFrame(const std::vector<uint8_t>& payload,
+     return true;
+ }
+ 
++bool ModavdImePipe::queueBatch(const std::vector<uint8_t>& frames,
++                               std::string* error) {
++    android::base::AutoLock lock(mLock);
++    if (mClosed || !mHandshaked) {
++        if (error) *error = "guest input method not connected";
++        return false;
++    }
++    if (frames.size() > kMaxPendingOut - (mOut.size() - mOutPos)) {
++        if (error) *error = "guest input method is not reading";
++        return false;
++    }
++    // Reserve before modifying the queue; no partial commit on backpressure.
++    mOut.reserve(mOut.size() + frames.size());
++    if (mOutPos) {
++        mOut.erase(mOut.begin(), mOut.begin() + mOutPos);
++        mOutPos = 0;
++    }
++    mOut.insert(mOut.end(), frames.begin(), frames.end());
++    signalWake(PIPE_WAKE_READ);
++    return true;
++}
++
+ void ModavdImePipe::closeFromHostLocked() {
+     if (mClosed) {
+         return;
+@@ -435,30 +495,46 @@ bool ModavdImePipe::sendFrame(const std::vector<uint8_t>& payload,
+ 
+ // static
+ bool ModavdImePipe::sendCommit(const std::string& text, std::string* error) {
+-    // Long text goes out in several frames, split between UTF-8 sequences.
+-    constexpr size_t kMaxText = kMaxPayloadSize - 1;
+-    size_t pos = 0;
+-    do {
+-        size_t n = std::min(kMaxText, text.size() - pos);
+-        if (pos + n < text.size()) {
+-            size_t cut = n;
+-            while (cut > 0 &&
+-                   (static_cast<uint8_t>(text[pos + cut]) & 0xC0) == 0x80) {
+-                --cut;
+-            }
+-            if (cut > 0) {
+-                n = cut;
+-            }
+-        }
+-        std::vector<uint8_t> payload{'C'};
+-        payload.insert(payload.end(), text.begin() + pos,
+-                       text.begin() + pos + n);
+-        if (!sendFrame(payload, error)) {
+-            return false;
+-        }
+-        pos += n;
+-    } while (pos < text.size());
+-    return true;
++    InputEvent input;
++    input.hasCommit = true;
++    input.commit = text;
++    return sendInputEvent(input, error);
++}
++
++// static
++bool ModavdImePipe::sendInputEvent(const InputEvent& input,
++                                   std::string* error) {
++    if (input.deleteBefore < 0 || input.deleteAfter < 0 ||
++        (input.setPreedit && input.preedit.size() > kMaxPayloadSize - 5)) {
++        if (error) *error = "invalid input event or preedit too long";
++        return false;
++    }
++    std::vector<uint8_t> frames;
++    if (input.deleteBefore || input.deleteAfter) {
++        std::vector<uint8_t> payload{'D'};
++        putU32(&payload, static_cast<uint32_t>(input.deleteBefore));
++        putU32(&payload, static_cast<uint32_t>(input.deleteAfter));
++        if (!appendFrame(&frames, payload, error)) return false;
++    }
++    if (input.hasCommit && !appendCommit(&frames, input.commit, error)) return false;
++    if (input.setPreedit) {
++        std::vector<uint8_t> payload{'P'};
++        putU32(&payload, static_cast<uint32_t>(input.cursor));
++        payload.insert(payload.end(), input.preedit.begin(), input.preedit.end());
++        if (!appendFrame(&frames, payload, error)) return false;
++    }
++    if (input.finishComposing && !appendFrame(&frames, {'E'}, error)) return false;
++    if (frames.empty()) return true;
++    Ptr pipe;
++    {
++        android::base::AutoLock lock(sGlobals->lock);
++        if (sGlobals->state.connected) pipe = sGlobals->pipe;
++    }
++    if (!pipe) {
++        if (error) *error = "guest input method not connected";
++        return false;
++    }
++    return pipe->queueBatch(frames, error);
+ }
+ 
+ // static
