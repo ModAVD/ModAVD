@@ -1,0 +1,149 @@
+From ce3e3e4a615f747a47277cdd1fd6577f0d927c97 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 08:16:14 +0800
+Subject: [PATCH] userdata: preserve ext4 and continue boot after conversion
+ failure
+
+Check both converter results and replace completed output atomically. Preserve the original ext4 on failure, and warn at both call sites while continuing boot. Based on the qemu/mas36 release sources.
+---
+ android-qemu2-glue/main.cpp | 101 +++++++++++++++++++++---------------
+ 1 file changed, 58 insertions(+), 43 deletions(-)
+
+diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
+index 4157f34..646d0a0 100644
+--- a/android-qemu2-glue/main.cpp
++++ b/android-qemu2-glue/main.cpp
+@@ -596,59 +596,68 @@ static bool growUserDataOverlay(const std::string& overlay, uint64_t newSize) {
+     return true;
+ }
+ 
+-static void convertExt4ToQcow2(std::string ext4filepath) {
+-    if (!path_exists(ext4filepath.c_str())) {
+-        return;
+-    }
+-
+-    std::string dataimageext4 = ext4filepath;
+-    if (!System::get()->pathIsExt4(dataimageext4)) {
+-        dprint("%s is not ext4\n", dataimageext4);
+-        return;
++// Replace only after a completed conversion. Both files are in the same
++// directory: a failed rename must not discard the original input.
++static bool convertExt4ToQcow2(std::string ext4filepath) {
++    if (!path_exists(ext4filepath.c_str()) ||
++        !System::get()->pathIsExt4(ext4filepath)) {
++        return true;  // Already converted, or no optional image to convert.
+     }
+ 
+     auto startTime = std::chrono::steady_clock::now();
+-    auto qemu_img = System::get()->findBundledExecutable("qemu-img");
+-    std::string dataimageqcow2 = dataimageext4 + std::string(".tmp.qcow2");
+-    // MAS local: read the ext4 image with "-T none" (no host cache). The image
+-    // is sparse (libsparse marks it so on Windows); a cached read of a sparse
+-    // file with data in it makes Windows reserve free space for its whole
+-    // logical size until the file is deleted, so creating a 64 GB data
+-    // partition briefly needed 64 GB free (measured 10-16: a 16 GB image took
+-    // 16.4 GB during the conversion; with -T none, 3 MB). If the uncached
+-    // conversion fails, fall back to the original cached one.
++    const auto qemu_img = System::get()->findBundledExecutable("qemu-img");
++    const std::string dataimageqcow2 = ext4filepath + ".tmp.qcow2";
++    // Keep uncached reads for sparse files: cached reads can temporarily
++    // reserve their entire logical size on Windows.
+     System::ProcessExitCode exitCode = -1;
+     auto res = System::get()->runCommandWithResult(
+-            {qemu_img, "convert", "-T", "none", "-O", "qcow2", dataimageext4,
++            {qemu_img, "convert", "-T", "none", "-O", "qcow2", ext4filepath,
+              dataimageqcow2},
+             System::kInfinite, &exitCode);
+     if (!res || exitCode != 0 || !System::get()->pathIsQcow2(dataimageqcow2)) {
+         dwarning("uncached conversion of %s failed (exit code %d), retrying "
+-                 "with the host cache",
+-                 dataimageext4.c_str(), (int)exitCode);
+-        path_delete_file(dataimageqcow2.c_str());
+-        res = System::get()->runCommandWithResult({qemu_img, "convert", "-O",
+-                                                   "qcow2", dataimageext4,
+-                                                   dataimageqcow2});
+-    }
+-    if (!System::get()->pathIsQcow2(dataimageqcow2)) {
+-        dprint("%s is not qcow2\n", dataimageqcow2);
+-        return;
++                 "with the host cache", ext4filepath.c_str(), (int)exitCode);
++        if (path_exists(dataimageqcow2.c_str()) &&
++            path_delete_file(dataimageqcow2.c_str()) < 0) {
++            derror("Could not remove failed conversion %s", dataimageqcow2.c_str());
++            return false;
++        }
++        exitCode = -1;
++        res = System::get()->runCommandWithResult(
++                {qemu_img, "convert", "-O", "qcow2", ext4filepath, dataimageqcow2},
++                System::kInfinite, &exitCode);
++    }
++    if (!res || exitCode != 0 || !System::get()->pathIsQcow2(dataimageqcow2)) {
++        derror("Conversion of %s failed (exit code %d); original image preserved",
++               ext4filepath.c_str(), (int)exitCode);
++        if (path_exists(dataimageqcow2.c_str()) &&
++            path_delete_file(dataimageqcow2.c_str()) < 0) {
++            dwarning("Could not remove failed conversion %s", dataimageqcow2.c_str());
++        }
++        return false;
+     }
+ 
+-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++#ifdef _WIN32
++    const Win32UnicodeString from(dataimageqcow2);
++    const Win32UnicodeString to(ext4filepath);
++    if (!MoveFileExW(from.c_str(), to.c_str(),
++                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
++        derror("Could not replace %s (Windows error %lu); converted image kept at %s",
++               ext4filepath.c_str(), GetLastError(), dataimageqcow2.c_str());
++        return false;
++    }
++#else
++    if (rename(dataimageqcow2.c_str(), ext4filepath.c_str()) != 0) {
++        derror("Could not replace %s: %s; converted image kept at %s",
++               ext4filepath.c_str(), strerror(errno), dataimageqcow2.c_str());
++        return false;
++    }
++#endif
++    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - startTime);
+-
+-    long long timeUsedMs = (long long)elapsed.count();
+-    dprint("convert img from ext4 %s to qcow2 image %s %s, using "
+-           "%lld "
+-           "mini seconds",
+-           dataimageext4.c_str(), dataimageqcow2.c_str(),
+-           res == true ? " succeeded" : " failed", timeUsedMs);
+-
+-    path_delete_file(dataimageext4.c_str());
+-    path_copy_file(dataimageext4.c_str(), dataimageqcow2.c_str());
+-    path_delete_file(dataimageqcow2.c_str());
++    dprint("Converted %s to qcow2 successfully in %lld milliseconds",
++           ext4filepath.c_str(), (long long)elapsed.count());
++    return true;
+ }
+ 
+ static int createUserData(AvdInfo* avd,
+@@ -693,7 +702,10 @@ static int createUserData(AvdInfo* avd,
+             auto qemu_img = System::get()->findBundledExecutable("qemu-img");
+             std::string dataimageext4 =
+                     std::string(hw->disk_dataPartition_path);
+-            convertExt4ToQcow2(dataimageext4);
++            if (!convertExt4ToQcow2(dataimageext4)) {
++                dwarning("Continuing with the original ext4 image: %s",
++                         dataimageext4.c_str());
++            }
+         };
+     }
+ 
+@@ -2605,7 +2617,10 @@ extern "C" int main(int argc, char** argv) {
+                 auto qemu_img =
+                         System::get()->findBundledExecutable("qemu-img");
+                 std::string dataimageext4 = std::string(hw->hw_sdCard_path);
+-                convertExt4ToQcow2(dataimageext4);
++                if (!convertExt4ToQcow2(dataimageext4)) {
++                    dwarning("Continuing with the original ext4 image: %s",
++                             dataimageext4.c_str());
++                }
+             }
+ 
+             // firstboot.ini could be wiped out, create again
