@@ -36,7 +36,7 @@ CacheState snapshot(const char* label, uintptr_t slot = 0) {
       CacheWord(reinterpret_cast<uintptr_t>(g_fork_translation_cache) + 0x38);
   pthread_mutex_unlock(mutex);
   CacheScanStats attempt;
-  const bool accepted = TryForkLocks(&attempt);
+  const bool accepted = TryForkLocks(&attempt) == ForkAttempt::kReady;
   if (accepted) ForkRelease();
   if (accepted != (state == CacheState::kQuiescent)) {
     fprintf(stderr, "fork accepted a non-quiescent real cache in %s\n", label);
@@ -87,9 +87,13 @@ int main(int argc, char** argv) {
   const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
   if (!base || !BuildIdIs(base, kNdkForkLocksBuildId)) return 4;
   g_fork_translation_cache = get();
-  for (int i = 0; i < kNumForkLocks; ++i)
-    g_fork_locks[i] =
-        reinterpret_cast<pthread_mutex_t*>(base + kNdkForkLockOffs[i]);
+  // Only the live TranslationCache mutex is cross-checked in this neutral
+  // process. The other two production offsets are not initialised here.
+  pthread_mutex_t neutral_locks[2] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+  g_fork_locks[0] = &neutral_locks[0];
+  g_fork_locks[kForkTranslationCacheLock] = static_cast<pthread_mutex_t*>(g_fork_translation_cache);
+  g_fork_locks[2] = &neutral_locks[1];
+  g_fork_safety.store(true);
   if (g_fork_translation_cache !=
       reinterpret_cast<void*>(base +
                               kNdkForkLockOffs[kForkTranslationCacheLock]))
@@ -118,7 +122,11 @@ int main(int argc, char** argv) {
     void* entry = wrap(g_fork_translation_cache, pc);
     if (!entry) return 8;
     const uintptr_t slot = CacheWord(reinterpret_cast<uintptr_t>(entry));
-    const bool ok =
+    auto* mutex = static_cast<pthread_mutex_t*>(g_fork_translation_cache);
+    pthread_mutex_lock(mutex);
+    const uintptr_t inflight = CacheWord(reinterpret_cast<uintptr_t>(g_fork_translation_cache) + 0x38);
+    pthread_mutex_unlock(mutex);
+    const bool ok = inflight == 0 &&
         snapshot("wrapping", slot) == CacheState::kBusy &&
         __atomic_load_n(reinterpret_cast<const uintptr_t*>(slot),
                         __ATOMIC_RELAXED) == g_fork_transient_entries[2];

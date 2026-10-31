@@ -1,0 +1,11 @@
+# Copyright 2026 Ji Mao Cai
+/out/
+__pycache__/
+*.keystore
+*.jks
+*.p12
+*.apk
+*.apk.idsig
+*.class
+*.dex
+*.so

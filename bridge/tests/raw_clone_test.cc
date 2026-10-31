@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <initializer_list>
+#include <new>
 #include <poll.h>
 #include <sys/wait.h>
 
@@ -73,7 +74,7 @@ bool TestCacheReady() {
   return ready;
 }
 
-long Capture(long nr, ...) {
+extern "C" __attribute__((used, visibility("hidden"))) long Capture(long nr, ...) {
   ++captured_calls;
   captured_nr = nr;
   va_list ap;
@@ -89,6 +90,153 @@ long Capture(long nr, ...) {
   if (expect_protected) CHECK(TestCacheReady());
   errno = fake_errno;
   return fake_result;
+}
+
+extern "C" {
+unsigned char captured_al = 0;
+__attribute__((naked)) long CaptureAl(long, ...) {
+  __asm__ volatile("movb %al, captured_al(%rip)\n jmp Capture\n");
+}
+__attribute__((naked)) long InvokeWithAl(long, ...) {
+  __asm__ volatile("movb $7, %al\n jmp ModavdSyscallWrapper\n");
+}
+}
+
+bool RejectUnknownForkCache() {
+  g_fork_safety.store(true);
+  const bool refused = TryForkLocks() == ForkAttempt::kUnknown;
+  CHECK(!g_fork_safety.load());
+  const int unknown = g_fork_unknown_scans.load();
+  CHECK(TryForkLocks() == ForkAttempt::kDisabled && g_fork_unknown_scans.load() == unknown);
+  return refused;
+}
+
+void CheckTidRanges() {
+  const HostRange tp{0x1000, 0x2000}, thread{0x3000, 0x4000};
+  const long p = CLONE_PARENT_SETTID, c = CLONE_CHILD_SETTID, clear = CLONE_CHILD_CLEARTID;
+  CHECK(TidOutputsOutsideHostRanges(p, 0, UINTPTR_MAX, tp, thread));
+  CHECK(TidOutputsOutsideHostRanges(c, UINTPTR_MAX, 0, tp, thread));
+  CHECK(TidOutputsOutsideHostRanges(p | c, 0x5000, 0x5000, tp, thread));
+  CHECK(TidOutputsOutsideHostRanges(p, 0xffc, 0, tp, thread));
+  CHECK(TidOutputsOutsideHostRanges(c, 0, 0x2000, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(p, 0xffe, 0, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(c, 0, 0x2ffe, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(clear, 0, 0x3000, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(p, UINTPTR_MAX - 2, 0, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(c, 0, UINTPTR_MAX, tp, thread));
+  CHECK(!TidOutputsOutsideHostRanges(p, 0x5000, 0, {}, thread));
+  CHECK(!TidOutputsOutsideHostRanges(c, 0, 0x5000, tp, {}));
+  CHECK(!TidOutputsOutsideHostRanges(p, 0x5ffe, 0, tp, thread, {0x6000, 0x7000}));
+  HostRange real_tp, real_thread;
+  CHECK(FindHostThreadRanges(real_tp, real_thread));
+  CHECK(!ModavdCloneTidOutputsSafe(p, reinterpret_cast<long>(__builtin_thread_pointer()), 0));
+  CHECK(!ModavdCloneTidOutputsSafe(c, 0, static_cast<long>(pthread_self())));
+  int stack_tid = 0;
+  CHECK(!ModavdCloneTidOutputsSafe(p, reinterpret_cast<long>(&stack_tid), 0));
+  CHECK(!ModavdCloneTidOutputsSafe(p, static_cast<long>(real_tp.begin - 2), 0));
+  const int saved = ERANGE;
+  errno = saved;
+  CHECK(ModavdCloneTidOutputsSafe(p, 0, -1) && errno == saved);
+  errno = saved;
+  CHECK(!CloneTidOutputsSafeWithMaps(p, 0, 0, "/proc/self/modavd-missing-maps") && errno == saved);
+  errno = saved;
+  CHECK(!ModavdCloneTidOutputsSafe(p, reinterpret_cast<long>(&stack_tid), 0) && errno == saved);
+
+  // A guard page on each side prevents coalescing this guest-like tid mapping
+  // with the current host pthread/stack VMA. This is not an ARM guest test.
+  const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  void* region = mmap(nullptr, page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(region != MAP_FAILED);
+  if (region != MAP_FAILED) {
+    auto* tid = static_cast<char*>(region) + page;
+    CHECK(mprotect(tid, page, PROT_READ | PROT_WRITE) == 0);
+    CHECK(ModavdCloneTidOutputsSafe(p | c, reinterpret_cast<long>(tid), reinterpret_cast<long>(tid)));
+    modavd_original_syscall = &CaptureAl;
+    const long extra = 0x123456789abcd;
+    for (bool unsafe : {false, true}) {
+      argument_count = unsafe ? 6 : 5;
+      expect_protected = !unsafe;
+      const long output = unsafe ? reinterpret_cast<long>(__builtin_thread_pointer())
+                                 : reinterpret_cast<long>(tid);
+      for (long flags : {p | SIGCHLD, c | clear | SIGCHLD, p | c | SIGCHLD}) {
+        captured_al = 0;
+        CHECK(InvokeWithAl(SYS_clone, flags, 0L, output, output, 0x5678L, extra) == fake_result);
+        CHECK((!unsafe || captured_al == 7) && errno == fake_errno && arguments[0] == flags &&
+              arguments[1] == 0 && arguments[2] == output && arguments[3] == output &&
+              arguments[4] == 0x5678 && (!unsafe || arguments[5] == extra));
+      }
+    }
+    expect_protected = false;
+    argument_count = 5;
+    modavd_original_syscall = &Capture;
+    munmap(region, page * 3);
+  }
+}
+
+std::atomic<int> worker_errors{0};
+void* CheckWorkerTls(void*) {
+  HostRange tp, thread;
+  int stack_tid = 0;
+  if (!FindHostThreadRanges(tp, thread) ||
+      ModavdCloneTidOutputsSafe(CLONE_PARENT_SETTID,
+                               reinterpret_cast<long>(__builtin_thread_pointer()), 0) ||
+      ModavdCloneTidOutputsSafe(CLONE_CHILD_SETTID, 0, static_cast<long>(pthread_self())) ||
+      ModavdCloneTidOutputsSafe(CLONE_CHILD_SETTID, 0, reinterpret_cast<long>(&stack_tid)))
+    worker_errors.fetch_add(1);
+  return nullptr;
+}
+
+void* RememberOriginalWorker(void*) {
+  for (int i = 0; i < 1000; ++i) {
+    if (!RememberSyscallOriginal(&Capture) || RememberSyscallOriginal(&ModavdSyscallWrapper))
+      worker_errors.fetch_add(1);
+  }
+  return nullptr;
+}
+
+void CheckInstallerAndDiagnostics() {
+  modavd_original_syscall = nullptr;
+  CHECK(!RememberSyscallOriginal(nullptr) && !RememberSyscallOriginal(&ModavdSyscallWrapper));
+  pthread_t threads[4];
+  for (auto& thread : threads) CHECK(pthread_create(&thread, nullptr, &RememberOriginalWorker, nullptr) == 0);
+  for (auto& thread : threads) CHECK(pthread_join(thread, nullptr) == 0);
+  CHECK(worker_errors.load() == 0 && modavd_original_syscall.load() == &Capture);
+  CHECK(!RememberSyscallOriginal(&syscall) && modavd_original_syscall.load() == &Capture);
+  const bool installed = g_ndk_hooks_installed.load();
+  g_ndk_hooks_installed.store(false);
+  g_ndk_hooks_install_owner.store(gettid());
+  CHECK(InstallTranslatorHooksLocked(nullptr, 0, nullptr) == 1);
+  CHECK(!g_ndk_hooks_installed.load() && g_ndk_hooks_install_owner.load() == gettid());
+  g_ndk_hooks_install_owner.store(0);
+  g_detached.store(true);
+  CHECK(!InstallTranslatorHooks());
+  g_detached.store(false);
+  g_ndk_hooks_installed.store(installed);
+  g_fork_diagnostics.store(false);
+  CHECK(!ShouldLogRawClone(true, true, 15000000, 35000000));
+  CHECK(!ShouldLogRawClone(false, false, 0, 0));
+  CHECK(ShouldLogRawClone(true, false, 0, 0));
+  CHECK(ShouldLogRawClone(true, true, 60000000, 40000000));
+  g_fork_diagnostics.store(true);
+  CHECK(ShouldLogRawClone(true, true, 0, 0) && ShouldLogRawClone(false, false, 0, 0));
+  g_fork_diagnostics.store(false);
+}
+
+void CheckHostAtforkParent() {
+  g_fork_diagnostics.store(true);
+  ForkPrepare();
+  CHECK(g_fork_held.load());
+  errno = E2BIG;
+  ForkParentAtFork();
+  CHECK(errno == E2BIG && !g_fork_held.load() && g_fork_owner.load() == 0);
+  for (auto& mutex : locks) {
+    CHECK(pthread_mutex_trylock(&mutex) == 0);
+    pthread_mutex_unlock(&mutex);
+  }
+  errno = ERANGE;
+  ForkParentAtFork();
+  CHECK(errno == ERANGE && !g_fork_held.load());
+  g_fork_diagnostics.store(false);
 }
 
 void CheckUnlocked() {
@@ -134,6 +282,210 @@ void CheckParentAfterChild(long child) {
   }
   // The guard must not rewrite either copy of the cache.
   CHECK(TestCacheReady());
+  CheckUnlocked();
+}
+
+void CheckRealTidOutputs() {
+  const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  void* region = mmap(nullptr, page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(region != MAP_FAILED);
+  if (region == MAP_FAILED) return;
+  auto* output = reinterpret_cast<int*>(static_cast<char*>(region) + page);
+  CHECK(mprotect(output, page, PROT_READ | PROT_WRITE) == 0);
+  modavd_original_syscall = &syscall;
+  for (long flags : {static_cast<long>(CLONE_PARENT_SETTID | SIGCHLD),
+                    static_cast<long>(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD),
+                    static_cast<long>(CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
+                                      CLONE_CHILD_CLEARTID | SIGCHLD)}) {
+    for (bool alias : {false, true}) {
+      output[0] = output[1] = -7;
+      int* ctid = alias ? output : output + 1;
+      CHECK(ModavdCloneTidOutputsSafe(flags, reinterpret_cast<long>(output),
+                                    reinterpret_cast<long>(ctid)));
+      const long child = ModavdSyscallWrapper(SYS_clone, flags, 0L, output, ctid, 0L);
+      if (child == 0) {
+        const bool written = !(flags & CLONE_CHILD_SETTID) ||
+                             *ctid == static_cast<int>(syscall(SYS_gettid));
+        syscall(SYS_exit, written && ChildCanResumeTranslation() ? 37 : 38);
+        __builtin_unreachable();
+      }
+      if (flags & CLONE_PARENT_SETTID) CHECK(output[0] == child);
+      else CHECK(output[0] == -7);
+      if (!alias) CHECK(output[1] == -7);  // Child writes stay in its COW copy.
+      CheckParentAfterChild(child);
+    }
+  }
+  munmap(region, page * 3);
+  modavd_original_syscall = &Capture;
+}
+
+std::atomic<bool> holder_ready{false}, holder_release{false};
+std::atomic<pid_t> holder_tid{0};
+void* HoldPreparedFork(void*) {
+  ForkPrepare();
+  holder_tid.store(gettid());
+  holder_ready.store(true, std::memory_order_release);
+  while (!holder_release.load(std::memory_order_acquire)) sched_yield();
+  ForkParent();
+  return nullptr;
+}
+
+void CheckFallbackInheritedLocks() {
+  ResetTestTranslations();
+  holder_ready.store(false);
+  holder_release.store(false);
+  pthread_t holder;
+  CHECK(pthread_create(&holder, nullptr, &HoldPreparedFork, nullptr) == 0);
+  while (!holder_ready.load(std::memory_order_acquire)) sched_yield();
+  CHECK(g_fork_held.load() && g_fork_owner.load() == holder_tid.load());
+  modavd_original_syscall = &syscall;
+  const int misses = g_fork_misses.load();
+  const long child = ModavdSyscallWrapper(SYS_clone, static_cast<long>(SIGCHLD), 0L, 0L, 0L, 0L);
+  if (child == 0) {
+    syscall(SYS_exit, ChildCanResumeTranslation() ? 37 : 38);
+    __builtin_unreachable();
+  }
+  CHECK(child > 0 && g_fork_misses.load() == misses + 1);
+  int status = 0;
+  CHECK(waitpid(static_cast<pid_t>(child), &status, 0) == child);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 37);
+  // The fallback child releases inherited metadata; its parent cannot release
+  // the other thread's live prepare or erase that owner's state.
+  CHECK(g_fork_held.load() && g_fork_owner.load() == holder_tid.load());
+  holder_release.store(true, std::memory_order_release);
+  CHECK(pthread_join(holder, nullptr) == 0);
+  CHECK(!g_fork_held.load() && g_fork_owner.load() == 0);
+  CheckUnlocked();
+  modavd_original_syscall = &Capture;
+}
+
+void* ChurnForkOwner(void*) {
+  for (int i = 0; i < 500; ++i) {
+    const long deadline = MonoNs() + 2000000000L;
+    ForkAttempt result;
+    do {
+      result = TryForkLocks();
+      if (result != ForkAttempt::kReady) sched_yield();
+    } while (result != ForkAttempt::kReady && MonoNs() < deadline);
+    if (result != ForkAttempt::kReady) { worker_errors.fetch_add(1); return nullptr; }
+    if (!g_fork_held.load() || g_fork_owner.load() != gettid()) worker_errors.fetch_add(1);
+    ForkRelease();
+  }
+  return nullptr;
+}
+
+void* RaceUnknown(void*) {
+  for (int i = 0; i < 10000; ++i) {
+    const ForkAttempt result = TryForkLocks();
+    if (result == ForkAttempt::kUnknown || result == ForkAttempt::kDisabled) return nullptr;
+    if (result == ForkAttempt::kReady) { worker_errors.fetch_add(1); ForkRelease(); return nullptr; }
+    sched_yield();
+  }
+  worker_errors.fetch_add(1);
+  return nullptr;
+}
+
+void CheckUnknownAndOwnerConcurrency() {
+  pthread_t threads[2];
+  ResetTestTranslations();
+  for (auto& thread : threads) CHECK(pthread_create(&thread, nullptr, &ChurnForkOwner, nullptr) == 0);
+  for (auto& thread : threads) CHECK(pthread_join(thread, nullptr) == 0);
+  CHECK(worker_errors.load() == 0 && !g_fork_held.load() && g_fork_owner.load() == 0);
+  translation_cache.size = 2;
+  expect_protected = false;
+  fake_result = 777;
+  g_fork_unknown_logged.store(false);
+  const int unknown = g_fork_unknown_scans.load();
+  const long begin = MonoNs();
+  CHECK(ModavdSyscallWrapper(SYS_clone, static_cast<long>(SIGCHLD), 0L, 0L, 0L, 0L) == 777);
+  CHECK(errno == fake_errno && MonoNs() - begin < kForkLockWaitNs);
+  CHECK(!g_fork_safety.load() && g_fork_unknown_scans.load() == unknown + 1 &&
+        g_fork_unknown_logged.load());
+  CHECK(ModavdSyscallWrapper(SYS_clone, static_cast<long>(SIGCHLD), 0L, 0L, 0L, 0L) == 777);
+  CHECK(g_fork_unknown_scans.load() == unknown + 1);
+  g_fork_safety.store(true);  // Explicit test reset; production never re-enables.
+  for (auto& thread : threads) CHECK(pthread_create(&thread, nullptr, &RaceUnknown, nullptr) == 0);
+  for (auto& thread : threads) CHECK(pthread_join(thread, nullptr) == 0);
+  CHECK(worker_errors.load() == 0 && g_fork_unknown_scans.load() == unknown + 2);
+  CHECK(TryForkLocks() == ForkAttempt::kDisabled);
+  ResetTestTranslations();
+  g_fork_safety.store(true);
+  const long sleeping = MonoNs();
+  YieldForkAttempt(ForkAttempt::kCacheBusy);
+  CHECK(MonoNs() - sleeping >= 900000);
+  CheckUnlocked();
+}
+
+constexpr size_t kStressEntries = 370000;
+std::atomic<uintptr_t>* stress_slots = nullptr;
+int stress_calls = 0;
+TestCacheNode* BuildStressTree(TestCacheNode* nodes, size_t first, size_t end, TestCacheNode* parent) {
+  if (first == end) return nullptr;
+  const size_t middle = first + (end - first) / 2;
+  TestCacheNode* node = &nodes[middle];
+  *node = {nullptr, nullptr, parent, 0, middle * 4, &stress_slots[middle]};
+  node->left = BuildStressTree(nodes, first, middle, node);
+  node->right = BuildStressTree(nodes, middle + 1, end, node);
+  return node;
+}
+
+long CaptureStress(long nr, ...) {
+  CHECK(nr == SYS_clone && g_fork_held.load() && g_fork_owner.load() == gettid());
+  CacheScanStats stats;
+  CHECK(ScanForkCache(stats) == CacheState::kQuiescent &&
+        stats.entries == kStressEntries && stats.visited == kStressEntries);
+  ++stress_calls;
+  errno = fake_errno;
+  return 777;
+}
+
+void* FinishLargeCacheTransition(void*) {
+  usleep(10000);
+  pthread_mutex_lock(&locks[kForkTranslationCacheLock]);
+  stress_slots[kStressEntries - 1].store(static_cast<uintptr_t>(TranslationEntry::kReady));
+  pthread_mutex_unlock(&locks[kForkTranslationCacheLock]);
+  return nullptr;
+}
+
+void CheckLargeCacheBurst() {
+  auto* nodes = new (std::nothrow) TestCacheNode[kStressEntries];
+  stress_slots = new (std::nothrow) std::atomic<uintptr_t>[kStressEntries];
+  CHECK(nodes != nullptr && stress_slots != nullptr);
+  if (nodes == nullptr || stress_slots == nullptr) {
+    delete[] nodes;
+    delete[] stress_slots;
+    return;
+  }
+  for (size_t i = 0; i < kStressEntries; ++i)
+    stress_slots[i].store(static_cast<uintptr_t>(TranslationEntry::kReady));
+  translation_cache.inflight = 0;
+  translation_cache.size = kStressEntries;
+  translation_cache.begin = &nodes[0];
+  translation_cache.root = BuildStressTree(
+      nodes, 0, kStressEntries, reinterpret_cast<TestCacheNode*>(&translation_cache.root));
+  modavd_original_syscall = &CaptureStress;
+  const int misses = g_fork_misses.load(), unknown = g_fork_unknown_scans.load();
+  const long begin = MonoNs();
+  for (int i = 0; i < 15; ++i) {
+    // A last-node Invalidating with inflight==0 forces complete-tree work
+    // before Busy. The worker needs the released cache mutex to finish.
+    stress_slots[kStressEntries - 1].store(static_cast<uintptr_t>(TranslationEntry::kInvalidating));
+    pthread_t worker;
+    CHECK(pthread_create(&worker, nullptr, &FinishLargeCacheTransition, nullptr) == 0);
+    CHECK(ModavdSyscallWrapper(SYS_clone, static_cast<long>(CLONE_VFORK | SIGCHLD),
+                              0L, 0L, 0L, 0L) == 777);
+    CHECK(errno == fake_errno && stress_calls == i + 1);
+    CHECK(pthread_join(worker, nullptr) == 0);
+    CHECK(!g_fork_held.load() && g_fork_owner.load() == 0);
+  }
+  CHECK(g_fork_misses.load() == misses && g_fork_unknown_scans.load() == unknown);
+  std::printf("synthetic cache burst: entries=%zu calls=%d elapsed_ms=%ld (not game performance)\n",
+              kStressEntries, stress_calls, (MonoNs() - begin) / 1000000);
+  ResetTestTranslations();
+  modavd_original_syscall = &Capture;
+  delete[] nodes;
+  delete[] stress_slots;
+  stress_slots = nullptr;
   CheckUnlocked();
 }
 
@@ -187,40 +539,40 @@ void CheckCacheTransitions() {
   // Structural inconsistency must be unknown, not silently considered idle.
   translation_cache.size = 2;
   CacheScanStats stats;
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   CHECK(g_fork_unknown_scans.load() != 0);
   ResetTestTranslations();
   cache_nodes[0].left = &cache_nodes[1];  // A cycle must also fail closed.
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_nodes[0].slot = nullptr;
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   translation_cache.begin = &cache_nodes[2];
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_nodes[1].left = cache_nodes[1].right;
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_nodes[1].parent = nullptr;
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_nodes[0].parent = &cache_nodes[2];
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_nodes[0].guest_pc = 2;
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   cache_slots[0].store(0);
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
   TestCacheNode deep_nodes[65]{};
   for (int i = 0; i < 65; ++i) {
@@ -231,8 +583,9 @@ void CheckCacheTransitions() {
   translation_cache.begin = translation_cache.root = &deep_nodes[0];
   translation_cache.size = 65;
   stats = {};
-  CHECK(ScanForkCache(stats) == CacheState::kUnknown && !TryForkLocks());
+  CHECK(ScanForkCache(stats) == CacheState::kUnknown && RejectUnknownForkCache());
   ResetTestTranslations();
+  g_fork_safety.store(true);
 }
 
 struct InversionTest {
@@ -414,6 +767,8 @@ int main() {
   ResetTestTranslations();
   modavd_original_syscall = &Capture;
   g_fork_safety.store(true);
+  CheckInstallerAndDiagnostics();
+  CheckHostAtforkParent();
   const long values[] = {0x112233445566778, -2, 0x223344556677889, -4, 0x33445566778899a, -6};
   // Non-clone syscalls must retain all six arguments, including the stack slot.
   for (int count = 0; count <= 6; ++count) {
@@ -456,14 +811,18 @@ int main() {
   CHECK(arguments[1] == 0 && arguments[2] == 11 && arguments[3] == 22 && arguments[4] == 33);
   CHECK(ModavdSyscallWrapper(SYS_clone, static_cast<long>(SIGCHLD), 99L, 11L, 22L, 33L) ==
         fake_result);
-  // These flags can overwrite host TLS or its cached tid. They must tail-jump
+  // SETTLS/PIDFD always tail-jump; SETTID is covered separately below.
+  // They must tail-jump
   // without entering the C++/loader path, retaining their original arguments.
-  for (long flag : {static_cast<long>(CLONE_SETTLS), static_cast<long>(CLONE_PARENT_SETTID),
-                    static_cast<long>(CLONE_CHILD_SETTID), static_cast<long>(CLONE_PIDFD)}) {
+  for (long flag : {static_cast<long>(CLONE_SETTLS), static_cast<long>(CLONE_PIDFD)}) {
     CHECK(ModavdSyscallWrapper(SYS_clone, flag | SIGCHLD, 0L, 11L, 22L, 33L) == fake_result);
     CHECK(errno == fake_errno && arguments[0] == (flag | SIGCHLD) && arguments[1] == 0 &&
           arguments[2] == 11 && arguments[3] == 22 && arguments[4] == 33);
   }
+  CheckTidRanges();
+  pthread_t tls_worker;
+  CHECK(pthread_create(&tls_worker, nullptr, &CheckWorkerTls, nullptr) == 0);
+  CHECK(pthread_join(tls_worker, nullptr) == 0 && worker_errors.load() == 0);
   g_fork_safety.store(false);
   CHECK(ModavdSyscallWrapper(SYS_clone, static_cast<long>(SIGCHLD), 0L, 11L, 22L, 33L) ==
         fake_result);
@@ -504,6 +863,10 @@ int main() {
 
   CheckLockInversion();
   CheckCacheTransitions();
+  CheckUnknownAndOwnerConcurrency();
+  CheckFallbackInheritedLocks();
+  CheckRealTidOutputs();
+  CheckLargeCacheBurst();
 
   // Use the real kernel path: private fork and private-memory vfork. The child
   // must inherit an already-quiescent cache and see every mutex unlocked before
@@ -522,7 +885,7 @@ int main() {
   CheckRecursiveLoaderScope();
   CheckInheritedLoaderMutex();
   // The existing Bionic fork path uses the same child recovery handler.
-  const int atfork_error = pthread_atfork(&ForkPrepare, &ForkParent, &ForkChild);
+  const int atfork_error = pthread_atfork(&ForkPrepare, &ForkParentAtFork, &ForkChild);
   CHECK(atfork_error == 0);
   if (atfork_error == 0) {
     ResetTestTranslations(TranslationEntry::kInvalidating);
