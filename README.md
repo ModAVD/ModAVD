@@ -30,7 +30,7 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由包里的「补全组件.bat」在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，已发布的 0.36.0 构建禁用使用统计、崩溃上传、更新检查和特性开关下载；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.36.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
 版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.36.0`（构建号 mas-36）。
 
@@ -90,9 +90,9 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ## 隐私
 
-- 当前发布包中的模拟器程序不主动上传使用统计和崩溃报告，不检查更新，也不下载特性开关。例外：带窗口运行时，如果打开扩展控制里的「位置」页，地图会访问 Google 地图服务。
+- 当前发布包中的模拟器程序不主动向 Google 上传使用统计和崩溃报告，不向 Google 检查更新，也不从 Google 下载特性开关。例外：带窗口运行时，如果打开扩展控制里的「位置」页，地图会访问 Google 地图服务。
 - 安卓系统和里面的应用（游戏、Google Play 服务等）照常联网，这是它们自己的流量。
-- 当前版本的崩溃转储留在本机，不由模拟器上传。
+- 当前版本的崩溃转储留在本机，模拟器不会把它上传给 Google。
 - 「补全组件.bat」只在你运行时访问下载镜像；「收集问题信息.bat」只在本机打包，不上传。
 - 管理器和命令行的显式更新检查或下载属于用户触发的组件行为，不等同于模拟器自身的联网行为。
 
@@ -109,7 +109,7 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ModAVD is a modified build of the AOSP Android Emulator (37.2.10) for Windows, with a focus on unattended automation. It can be integrated with the independent [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) project, and the 0.36.0 package also includes a manager and CLI that can manage instances without AUTO-MAS. Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
 
-- In the published 0.36.0 package, the emulator build disables usage-metrics upload, crash-report upload, update checks, and feature-flag downloads. Crash dumps stay on the host. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual. This describes the current release, not a permanent promise for future versions.
+- In the published 0.36.0 package, the emulator build does not upload usage metrics or crash reports to Google, does not check Google for updates, and does not download feature flags from Google. Crash dumps stay on the host and are not uploaded to Google. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual. This describes the current release, not a permanent promise for future versions.
 - Requirements: Windows 10/11 64-bit, an x86_64 CPU with virtualization enabled, and the Windows Hypervisor Platform (WHPX) feature.
 - Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then either add the folder in AUTO-MAS or point the bundled manager/CLI at it.
 - Licenses: everything in this repository except `package/`, `bridge/`, `assets/` and the `.patch` files under `patches/` (README and the other documents, `docs/`, `scripts/`, `.github/`, ...) is Apache-2.0 (root `LICENSE`). From 0.36.0, ModAVD's own programs are AGPL-3.0-or-later: the bundled scripts in `package/` (full text in `package/LICENSE`; the scripts in 0.35.0 and earlier packages are Apache-2.0), the arm64 execution bridge in `bridge/` (full text in `bridge/LICENSE`), the manager and CLI (repository ModAVD/ModAVDManager) and the host IME (repository ModAVD/ModAVDHostIME); from 0.36.0 the source bundle also has their code in `modavd-src-<commit>.tar.xz`, with `LICENSE` and `NOTICE`. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
