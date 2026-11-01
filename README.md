@@ -2,13 +2,15 @@
 
 ![ModAVD](assets/banner.png)
 
-给 Windows 上的挂机脚本用的安卓模拟器。基于 AOSP Android Emulator 37.2.10，加了一批补丁后自己编译。
+面向 Windows、重点优化无人值守自动化的安卓模拟器，也可以由管理器或命令行独立管理。基于 AOSP Android Emulator 37.2.10，加了一批补丁后自己编译。
 
-现在配合 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 使用：建实例、开关机、接截图和点击都由 AUTO-MAS 完成。0.36.0 起包里另带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`。
+可以与独立的 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 项目集成，由它负责实例编排、脚本和任务流程；0.36.0 起包里另带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`，也可以不经 AUTO-MAS 管理实例。
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
 > 这是非官方项目，与 Google 没有关联。
+>
+> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.36.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
 
 - [这是什么](#这是什么)
 - [适用环境](#适用环境)
@@ -28,7 +30,7 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由包里的「补全组件.bat」在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，主要是：模拟器自己不往外发东西；强行结束不弄坏虚拟磁盘；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，只有 arm64 版本的《阴阳师》也能跑。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.36.0 构建禁用使用统计、崩溃上传、更新检查和特性开关下载；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
 版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.36.0`（构建号 mas-36）。
 
@@ -52,7 +54,7 @@
 1. 从 [Releases](../../releases) 下载 `ModAVD-0.36.0-win-x64.zip`。
 2. 右键「全部解压缩」（压缩包里没有外层文件夹，不要用「解压到当前文件夹」），把得到的文件夹放到一个只含英文、数字的路径，例如 `D:\ModAVD`。
 3. 双击文件夹里的「补全组件.bat」，同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。
-4. 在 AUTO-MAS 的「模拟器管理」里点「管理模拟器」→「添加魔改 AVD（内测）」，选这个文件夹，检查通过后添加。
+4. 在 AUTO-MAS 的「模拟器管理」里点「管理模拟器」→「添加魔改 AVD（内测）」，选这个文件夹，检查通过后添加；也可以直接用包里的 `ModAVD.exe` 或 `tools\modavd.exe` 指向这个根目录。
 
 详细步骤、开启虚拟化和常见问题见文档站的[安装](https://modavd.github.io/guide/install)。
 
@@ -88,10 +90,11 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ## 隐私
 
-- 模拟器程序自己不联网：不上传使用统计和崩溃报告，不检查更新，不下载特性开关。例外：带窗口运行时，如果打开扩展控制里的「位置」页，地图会访问 Google 地图服务。
+- 当前发布包中的模拟器程序不主动上传使用统计和崩溃报告，不检查更新，也不下载特性开关。例外：带窗口运行时，如果打开扩展控制里的「位置」页，地图会访问 Google 地图服务。
 - 安卓系统和里面的应用（游戏、Google Play 服务等）照常联网，这是它们自己的流量。
-- 崩溃转储只存在本机，不会上传。
+- 当前版本的崩溃转储留在本机，不由模拟器上传。
 - 「补全组件.bat」只在你运行时访问下载镜像；「收集问题信息.bat」只在本机打包，不上传。
+- 管理器和命令行的显式更新检查或下载属于用户触发的组件行为，不等同于模拟器自身的联网行为。
 
 详见文档站的[隐私](https://modavd.github.io/guide/privacy)。
 
@@ -104,11 +107,11 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ## English
 
-ModAVD is a modified build of the AOSP Android Emulator (37.2.10) for running unattended automation scripts on Windows. It is currently used through [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS). Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
+ModAVD is a modified build of the AOSP Android Emulator (37.2.10) for Windows, with a focus on unattended automation. It can be integrated with the independent [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) project, and the 0.36.0 package also includes a manager and CLI that can manage instances without AUTO-MAS. Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
 
-- The emulator itself does not contact servers on its own: no usage metrics, no crash report upload, no update check, no feature-flag download. Crash dumps stay on your machine. (The only exception is the map on the Location page of the extended controls, if you open it in windowed mode.) The Android system and its apps use the network as usual.
+- In the published 0.36.0 package, the emulator build disables usage-metrics upload, crash-report upload, update checks, and feature-flag downloads. Crash dumps stay on the host. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual. This describes the current release, not a permanent promise for future versions.
 - Requirements: Windows 10/11 64-bit, an x86_64 CPU with virtualization enabled, and the Windows Hypervisor Platform (WHPX) feature.
-- Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then add the folder in AUTO-MAS.
+- Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then either add the folder in AUTO-MAS or point the bundled manager/CLI at it.
 - Licenses: everything in this repository except `package/`, `bridge/`, `assets/` and the `.patch` files under `patches/` (README and the other documents, `docs/`, `scripts/`, `.github/`, ...) is Apache-2.0 (root `LICENSE`). From 0.36.0, ModAVD's own programs are AGPL-3.0-or-later: the bundled scripts in `package/` (full text in `package/LICENSE`; the scripts in 0.35.0 and earlier packages are Apache-2.0), the arm64 execution bridge in `bridge/` (full text in `bridge/LICENSE`), the manager and CLI (repository ModAVD/ModAVDManager) and the host IME (repository ModAVD/ModAVDHostIME); from 0.36.0 the source bundle also has their code in `modavd-src-<commit>.tar.xz`, with `LICENSE` and `NOTICE`. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
 - Icon and artwork: the images under `assets/` and the program icon built into the binaries are fan art of Eyjafjalla from Arknights (character © Shanghai Hypergryph). They are not covered by the Apache License 2.0 of this repository or by any other license here. This project is not affiliated with or endorsed by Hypergryph.
 - Feedback: open an issue. Do not attach crash dumps (the `crash` folder of the problem report) to public issues; send them by e-mail to qiyinxi@foxmail.com with the issue number.
