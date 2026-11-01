@@ -1,0 +1,109 @@
+===========================================================
+Notices for file(s):
+./resources/modavd/libmodavd_bridge.so
+./resources/modavd/libmodavd_gate.so
+./resources/modavd/modavd_bridge.rc
+The notices is included for the library: ModAVD arm64 execution bridge
+
+===========================================================
+[ModAVD]
+The arm64 execution bridge that tools\modavd-bridge.ps1 installs into an
+instance: a native bridge entry shim (libmodavd_bridge.so), its companion
+library (libmodavd_gate.so) and an init script (modavd_bridge.rc), written
+by the ModAVD project. libmodavd_gate.so is statically linked with the
+Android NDK's LLVM libc++ and libc++abi, which are licensed under the Apache
+License 2.0 with LLVM Exceptions (https://llvm.org/LICENSE.txt); the
+exception allows those portions to be redistributed in object form without
+the notices the License would otherwise require. Source code:
+https://github.com/ModAVD/ModAVD/tree/main/bridge; the source of this build
+is ModAVD/bridge in modavd-src.tar.xz, in the sources ZIP of the same GitHub
+Release.
+
+Copyright 2026 qiyinxi
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program (LICENSES\AGPL-3.0.txt). If not, see
+<https://www.gnu.org/licenses/>.
+
+===========================================================
+Notices for file(s):
+(package root) ModAVD.exe
+(package root) tools/modavd.exe
+The notices is included for the library: ModAVD manager and command line (modavd)
+
+===========================================================
+[ModAVD]
+ModAVD.exe (the instance manager) and tools\modavd.exe (the command line and
+MCP server), written in Go by the ModAVD project. Both contain the Go runtime
+and standard library (see the next entry); the icon of ModAVD.exe is covered
+by "ModAVD program icon (fan art)" above. Source code:
+https://github.com/ModAVD/ModAVDManager; the source of this build is
+ModAVDManager in modavd-src.tar.xz, in the sources ZIP of the same GitHub
+Release.
+
+Copyright 2026 qiyinxi
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program (LICENSES\AGPL-3.0.txt). If not, see
+<https://www.gnu.org/licenses/>.
+
+===========================================================
+Notices for file(s):
+(package root) ModAVD.exe
+(package root) tools/modavd.exe
+The notices is included for the library: Go {{GO_VERSION}} (runtime and standard library)
+
+===========================================================
+[ModAVD]
+ModAVD.exe and tools\modavd.exe are statically linked with the runtime and
+standard library of the Go programming language {{GO_VERSION}}
+(https://go.dev/), including the golang.org/x packages vendored into it.
+
+Copyright 2009 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+

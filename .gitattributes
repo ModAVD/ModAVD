@@ -10,3 +10,7 @@ scripts/*.json text eol=lf
 package/** -text
 # 执行桥源码与源码包里的逐字节相同；modavd_bridge.rc 的 SHA-256 随每一版固定
 bridge/** -text
+
+tools/**/*.py text eol=lf
+# stage-payload.ps1 -UpdateSums 按 LF 写这份固定哈希，再按字节比有没有变
+tools/gate/payload.SHA256SUMS.txt text eol=lf

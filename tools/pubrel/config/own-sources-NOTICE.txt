@@ -1,0 +1,79 @@
+ModAVD's own source code (modavd-src)
+Copyright 2026 qiyinxi
+
+This archive holds the source code of ModAVD's own programs: each public
+repository exactly as published, at the version named in SOURCES.txt of the
+sources ZIP. Unless noted below, it is licensed under the GNU Affero General
+Public License, version 3 or (at your option) any later version
+(SPDX-License-Identifier: AGPL-3.0-or-later); the full text is in LICENSE.
+
+  ModAVDManager/   ModAVD.exe (manager) and tools\modavd.exe (command line,
+                   MCP server), written in Go.
+                   Public repository: https://github.com/ModAVD/ModAVDManager
+  ModAVDHostIME/   the host input method components\modavd-ime.apk
+                   (org.modavd.ime).
+                   Public repository: https://github.com/ModAVD/ModAVDHostIME
+  ModAVD/bridge/   the arm64 execution bridge in sdk\emulator\resources\modavd
+                   (libmodavd_bridge.so, libmodavd_gate.so, modavd_bridge.rc).
+                   Public: https://github.com/ModAVD/ModAVD/tree/main/bridge
+
+The scripts and batch files of the package (tools\*.ps1 and the .bat files at
+the package root) are also AGPL-3.0-or-later. They are shipped as source code,
+so they are not in this archive; public:
+https://github.com/ModAVD/ModAVD/tree/main/package
+
+Exceptions and third-party parts:
+
+  - ModAVDManager/internal/avd/testdata/instances_ref.py is copied from
+    AUTO-MAS (https://github.com/AUTO-MAS-Project/AUTO-MAS), copyright the
+    AUTO-MAS authors, licensed under AGPL-3.0-or-later. Only the tests run it;
+    it is not built into ModAVD.exe or modavd.exe.
+  - The icons ModAVDManager/cmd/modavd-gui/modavd.ico, rsrc_windows_amd64.syso
+    (the same icon as a Windows resource) and the images in
+    ModAVDManager/internal/ui/web/assets/ are fan art of Eyjafjalla from
+    Arknights; the character is copyright Shanghai Hypergryph Network
+    Technology Co., Ltd. They are not covered by the AGPL or any other license
+    here, and no license to them is granted. ModAVD is not affiliated with or
+    endorsed by Hypergryph.
+  - ModAVD/bridge/nbshim/jni/native_bridge_shim.cc declares the
+    NativeBridgeCallbacks structure following AOSP libnativebridge's
+    native_bridge.h (Apache License 2.0), so that libnativebridge and the
+    translator recognize it.
+  - libmodavd_gate.so (ModAVD/bridge/companion/jni) is statically linked with
+    the Android NDK's LLVM libc++ and libc++abi (Apache-2.0 WITH
+    LLVM-exception, https://llvm.org/LICENSE.txt). ModAVD.exe and
+    tools\modavd.exe contain the Go runtime and standard library
+    (BSD-3-Clause, https://go.dev/LICENSE). Neither is in this archive.
+
+-------------------------------------------------------------------------------
+
+ModAVD 自己的源码（modavd-src）
+Copyright 2026 qiyinxi
+
+本归档是 ModAVD 自己的程序的源码：各公开仓库的原样归档，版本见源码总包里 SOURCES.txt
+所写的那个。除下面另有说明的以外，按 GNU Affero General Public License 第 3 版或
+（由你选择）任何更新的版本授权（AGPL-3.0-or-later），全文见 LICENSE。
+
+  ModAVDManager/   管理器 ModAVD.exe 和命令行 tools\modavd.exe（含 MCP 服务器），Go 编写。
+                   公开仓库：https://github.com/ModAVD/ModAVDManager
+  ModAVDHostIME/   宿主输入法 components\modavd-ime.apk（org.modavd.ime）。
+                   公开仓库：https://github.com/ModAVD/ModAVDHostIME
+  ModAVD/bridge/   sdk\emulator\resources\modavd 里的 arm64 执行桥。
+                   公开位置：https://github.com/ModAVD/ModAVD/tree/main/bridge
+
+包里的脚本和批处理文件（tools\*.ps1 和包根的 .bat）也按 AGPL-3.0-or-later 发布。
+它们本身就是源码，随包原样发出，所以不在本归档里；公开位置：
+https://github.com/ModAVD/ModAVD/tree/main/package
+
+例外和第三方部分：
+
+  - ModAVDManager/internal/avd/testdata/instances_ref.py 复制自 AUTO-MAS，版权归
+    AUTO-MAS 的作者，按 AGPL-3.0-or-later 许可；只供测试运行，不编进程序。
+  - 管理器的图标（modavd.ico、rsrc_windows_amd64.syso 和 internal/ui/web/assets/
+    下的图片）是《明日方舟》艾雅法拉的同人创作，角色版权归上海鹰角网络所有，不在
+    AGPL 或这里任何其他许可证的范围内，也不授予任何许可。本项目与鹰角网络无关。
+  - native_bridge_shim.cc 里的 NativeBridgeCallbacks 结构体按 AOSP libnativebridge
+    的 native_bridge.h（Apache License 2.0）的布局声明。
+  - libmodavd_gate.so 静态链接 NDK 的 LLVM libc++ / libc++abi（Apache-2.0 WITH
+    LLVM-exception）；两个 Go 程序含 Go 运行时和标准库（BSD-3-Clause）。它们都不在
+    本归档里。
