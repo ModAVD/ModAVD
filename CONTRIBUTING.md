@@ -23,8 +23,8 @@
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
 - 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。
 - `patches/`、`manifests/`、`release/` 是发版工具（`tools/pubrel/`）导出的：PR 不直接改这些，有问题先开 issue。
-- 发版、编译和回归工具 `tools/`，以及 CI 检查 `scripts/`（发版工具也用这一份）：改动先开 issue 商量。本机路径不写进仓库，用参数或本机配置，见 [tools/README.md](tools/README.md)；改了 `tools/pubrel/` 或 `scripts/` 要在本地跑 `python -I tools/pubrel/test_release.py --work <全新临时目录>`。
-- 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)：代码问题和 PR 提到那边。
+- 发版和编译工具 `tools/`，以及 CI 检查 `scripts/`（发版工具也用这一份）：改动先开 issue 商量。本机路径不写进仓库，用参数或本机配置，见 [tools/README.md](tools/README.md)；改了 `tools/pubrel/` 或 `scripts/` 要在本地跑 `python -I tools/pubrel/test_release.py --work <全新临时目录>`。
+- 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)，发版前回归（端到端测试）在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)：代码问题和 PR 提到那边。
 - 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。
 - CI 绿灯只表示该仓库已经声明的静态、构建或协议检查通过，不代表完成了完整编译、Windows 实机启动、GPU 或游戏兼容性验证，也不代表 AUTO-MAS 全流程已经验证。
 - 跨仓库的协议、版本或整包集成改动，要在相关仓库分别说明基线、依赖和实际验证范围；一个仓库的 CI 结果不能代替另一个仓库的验证。
