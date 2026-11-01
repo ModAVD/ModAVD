@@ -25,6 +25,8 @@
 - `patches/`、`manifests/`、`release/` 是发版工具导出的，`scripts/` 和维护者本地的发版工具逐字节一致：PR 不直接改这些，有问题先开 issue。
 - 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)：代码问题和 PR 提到那边。
 - 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。
+- CI 绿灯只表示该仓库已经声明的静态、构建或协议检查通过，不代表完成了完整编译、Windows 实机启动、GPU 或游戏兼容性验证，也不代表 AUTO-MAS 全流程已经验证。
+- 跨仓库的协议、版本或整包集成改动，要在相关仓库分别说明基线、依赖和实际验证范围；一个仓库的 CI 结果不能代替另一个仓库的验证。
 - 不收编译 CI：源码加编译产物约 124 GB，GitHub 的免费机器跑不了；自托管 runner 又会让外部 PR 在那台机器上执行任意命令（见 #5）。
 
 ## 署名与许可
@@ -32,7 +34,7 @@
 - 从自己的 fork 开 PR。外部 PR 的 CI 要维护者批准后才会跑。
 - 署你自己的名字或化名，邮箱用 GitHub 的 noreply 地址（`<编号>+<登录名>@users.noreply.github.com`）；不写 `Co-authored-by`。收进来后保留你的署名，发版说明里会致谢。
 - 你的改动按所改文件的许可证进来，见 README 的[许可证与源码](README.md#许可证与源码)；新文件的版权行写你的名字或化名。不用签 CLA，`Signed-off-by` 可加可不加。
-- 可以用 AI 工具，但改动要让 AI 自己测过（编译、跑测试，能开实例的就开实例看结果），在 PR 里写明测了什么，你为它负责。
+- 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。
 - 通用的修复以后可能投到 Google 上游（AOSP、google/gfxstream），上游要求作者本人签 Google CLA。到时会先问你，不愿意就只留在 ModAVD。
 - 图片、图标类改动先开 issue，写明来源和许可证；同人图和来源说不清的图不收。
 
