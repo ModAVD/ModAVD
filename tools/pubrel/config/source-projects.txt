@@ -1,0 +1,26 @@
+# 源码包要带的 repo 项目：sdk-mas29 里我们编的二进制，其 PDB 引用到源文件的全部项目（pdb-sources.csv）。
+# 构建脚本在 external/qemu（android/build、CMakeLists）。
+external/qemu
+hardware/google/gfxstream
+hardware/google/aemu
+external/crashpad
+external/glib
+external/dtc
+external/libusb
+device/google/cuttlefish
+external/abseil-cpp
+external/boringssl
+external/cares
+external/curl
+external/google-breakpad
+external/grpc
+external/libpng
+external/lz4
+external/perfetto
+external/protobuf
+external/regex-re2
+external/tink
+external/tinyobjloader
+external/webrtc
+external/wpa_supplicant_8
+external/zlib

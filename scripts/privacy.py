@@ -13,35 +13,47 @@ import subprocess
 import sys
 import tarfile
 
-# Only generic rules live in this file, because it is copied into the public
-# repository. Rules that name private identifiers (real name, private email,
-# hostname, local directories) sit in privacy-private-rules.json next to it,
-# which stays in the maintainer repository: public CI runs without them, and
-# the release entry point refuses to scan unless they were loaded.
+# Only generic rules live in this file. Rules that name private identifiers
+# (real name, private email, hostname, local directories) sit in a
+# privacy-private-rules.json that never enters this repository: the maintainer
+# points MODAVD_PRIVATE_RULES (or --private-rules, or use_rules()) at it.
+# Public CI runs without them; the release entry point refuses to scan unless
+# they were loaded.
 PUBLIC_RULES = {
     # name: (pattern, UTF-16 prefilter prefixes)
     "user-path": (r"[a-z]:[\\/]+Users[\\/]+[^\\/\s\"'<>|]+", ["Users"]),
 }
-PRIVATE_RULES_FILE = Path(__file__).with_name("privacy-private-rules.json")
+PRIVATE_RULES_ENV = "MODAVD_PRIVATE_RULES"
 
 
-def load_rule_specs(private_file=PRIVATE_RULES_FILE):
+def load_rule_specs(private_file):
+    """The public rules plus those in `private_file` (None: public rules only). A named file must exist."""
     specs = dict(PUBLIC_RULES)
-    loaded = private_file.exists()
-    if loaded:
-        for name, spec in json.loads(private_file.read_text(encoding="utf-8"))["rules"].items():
-            specs[name] = (spec["pattern"], spec["prefixes"])
-    return specs, loaded
+    if private_file is None:
+        return specs, False
+    private_file = Path(private_file)
+    if not private_file.is_file():
+        raise FileNotFoundError(f"Private privacy rules not found: {private_file}")
+    for name, spec in json.loads(private_file.read_text(encoding="utf-8"))["rules"].items():
+        specs[name] = (spec["pattern"], spec["prefixes"])
+    return specs, True
 
 
-RULE_SPECS, PRIVATE_RULES_LOADED = load_rule_specs()
-RULES = {name: re.compile(pattern, re.I) for name, (pattern, _) in RULE_SPECS.items()}
-ANY_RULE = re.compile("|".join(rx.pattern for rx in RULES.values()), re.I)
-ASCII_CANDIDATE = re.compile(ANY_RULE.pattern.encode("ascii"), re.I)
-# UTF-16 prefix prefilter; full matching still uses RULES on decoded printable strings.
-PREFIXES = [prefix for _, prefixes in RULE_SPECS.values() for prefix in prefixes]
-U16_CANDIDATE = re.compile(b"|".join(re.escape(s.encode("utf-16le")) for s in PREFIXES), re.I)
-NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["ascii", "utf-16le"]]
+def use_rules(private_file):
+    """Build the matchers from the public rules plus `private_file` (None: public rules only)."""
+    global RULE_SPECS, PRIVATE_RULES_LOADED, PRIVATE_RULES_FILE, RULES, ANY_RULE, ASCII_CANDIDATE, U16_CANDIDATE, NEEDLES
+    RULE_SPECS, PRIVATE_RULES_LOADED = load_rule_specs(private_file)
+    PRIVATE_RULES_FILE = Path(private_file) if private_file is not None else None
+    RULES = {name: re.compile(pattern, re.I) for name, (pattern, _) in RULE_SPECS.items()}
+    ANY_RULE = re.compile("|".join(rx.pattern for rx in RULES.values()), re.I)
+    ASCII_CANDIDATE = re.compile(ANY_RULE.pattern.encode("ascii"), re.I)
+    # UTF-16 prefix prefilter; full matching still uses RULES on decoded printable strings.
+    PREFIXES = [prefix for _, prefixes in RULE_SPECS.values() for prefix in prefixes]
+    U16_CANDIDATE = re.compile(b"|".join(re.escape(s.encode("utf-16le")) for s in PREFIXES), re.I)
+    NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["ascii", "utf-16le"]]
+
+
+use_rules(os.environ.get(PRIVATE_RULES_ENV) or None)
 
 
 def strings(data):
@@ -124,14 +136,18 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("--allowlist", type=Path, default=Path(__file__).with_name("privacy-allowlist.json"))
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--private-rules", type=Path, help=f"private rules file (default: ${PRIVATE_RULES_ENV}, else none)")
     args = parser.parse_args()
+    if args.private_rules:
+        use_rules(args.private_rules)
     # CI scans tracked repository files, never .git internals or arbitrary local artifacts.
     names = subprocess.check_output(["git", "-C", str(args.root), "ls-files", "-z"]).decode("utf-8").split("\0")
     files = [(args.root / name, name) for name in names if name]
     report = scan_files(files, args.allowlist)
     if args.report:
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"Privacy: {report['files_scanned']} files; {len(report['allowed'])} allowed; {len(report['failures'])} failures")
+    private = f"private rules {PRIVATE_RULES_FILE}" if PRIVATE_RULES_LOADED else "public rules only"
+    print(f"Privacy: {report['files_scanned']} files; {len(report['allowed'])} allowed; {len(report['failures'])} failures ({private})")
     for item in report["failures"][:20]:
         print(f"  {item['file']}: {item['rule']}: {item['sample'][:120]}")
     return bool(report["failures"])

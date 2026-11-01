@@ -1,0 +1,4 @@
+# 本机配置（照 tools/local.example.psd1 写）和维护者的私有隐私规则只在本机，不进仓库
+tools/local.psd1
+privacy-private-rules.json
+__pycache__/

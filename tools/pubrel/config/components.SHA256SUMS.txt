@@ -1,0 +1,2 @@
+f67124dad5009016dd1fce379d79b20ea93a46cefb5759002f3fa149d50b018f  components/de.jrpie.android.launcher_57.apk
+912c9c9724e63fa606fa5d4e4212cef0e24148b013923ba49d1ebf8cfd38e0e2  components/modavd-ime.apk

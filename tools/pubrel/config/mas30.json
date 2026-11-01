@@ -1,0 +1,27 @@
+{
+  "build": "mas30",
+  "series": [
+    {
+      "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
+      "dir": "qemu/fixq30",
+      "head": "5aedc70819651ef386cef810afa6c2be3c028467",
+      "repo": "external/qemu",
+      "upstream": "platform/external/qemu"
+    },
+    {
+      "base": "04d0287b04f72d908c621a919fa2ea5c563b1a66",
+      "dir": "gfxstream/fixq28",
+      "head": "d027890c4799a8537ce1e981fec784a99a269ade",
+      "repo": "hardware/google/gfxstream",
+      "upstream": "platform/hardware/google/gfxstream"
+    },
+    {
+      "base": "dd7db6790d73210abaef36a04f2a2bd52cf22b89",
+      "dir": "crashpad/module-version22",
+      "head": "377d2d398368c38d43f4ecbca084c89a68c10530",
+      "repo": "external/crashpad",
+      "upstream": "platform/external/crashpad"
+    }
+  ],
+  "changes": "首个公开版本 mas-30 的框架复现验收；完整变更见已发布版本说明。"
+}
