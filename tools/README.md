@@ -7,6 +7,7 @@
 | [`build/`](build/) | `build-sdk.ps1`：从 AOSP 模拟器源码树增量编出 `sdk-masN`，记下编译时各仓库的提交，放进执行桥载荷 |
 | [`gate/`](gate/README.md) | `stage-payload.ps1`：核对 arm64 执行桥三个载荷文件的固定哈希，放进 SDK 树 |
 | [`pubrel/`](pubrel/README.md) | `release.ps1`：组包、导出并回放补丁、源码包、Release 说明、隐私扫描，可选创建 GitHub 草稿 |
+| [`regress/`](regress/README.md) | `regress.ps1`：发版前回归的运行器，按套件一项一项跑、限时、判通过，写出可以贴进 Release 说明的结果表 |
 
 CI 用的检查（`checks.py`、`privacy.py`、白名单）在仓库的 [`scripts/`](../scripts/)，发版工具直接用那一份。
 发版的检查清单见 [RELEASING.md](../RELEASING.md)。

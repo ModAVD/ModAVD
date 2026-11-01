@@ -36,4 +36,39 @@
     # 不给 GatePayload 时两个 .so 各自的位置；空着就是 bridge\scripts 编出来的默认位置（%TEMP%\modavd-nbbridge\……）
     BridgeSo       = ''
     GateSo         = ''
+
+    # ---- 发版前回归（tools\regress；套件里用 {Local:<键名>} 引用，各键的用处见 tools\regress\README.md）
+    # 回归输出默认在 <TempRoot>\regress-*；测试机和驱动都在仓库外，没配的项不跑
+    Regress = @{
+        # 放着 tools\modavd.exe 和 ModAVD.exe 的目录（ModAVDManager 的 build.ps1 -Out，或解开的 Release 包）
+        Manager      = ''
+        # 测试用的 ModAVD 根目录（私有 adb 端口；0 号已装桥、登着测试号）
+        TestRoot     = ''
+        # 上一个生产版的组包目录（升级项的起点）
+        PrevPackage  = ''
+        # 官方 SDK（platform-tools、system-images）
+        OfficialSdk  = ''
+        # 启动器 avd-p0.ps1、采样脚本 emu_monitor.py、客体 Vulkan 修复库
+        Launcher     = ''
+        Monitor      = ''
+        VulkanFixLib = ''
+        # 游戏实例、星铁实例、输入法冒烟机的 ANDROID_AVD_HOME
+        GameAvdHome  = ''
+        SrAvdHome    = ''
+        ImeAvdHome   = ''
+        # 各游戏的自动化驱动
+        Kit          = ''
+        SrcDir       = ''
+        SrcKit       = ''
+        MaaEndDir    = ''
+        MaaYYs       = ''
+        Coldprof     = ''
+        # 体检台 bench.ps1 和它用的截图垫片 dll
+        Bench        = ''
+        ShimDll      = ''
+        # 输入法测试 APK、开发签名的同一个输入法、Android build-tools 36.1.0
+        ImeTestApk   = ''
+        DevImeApk    = ''
+        BuildTools   = ''
+    }
 }
