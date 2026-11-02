@@ -41,14 +41,15 @@ $disabled = @('clean', 'removeleftover', 'prebuilts', 'ctest', 'emugentest', 'ge
 $buildArgs = @('android\build\python\cmake.py', '--out', (Join-Path $sourceRoot 'objs'), '--dist', (Join-Path $sourceRoot 'dist'))
 foreach ($task in $disabled) { $buildArgs += @('--task-disable', $task) }
 $stageGate = Join-Path $PSScriptRoot '..\gate\stage-payload.ps1'
-$gateArgs = if ($GatePayload) { @('-Payload', $GatePayload) } else { @() }
+# 用哈希表展开：数组展开时 '-Payload' 只是一个普通字符串，会按位置绑到 -Sdk 或 -Payload 上
+$gateArgs = if ($GatePayload) { @{ Payload = $GatePayload } } else { @{} }
 Write-Host "并行上限：$Jobs；工作目录：$qemu"
 Write-Host "$Python -I $helper snapshot --build $Build --emu-src $sourceRoot --snapshot $snapshot"
 Write-Host "CMAKE_BUILD_PARALLEL_LEVEL=$Jobs"
 Write-Host "$Python $($buildArgs -join ' ')"
 Write-Host "robocopy $distribution $target\emulator /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ"
 Write-Host "写 $target\emulator\source.properties：Pkg.BuildId=mas-$($Build.Substring(3))"
-Write-Host "放 arm64 执行桥载荷：$stageGate -Sdk $target $($gateArgs -join ' ')"
+Write-Host "放 arm64 执行桥载荷：$stageGate -Sdk $target$(if ($GatePayload) { " -Payload $GatePayload" })"
 Write-Host "保存源码提交快照：$target\build-info.json；日志：$logDir"
 # 载荷核对只读，放在 ShouldProcess 之前：-WhatIf 也要验一遍，免得编一个多小时之后才发现
 # 载荷没编或哈希没重新固定。对不上就直接 throw（见 tools\gate\README.md）。
