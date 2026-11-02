@@ -69,7 +69,7 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 
 ## 程序图标（同人创作）
 
-`emulator.exe`、`emulator-check.exe`、`qemu\windows-x86_64\qemu-system-x86_64.exe`、`qemu-system-x86_64-headless.exe` 里编进去的程序图标和窗口图标，是 ModAVD 换上的同人创作图像，画的是《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有。这些图像**不随 Apache-2.0、GPL 或本包里的任何其他许可证授权**。本项目与鹰角网络无关，也未获其认可。见 `NOTICE.txt` 第 2 部分「ModAVD program icon (fan art)」和仓库 README 的「图标与美术」。
+`emulator.exe`、`emulator-check.exe`、`qemu\windows-x86_64\qemu-system-x86_64.exe`、`qemu-system-x86_64-headless.exe` 里编进去的程序图标和窗口图标，是 ModAVD 换上的同人创作图像，画的是《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有。这些图像**不随 Apache-2.0、GPL 或本包里的任何其他许可证授权**。见 `NOTICE.txt` 第 2 部分「ModAVD program icon (fan art)」和仓库 README 的「图标与美术」。
 
 ## 包根目录的其他文件
 
