@@ -1,5 +1,9 @@
 # 参与 ModAVD
 
+**简体中文** | [English](CONTRIBUTING.en.md)
+
+<!-- CONTRIBUTING.md 和 CONTRIBUTING.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 完整的参与说明在文档站：**[参与开发](https://modavd.github.io/develop/)**。各部分要什么环境和硬件、怎么验证、用 AI 工具时选什么模型，见[分区一览和通用要求](https://modavd.github.io/develop/overview)；想让一个游戏跑起来，见[适配新游戏](https://modavd.github.io/develop/adapt-game)。
 
 下面是提 issue、PR 前最要紧的几条。
@@ -19,6 +23,7 @@
 ## 这个仓库里改什么
 
 - 文档：使用说明和开发说明都在文档站的仓库 [modavd.github.io](https://github.com/ModAVD/modavd.github.io)，每页底部有「在 GitHub 上改这一页」。本仓库的 README 写错了直接提 PR。
+- 中英两版：README 和这份说明都有中文（`README.md`、`CONTRIBUTING.md`）和英文（`README.en.md`、`CONTRIBUTING.en.md`）两份，逐节对应，中文是主语言。改了一份，就在同一个 PR 里把另一份也改了；只会写一种语言的，在 PR 里说一声，由维护者补上。文档站的英文页也是这样，见[文档和本站](https://modavd.github.io/develop/docs)。
 - 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
 - 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。

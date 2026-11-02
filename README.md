@@ -1,5 +1,9 @@
 # ModAVD（魔改 AVD）
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 ![ModAVD](assets/banner.png)
 
 基于 AOSP Android Emulator 37.2.10 的安卓模拟器，加了一批补丁后自己编译。目前支持 Windows，以后计划支持更多平台（见 [#27](https://github.com/ModAVD/ModAVD/issues/27)）。
@@ -18,7 +22,6 @@
 - [反馈](#反馈)
 - [隐私](#隐私)
 - [免责声明](#免责声明)
-- [English](#english)
 - [图标与美术](#图标与美术)
 
 ## 这是什么
@@ -101,18 +104,6 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 - Android 是 Google LLC 的商标。
 - 软件按「现状」提供，不提供任何担保，详见各许可证。
 - 用模拟器和脚本运行游戏是否符合游戏的用户协议，请自行判断。
-
-## English
-
-ModAVD is an Android emulator built from the AOSP Android Emulator (37.2.10) with its own patches. It currently runs on Windows; support for more platforms is planned ([#27](https://github.com/ModAVD/ModAVD/issues/27)). The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for creating and running instances, and automation tools such as [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) can drive it as well. Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
-
-- In the published 0.36.0 package, the emulator build does not upload usage metrics or crash reports to Google, does not check Google for updates, and does not download feature flags from Google. Crash dumps stay on the host and are not uploaded to Google. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual.
-- Requirements: Windows 10/11 64-bit, an x86_64 CPU with virtualization enabled, and the Windows Hypervisor Platform (WHPX) feature.
-- Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then either add the folder in AUTO-MAS or point the bundled manager/CLI at it.
-- Licenses: everything in this repository except `package/`, `bridge/`, `assets/` and the `.patch` files under `patches/` (README and the other documents, `docs/`, `scripts/`, the release and build tools in `tools/`, `.github/`, ...) is Apache-2.0 (root `LICENSE`), except files whose header names another license (`tools/gate/stage-payload.ps1` is AGPL-3.0-or-later). From 0.36.0, ModAVD's own programs are AGPL-3.0-or-later: the bundled scripts in `package/` (full text in `package/LICENSE`; the scripts in 0.35.0 and earlier packages are Apache-2.0), the arm64 execution bridge in `bridge/` (full text in `bridge/LICENSE`), the manager and CLI (repository ModAVD/ModAVDManager) and the host IME (repository ModAVD/ModAVDHostIME); from 0.36.0 the source bundle also has their code in `modavd-src-<commit>.tar.xz`, with `LICENSE` and `NOTICE`. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
-- Icon and artwork: the images under `assets/` and the program icon built into the binaries are fan art of Eyjafjalla from Arknights (character © Shanghai Hypergryph). They are not covered by the Apache License 2.0 of this repository or by any other license here.
-- Feedback: open an issue. Do not attach crash dumps (the `crash` folder of the problem report) to public issues; send them by e-mail to qiyinxi@foxmail.com with the issue number.
-- Android is a trademark of Google LLC.
 
 ## 图标与美术
 
