@@ -35,7 +35,7 @@
 - 从自己的 fork 开 PR。外部 PR 的 CI 要维护者批准后才会跑。
 - 署你自己的名字或化名，邮箱用 GitHub 的 noreply 地址（`<编号>+<登录名>@users.noreply.github.com`）；不写 `Co-authored-by`。收进来后保留你的署名，发版说明里会致谢。
 - 你的改动按所改文件的许可证进来，见 README 的[许可证与源码](README.md#许可证与源码)；新文件的版权行写你的名字或化名。不用签 CLA，`Signed-off-by` 可加可不加。
-- 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。
+- 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。给 AI 工具看的规矩在仓库根目录的 [AGENTS.md](AGENTS.md)，Codex、Claude Code 等会自己读。
 - 通用的修复以后可能投到 Google 上游（AOSP、google/gfxstream），上游要求作者本人签 Google CLA。到时会先问你，不愿意就只留在 ModAVD。
 - 图片、图标类改动先开 issue，写明来源和许可证；同人图和来源说不清的图不收。
 
