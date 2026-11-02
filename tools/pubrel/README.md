@@ -52,7 +52,7 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 - `config/changes.md`：`## 怎么更新`、`## AUTO-MAS 版本`、`## 已知问题`、`## 发布前回归` 四节，一节都不能少，不能留「发布前填写」占位。
 - `config/changelog.json`：在最前面加本版一条，`{"version": "v0.34.0", "build": 34, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`。分类只用 `新增`、`变更`、`修复`、`移除`、`说明`；条目一行一句，不能有 `--`。公告的「更新内容」就是本版这条按分类排出来的；第一行机读注释带最近 10 版，给 AUTO-MAS 跳版本时合并显示。`v0.32.0` 一条是 mas32 的补记。
 
-再检查本次 NOTICE、组件来源和许可证；运行本机回归（`tools/regress`）。
+再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果表贴进 `config/changes.md` 的「发布前回归」。
 
 ```powershell
 pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk>

@@ -1,6 +1,6 @@
 # ModAVD 发版检查清单
 
-构建、包装和回归入口在本仓库的 [`tools/`](tools/README.md)：`tools/build/build-sdk.ps1`、`tools/pubrel/release.ps1`（说明见 [tools/pubrel/README.md](tools/pubrel/README.md)）。
+构建和包装入口在本仓库的 [`tools/`](tools/README.md)：`tools/build/build-sdk.ps1`、`tools/pubrel/release.ps1`（说明见 [tools/pubrel/README.md](tools/pubrel/README.md)）；发版前回归在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)。
 本机路径（源码树、临时目录、外部输入）用参数或本机配置给，见 [tools/README.md](tools/README.md)「本机配置」；外部构建方法见文档站的[从源码构建](https://modavd.github.io/develop/build)。
 
 ## 版本号
@@ -14,7 +14,7 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 - [ ] 确定构建号、已提交的待编译源码、对应 manifest、补丁基准及第三方组件来源。更新许可证声明。
 - [ ] 先预览构建命令，再另行安排实际构建：`pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build mas34 -WhatIf`。实际构建去掉 `-WhatIf`，并行度最多 16；目标 SDK 已存在时停止。
 - [ ] 确认 SDK 中 `source.properties` 的 `Pkg.BuildId=mas-34`，并保留构建入口生成的 `build-info.json`。
-- [ ] **在本机跑回归**：启动/关机、WHPX、GLES/GuestAngle、MAA/MaaFW 共享内存截图与点击、已有游戏及相关修复；记录结果。计划内关闭实例先执行 `adb -P <独立端口> -s emulator-<实例端口> shell sync`，再 `emu kill`。
+- [ ] **在测试机上跑回归**：启动/关机、WHPX、GLES/GuestAngle、MAA/MaaFW 共享内存截图与点击、已有游戏及相关修复；记录结果。运行器和套件在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)，改了什么跑什么（`-Scope`），先 `-DryRun` 看会跑哪些项；结果表 `results.md` 直接贴进 `changes.md` 的「发布前回归」。计划内关闭实例先执行 `adb -P <独立端口> -s emulator-<实例端口> shell sync`，再 `emu kill`。
 - [ ] 回归跑完后填写 `tools/pubrel/config/changes.md`（怎么更新、AUTO-MAS 版本、已知问题、发布前回归四节）和 `tools/pubrel/config/changelog.json`（最前面加本版一条：最低 AUTO-MAS 版本和按分类的一句话改动）。
 - [ ] Release 说明的「已知问题」**每条对应一个本仓库 issue，并在说明中链接过去**；新增问题先建 issue。mas30 已对应 [#1](https://github.com/ModAVD/ModAVD/issues/1)、[#2](https://github.com/ModAVD/ModAVD/issues/2)、[#3](https://github.com/ModAVD/ModAVD/issues/3)、[#4](https://github.com/ModAVD/ModAVD/issues/4)。
 
