@@ -2,14 +2,12 @@
 
 ![ModAVD](assets/banner.png)
 
-面向 Windows、重点优化无人值守自动化的安卓模拟器，也可以由管理器或命令行独立管理。基于 AOSP Android Emulator 37.2.10，加了一批补丁后自己编译。
+基于 AOSP Android Emulator 37.2.10 的安卓模拟器，加了一批补丁后自己编译。目前支持 Windows，以后计划支持更多平台（见 [#27](https://github.com/ModAVD/ModAVD/issues/27)）。
 
-可以与独立的 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 项目集成，由它负责实例编排、脚本和任务流程；0.36.0 起包里另带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`，也可以不经 AUTO-MAS 管理实例。
+包里带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`，用来建实例、开机关机；也可以接入 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 这类自动化工具，由它们负责实例编排和任务流程。
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
-> 这是非官方项目，与 Google 没有关联。
->
 > **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.36.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
 
 - [这是什么](#这是什么)
@@ -25,8 +23,8 @@
 
 ## 这是什么
 
-- 一个跑在 Windows 上的安卓模拟器，用 Windows 虚拟机监控程序平台（WHPX）做硬件加速。
-- 面向无人值守的挂机：通常不开窗口（无头）运行，由脚本拉起、跑完关掉；需要看画面或手动登录游戏时，也可以带窗口启动。
+- 一个安卓模拟器，现在跑在 Windows 上，用 Windows 虚拟机监控程序平台（WHPX）做硬件加速；以后计划支持更多平台。
+- 可以开窗口当普通模拟器用，也可以不开窗口（无头）运行，由管理器、命令行或脚本拉起、用完关掉。
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由包里的「补全组件.bat」在你的电脑上从官方渠道下载。
 
@@ -100,22 +98,21 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ## 免责声明
 
-- 本项目是非官方项目，与 Google LLC 没有关联，也没有得到 Google 的认可或支持。
 - Android 是 Google LLC 的商标。
 - 软件按「现状」提供，不提供任何担保，详见各许可证。
 - 用模拟器和脚本运行游戏是否符合游戏的用户协议，请自行判断。
 
 ## English
 
-ModAVD is a modified build of the AOSP Android Emulator (37.2.10) for Windows, with a focus on unattended automation. It can be integrated with the independent [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) project, and the 0.36.0 package also includes a manager and CLI that can manage instances without AUTO-MAS. Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
+ModAVD is an Android emulator built from the AOSP Android Emulator (37.2.10) with its own patches. It currently runs on Windows; support for more platforms is planned ([#27](https://github.com/ModAVD/ModAVD/issues/27)). The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for creating and running instances, and automation tools such as [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) can drive it as well. Documentation (mostly Chinese, with an English summary): <https://modavd.github.io/en/>.
 
-- In the published 0.36.0 package, the emulator build does not upload usage metrics or crash reports to Google, does not check Google for updates, and does not download feature flags from Google. Crash dumps stay on the host and are not uploaded to Google. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual. This describes the current release, not a permanent promise for future versions.
+- In the published 0.36.0 package, the emulator build does not upload usage metrics or crash reports to Google, does not check Google for updates, and does not download feature flags from Google. Crash dumps stay on the host and are not uploaded to Google. The Location page of the extended controls can still load Google Maps when opened in windowed mode. The Android system and its apps use the network as usual.
 - Requirements: Windows 10/11 64-bit, an x86_64 CPU with virtualization enabled, and the Windows Hypervisor Platform (WHPX) feature.
 - Install: download the release zip, extract it to a path with ASCII characters only, run `补全组件.bat` (it shows the Android SDK License Agreement and downloads adb and the Android 14 system image from Google's official channels after you accept), then either add the folder in AUTO-MAS or point the bundled manager/CLI at it.
 - Licenses: everything in this repository except `package/`, `bridge/`, `assets/` and the `.patch` files under `patches/` (README and the other documents, `docs/`, `scripts/`, the release and build tools in `tools/`, `.github/`, ...) is Apache-2.0 (root `LICENSE`), except files whose header names another license (`tools/gate/stage-payload.ps1` is AGPL-3.0-or-later). From 0.36.0, ModAVD's own programs are AGPL-3.0-or-later: the bundled scripts in `package/` (full text in `package/LICENSE`; the scripts in 0.35.0 and earlier packages are Apache-2.0), the arm64 execution bridge in `bridge/` (full text in `bridge/LICENSE`), the manager and CLI (repository ModAVD/ModAVDManager) and the host IME (repository ModAVD/ModAVDHostIME); from 0.36.0 the source bundle also has their code in `modavd-src-<commit>.tar.xz`, with `LICENSE` and `NOTICE`. Each patch is licensed like the files it changes: QEMU patches are GPL-2.0, except changes to files with an Apache-2.0 header, which are Apache-2.0 (see `patches/BASE.md`); gfxstream and Crashpad patches are Apache-2.0. The binaries contain third-party components listed in `LICENSES\NOTICE.txt`; the complete corresponding source code is attached to each release.
 - Icon and artwork: the images under `assets/` and the program icon built into the binaries are fan art of Eyjafjalla from Arknights (character © Shanghai Hypergryph). They are not covered by the Apache License 2.0 of this repository or by any other license here. This project is not affiliated with or endorsed by Hypergryph.
 - Feedback: open an issue. Do not attach crash dumps (the `crash` folder of the problem report) to public issues; send them by e-mail to qiyinxi@foxmail.com with the issue number.
-- This is an unofficial project, not affiliated with or endorsed by Google. Android is a trademark of Google LLC.
+- Android is a trademark of Google LLC.
 
 ## 图标与美术
 
