@@ -67,6 +67,29 @@ class ReleaseChecks(unittest.TestCase):
             self.assertEqual(release.inside(str(source).upper(), protected), str(source))
             self.assertTrue(release.inside(source, [source.anchor]))
 
+    def test_uncommitted_check_uses_the_checkouts_line_endings(self):
+        """A clone made with core.autocrlf=true has its text files in CRLF. Until its index is refreshed git compares
+        their content, and under GIT_ENV's core.autocrlf=false each of them would count as modified."""
+        root = self.folder()
+        notice_rel = "tools/pubrel/config/own-sources-NOTICE.txt"
+        self.commit_files(root / "pub", {notice_rel: b"line one\nline two\n", "package/LICENSE": b"text\n",
+                                         ".gitattributes": b"package/** -text\n"})
+        clone = root / "clone"
+        release.run("git", "-c", "core.autocrlf=true", "clone", "-q", "-c", "core.autocrlf=true", root / "pub", clone,
+                    env=release.STATUS_ENV)
+        notice = clone / notice_rel
+        self.assertIn(b"\r\n", notice.read_bytes())
+        # make git compare the content instead of trusting the index, as it does for a fresh clone
+        later = notice.stat().st_mtime + 60
+        os.utime(notice, (later, later))
+        self.assertTrue(release.git(clone, "status", "--porcelain", "--", notice_rel))
+        self.assertEqual(release.changed(clone, notice_rel, "package/LICENSE"), "")
+        # real changes are still reported
+        notice.write_bytes(notice.read_bytes() + b"more\r\n")
+        self.assertIn("own-sources-NOTICE.txt", release.changed(clone, notice_rel))
+        (clone / "package/new.ps1").write_bytes(b"x")
+        self.assertIn("package/new.ps1", release.changed(clone, "package"))
+
     def test_force_requires_exact_ownership(self):
         path = self.folder()
         args = SimpleNamespace(output=str(path), build="mas30")

@@ -98,10 +98,15 @@ PLACEHOLDER = "发布前填写"
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_COUNT="2",
                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false",
                GIT_CONFIG_KEY_1="core.longpaths", GIT_CONFIG_VALUE_1="true")
+# For "uncommitted changes?" only: the checkout's own line-ending settings. Under GIT_ENV's core.autocrlf=false a
+# text file checked out with CRLF (core.autocrlf=true) counts as modified whenever git compares its content, which it
+# does for every file of a fresh clone until the index is refreshed.
+STATUS_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_COUNT="1",
+                  GIT_CONFIG_KEY_0="core.longpaths", GIT_CONFIG_VALUE_0="true")
 
 
-def run(*args, cwd=None):
-    p = subprocess.run([str(a) for a in args], cwd=cwd, env=GIT_ENV,
+def run(*args, cwd=None, env=GIT_ENV):
+    p = subprocess.run([str(a) for a in args], cwd=cwd, env=env,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode:
         raise RuntimeError(f"{args[0]} failed ({p.returncode}): {p.stderr.decode('utf-8', 'replace')[-6000:]}")
@@ -110,6 +115,13 @@ def run(*args, cwd=None):
 
 def git(repo, *args):
     return run("git", "-C", repo, "--no-optional-locks", *args).decode("utf-8").strip()
+
+
+def changed(repo, *paths, untracked="all"):
+    """`git status --porcelain` of `paths` (all of `repo` without any), with the checkout's own settings: empty when
+    nothing there differs from HEAD."""
+    return run("git", "-C", repo, "--no-optional-locks", "status", "--porcelain", f"--untracked-files={untracked}",
+               "--", *paths, env=STATUS_ENV).decode("utf-8").strip()
 
 
 def sha(path):
@@ -291,7 +303,7 @@ def snapshot_data(args):
     manifest = ET.parse(MANIFEST_MAS30)
     for proj in manifest.getroot().findall("project"):
         repo = Path(args.emu_src) / safe_rel(proj.get("path"))
-        if git(repo, "status", "--porcelain", "--untracked-files=no"):
+        if changed(repo, untracked="no"):
             raise RuntimeError(f"Tracked source changes must be committed before building: {proj.get('path')}")
         proj.set("revision", git(repo, "rev-parse", "HEAD"))
     data["build"] = args.build
@@ -375,7 +387,7 @@ def preflight(args):
         if f"(package root) {rel}" not in notice:
             raise ValueError(f"LICENSES/NOTICE.txt has no entry for {rel}")
     # modavd-src takes LICENSE and NOTICE from HEAD
-    if git(REPO, "status", "--porcelain", "--untracked-files=all", "--", *OWN_SOURCES_ROOT.values()):
+    if changed(REPO, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = public_sources(args)
     print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, snapshot, baseline hashes, "
@@ -451,7 +463,7 @@ def public_sources(args):
     own = {"manager": manager_release(args.manager, args.manager_repo),
            "ime": ime_release(args.ime_apk, args.ime_repo) if getattr(args, "ime_apk", None) else None}
     repo = release_repository(args.repository, getattr(args, "protect", None))
-    if git(repo, "status", "--porcelain", "--untracked-files=all", "--", "package", "bridge"):
+    if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
     commit = git(repo, "rev-parse", "HEAD")
     for rel in [*("package/" + n for n in PACKAGE_TOOLS + PACKAGE_ROOT), "bridge/nbshim/modavd_bridge.rc"]:
@@ -938,7 +950,7 @@ def own_sources(out, dest, own):
     Reproducible: git archive stamps every entry with its commit time and fixed owner and modes, the root files get
     the newest of those commit times, the parts go in a fixed order, xz at a fixed preset."""
     repo = REPO
-    if git(repo, "status", "--porcelain", "--untracked-files=all", "--", *OWN_SOURCES_ROOT.values()):
+    if changed(repo, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; the source bundle takes them from HEAD")
     rev = git(repo, "rev-parse", "HEAD")
     parts = [("ModAVDManager", own["manager"]["repo"], own["manager"]["commit"], [])]
