@@ -31,7 +31,7 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由包里的「补全组件.bat」在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，已发布的 0.37.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.37.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服和《如鸢》国服（0.37.0 起）上实测，《阴阳师》的其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
 版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.37.0`（构建号 mas-37）。
 
