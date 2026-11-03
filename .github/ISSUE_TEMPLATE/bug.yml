@@ -1,0 +1,47 @@
+name: 报问题 / Report a problem
+description: 出了问题，或者和说明对不上。模拟器、管理器、宿主输入法、文档站的问题都在这里报。 / Something is broken or does not match the docs, in any component.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提之前先搜一下有没有人报过。哪些能公开贴、崩溃转储怎么私下发，见[反馈问题](https://modavd.github.io/guide/feedback)。安全问题不要公开发，请发邮件到 qiyinxi@foxmail.com。AUTO-MAS 的界面、任务、调度问题，请到 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS/issues) 提。
+
+        Search first in case someone has already reported it. What you may post publicly and how to send crash dumps privately is in [Report a problem](https://modavd.github.io/en/guide/feedback). Do not post security problems in public; e-mail them to qiyinxi@foxmail.com. For problems with AUTO-MAS's interface, tasks or scheduling, please go to [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS/issues).
+  - type: dropdown
+    id: component
+    attributes:
+      label: 哪个组件 / Component
+      description: 拿不准就选「不确定」。 / If you are not sure, pick "Not sure".
+      options:
+        - 模拟器本体（开机、画面、性能、游戏能不能跑） / The emulator itself
+        - 管理器和命令行（ModAVD.exe、tools\modavd.exe） / Manager and CLI
+        - 宿主输入法 / Host IME
+        - arm64 执行桥 / arm64 execution bridge
+        - 随包脚本（补全组件、收集问题信息、复制配置信息） / Bundled scripts
+        - 文档站 / Docs site
+        - 发版前回归（ModAVDE2E） / Pre-release regression (ModAVDE2E)
+        - 不确定 / Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: ModAVD 的版本，例如 0.37.0；单独下载的管理器写管理器的版本。 / The ModAVD version, for example 0.37.0; for a separately downloaded manager, the manager's version.
+  - type: textarea
+    id: what
+    attributes:
+      label: 出了什么问题 / What happened
+      description: 看到了什么，本来应该是什么样。 / What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 怎么复现 / How to reproduce
+      description: 一步一步写，每次都出还是偶尔出。 / Step by step; say whether it happens every time or only sometimes.
+  - type: textarea
+    id: report
+    attributes:
+      label: 问题包和日志 / Problem report and logs
+      description: 出问题后先别关模拟器，双击「收集问题信息.bat」生成问题包。公开贴只贴不含 crash 文件夹的部分，带崩溃转储的完整问题包请发邮件。 / Before closing the emulator, double-click 收集问题信息.bat to make a problem report. Post only the parts without the crash folder here; e-mail the full report with crash dumps.

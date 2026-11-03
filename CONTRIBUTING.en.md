@@ -16,7 +16,8 @@ What follows are the points that matter most before you open an issue or a PR.
 
 ## Reporting problems
 
-- Open an issue and attach the problem report made by `收集问题信息.bat` (collects a problem report). What you may post publicly and how to send crash dumps privately is in [Report a problem](https://modavd.github.io/en/guide/feedback).
+- Problems with every component go to this repository's [Issues](https://github.com/ModAVD/ModAVD/issues): the emulator itself, and also the manager and CLI, the host IME, the docs site and the pre-release regression. Pick the component when you open the issue.
+- Attach the problem report made by `收集问题信息.bat` (collects a problem report). What you may post publicly and how to send crash dumps privately is in [Report a problem](https://modavd.github.io/en/guide/feedback).
 - For problems with AUTO-MAS's interface, tasks or scheduling, please go to [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS/issues).
 - Do not post security problems in public; e-mail them to qiyinxi@foxmail.com.
 
@@ -29,7 +30,7 @@ What follows are the points that matter most before you open an issue or a PR.
 - Emulator patches: open an issue first, then export a `.patch` as described in [The emulator itself](https://modavd.github.io/en/develop/emulator) and attach it to the issue, or open a PR that only adds `incoming/<topic>/*.patch`. A patch should already be in the shape we will take: keep test scripts out of the patch itself (put them in the PR description, or in `incoming/<topic>/tests/`). Once reviewed it is merged, and merged means accepted: it ships unchanged with the next release, with your authorship kept. You do not have to be able to build or run the regression tests.
 - `patches/`, `manifests/` and `release/` are exported by the release tools (`tools/pubrel/`): PRs do not change them directly; if something is wrong, open an issue first.
 - The release and build tools in `tools/`, and the CI checks in `scripts/` (the release tools use them too): open an issue first. Do not write local paths into the repository; use arguments or the local configuration, see [tools/README.md](tools/README.md) (in Chinese). If you change `tools/pubrel/` or `scripts/`, run `python -I tools/pubrel/test_release.py --work <fresh temp dir>` locally.
-- The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME), and the pre-release regression (end-to-end tests) is in [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E): code issues and PRs for those go to those repositories.
+- The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME), and the pre-release regression (end-to-end tests) is in [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E): PRs for those go to those repositories, but issues still go here.
 - Adding or changing a workflow: pin third-party actions to a full 40-character commit SHA, do not use `pull_request_target`, and do not use self-hosted runners. `mirrorchyan_*.yml` is maintained by MirrorChyan and is kept as it is.
 - A green CI run only means that the static, build or protocol checks that repository declares have passed. It does not mean a full build, a Windows start on real hardware, GPU or game compatibility has been verified, and it does not mean the full AUTO-MAS flow has been verified.
 - Changes that cross repositories (protocol, version, or full-package integration) must state, in each repository involved, the baseline, the dependencies and what was actually verified. One repository's CI result cannot stand in for verification in another.
