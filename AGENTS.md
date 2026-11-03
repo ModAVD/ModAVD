@@ -10,7 +10,7 @@
   - `README.md` 和 `README.en.md`、`CONTRIBUTING.md` 和 `CONTRIBUTING.en.md` 是同一份文档的中文和英文，逐节对应：改一份就在同一个 PR 里改另一份，英文照意思写，不逐字硬译。
 - 先开 issue 商量再改的：arm64 执行桥 `bridge/`，发版和编译工具 `tools/`，CI 检查 `scripts/`。
 - 不直接改的：`patches/`、`manifests/`、`release/` 是发版工具导出的，有问题开 issue。
-- 管理器、命令行在 ModAVDManager，宿主输入法在 ModAVDHostIME，发版前回归在 ModAVDE2E，改那些去对应的仓库。
+- 管理器、命令行在 ModAVDManager，宿主输入法在 ModAVDHostIME，发版前回归在 ModAVDE2E，改那些去对应的仓库；issue 不分组件，都开在本仓库。
 - workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner；`mirrorchyan_*.yml` 照原样保留。
 - 本机路径不写进仓库，用参数或本机配置（见 `tools/README.md`）。
 

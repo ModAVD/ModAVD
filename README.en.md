@@ -80,7 +80,7 @@ Shut down all instances, wait about half a minute, then extract the new package 
 
 ## Feedback
 
-Open an issue in this repository's [Issues](../../issues). After a problem happens, do not close the emulator yet: double-click `收集问题信息.bat` in the folder (collects a problem report). It creates a problem report zip on your desktop.
+Open an issue in this repository's [Issues](../../issues); problems with the manager, the host IME and the docs site go here too. After a problem happens, do not close the emulator yet: double-click `收集问题信息.bat` in the folder (collects a problem report). It creates a problem report zip on your desktop.
 
 Issues are public and anyone can download attachments. The report contains logs and screenshots, and, if the emulator has crashed, crash dumps (the `crash` folder, which has local paths and your Windows user name):
 

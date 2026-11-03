@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: AUTO-MAS 的问题 / Problems with AUTO-MAS
+    url: https://github.com/AUTO-MAS-Project/AUTO-MAS/issues
+    about: AUTO-MAS 的界面、任务、调度问题，请到 AUTO-MAS 提。 / AUTO-MAS's interface, tasks and scheduling go to AUTO-MAS.
+  - name: 反馈前先看 / Before you report
+    url: https://modavd.github.io/guide/feedback
+    about: 问题包里哪些能公开贴，崩溃转储怎么私下发。 / What you may post publicly, and how to send crash dumps privately.

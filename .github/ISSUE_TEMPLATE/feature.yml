@@ -1,0 +1,29 @@
+name: 提建议 / Suggest a feature
+description: 想要新功能或改进，哪个组件都行。 / A new feature or an improvement, for any component.
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: 哪个组件 / Component
+      description: 拿不准就选「不确定」。 / If you are not sure, pick "Not sure".
+      options:
+        - 模拟器本体（开机、画面、性能、游戏能不能跑） / The emulator itself
+        - 管理器和命令行（ModAVD.exe、tools\modavd.exe） / Manager and CLI
+        - 宿主输入法 / Host IME
+        - arm64 执行桥 / arm64 execution bridge
+        - 随包脚本（补全组件、收集问题信息、复制配置信息） / Bundled scripts
+        - 文档站 / Docs site
+        - 发版前回归（ModAVDE2E） / Pre-release regression (ModAVDE2E)
+        - 不确定 / Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 想要什么 / What you would like
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么要，现在怎么凑合 / Why you need it, and what you do today
