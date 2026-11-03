@@ -5,6 +5,7 @@
     "min_automas": "5.7.0",
     "changes": {
       "新增": [
+        "《如鸢》国服（com.lingxigames.yuan.cn）能跑了：执行桥的名单加上了它，并且保护转译层自己发起的 vfork / clone，冷启动不再卡死。修复时在测试实例上连续冷启动 20 次都正常，MaaYuan 的日常任务也能跑；这一版的发布前回归没有单独测《如鸢》。（[#20](https://github.com/ModAVD/ModAVD/issues/20)、[#25](https://github.com/ModAVD/ModAVD/pull/25)）",
         "用管理器 ModAVD.exe 或命令行 tools\\modavd.exe 新建实例时，会在后台不弹窗口地开一次机，把首次设置、执行桥和宿主输入法都装好再正常关机，才算新建完成；之后第一次开机和平常一样快。新建过程中实例显示为「新建中」，带按实际做完的步骤算的百分比，AUTO-MAS 发起的新建在管理器里也看得到；中途失败的，在管理器里点「重试初始化」接着做完。",
         "管理器里的「开机」一律带窗口，去掉了「重启」和「显示窗口 / 隐藏窗口」；命令行去掉了 restart，改用先 stop 再 start。实例开着时不再切换有窗口 / 无窗口：命令行要的开机方式和它现在不一样时会报错，不再悄悄接管或重启。",
         "命令行 tools\\modavd.exe 多了 components（补全组件：下载 adb 和系统镜像）、collect-info（收集问题信息）、report-config（复制配置信息）三个命令，做的事和包里同名的 .bat 一样；还有 update，可以从 GitHub 或 Mirror 酱更新整个 ModAVD 包。"
