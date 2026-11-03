@@ -12,7 +12,7 @@
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
-> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.36.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
+> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.37.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
 
 - [这是什么](#这是什么)
 - [适用环境](#适用环境)
@@ -31,9 +31,9 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由包里的「补全组件.bat」在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，已发布的 0.36.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.37.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服上实测，其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
-版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.36.0`（构建号 mas-36）。
+版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.37.0`（构建号 mas-37）。
 
 这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)。
 
@@ -52,7 +52,7 @@
 
 ## 安装
 
-1. 从 [Releases](../../releases) 下载 `ModAVD-0.36.0-win-x64.zip`。
+1. 从 [Releases](../../releases) 下载 `ModAVD-0.37.0-win-x64.zip`。
 2. 右键「全部解压缩」（压缩包里没有外层文件夹，不要用「解压到当前文件夹」），把得到的文件夹放到一个只含英文、数字的路径，例如 `D:\ModAVD`。
 3. 双击文件夹里的「补全组件.bat」，同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。
 4. 在 AUTO-MAS 的「模拟器管理」里点「管理模拟器」→「添加魔改 AVD（内测）」，选这个文件夹，检查通过后添加；也可以直接用包里的 `ModAVD.exe` 或 `tools\modavd.exe` 指向这个根目录。
