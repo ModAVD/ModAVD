@@ -1,8 +1,8 @@
-From ce3e3e4a615f747a47277cdd1fd6577f0d927c97 Mon Sep 17 00:00:00 2001
+From 98879b3f8c0e4b1357d44b054bafe0b381561a99 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 08:16:14 +0800
-Subject: [PATCH] userdata: preserve ext4 and continue boot after conversion
- failure
+Subject: [PATCH 67/80] userdata: preserve ext4 and continue boot after
+ conversion failure
 
 Check both converter results and replace completed output atomically. Preserve the original ext4 on failure, and warn at both call sites while continuing boot. Based on the qemu/mas36 release sources.
 ---
@@ -10,7 +10,7 @@ Check both converter results and replace completed output atomically. Preserve t
  1 file changed, 58 insertions(+), 43 deletions(-)
 
 diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
-index 4157f34..646d0a0 100644
+index 4157f3439..646d0a098 100644
 --- a/android-qemu2-glue/main.cpp
 +++ b/android-qemu2-glue/main.cpp
 @@ -596,59 +596,68 @@ static bool growUserDataOverlay(const std::string& overlay, uint64_t newSize) {

@@ -1,0 +1,683 @@
+From 398ae7728c17284b1315db13116d0b87ec87ebdc Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 13:28:52 +0100
+Subject: [PATCH 71/80] MAS local: refine the lean window navigation layout
+
+Keep the lean toolbar as a hidden controller, build a fixed 54px navigation column in the right viewport margin, and preserve the native system-menu title bar flags across frame masking. Account for the column in guest sizing, zooming, geometry, and multi-display placement while keeping safe-shutdown feedback and modal parents on the container.
+
+Change-Id: I2a6c8e0f4b7d9e1c3a5f7b2d6e8c0a4f1b3d5e7
+---
+ .../android/skin/qt/emulator-container.cpp    |  27 +++-
+ .../src/android/skin/qt/emulator-container.h  |   1 +
+ .../android/skin/qt/emulator-qt-window.cpp    |  93 ++++++++---
+ .../src/android/skin/qt/emulator-qt-window.h  |   3 +-
+ .../src/android/skin/qt/tool-window.cpp       | 153 +++++++++++++++---
+ .../src/android/skin/qt/tool-window.h         |   8 +
+ 6 files changed, 233 insertions(+), 52 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 06678581f..6b95332fb 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -77,9 +77,10 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+ #ifdef __APPLE__
+     setWindowFlags(Qt::WindowTitleHint | Qt::Window);
+ #else
+-    const bool lean = qgetenv("ANDROID_EMU_FULL_TOOLBAR") != "1";
++    const bool lean = ToolWindow::inWindowNav();
+     setWindowFlags(Qt::WindowTitleHint | Qt::Window | Qt::CustomizeWindowHint |
+-                   (lean ? (Qt::WindowMinimizeButtonHint |
++                   (lean ? (Qt::WindowSystemMenuHint |
++                            Qt::WindowMinimizeButtonHint |
+                             Qt::WindowCloseButtonHint)
+                          : Qt::WindowFlags()));
+ #endif
+@@ -224,7 +225,7 @@ bool EmulatorContainer::event(QEvent* e) {
+ #endif
+             // clear() deallocates internal buffer, but we need it.
+             mEventBuffer.erase(mEventBuffer.begin(), mEventBuffer.end());
+-            mEmulatorWindow->doResize(this->size());
++            mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
+ 
+             // Kill the resize timer to avoid double resizes.
+             stopResizeTimer();
+@@ -341,6 +342,12 @@ void EmulatorContainer::closeEvent(QCloseEvent* event) {
+         return;
+     }
+ 
++    if (mEmulatorWindow->isMainThreadRunning() &&
++        mEmulatorWindow->safeShutdownInProgress()) {
++        mEmulatorWindow->closeEvent(event);
++        return;
++    }
++
+     slot_hideModalOverlay();
+     slot_hideVirtualSceneInfoDialog();
+     mEmulatorWindow->closeEvent(event);
+@@ -428,6 +435,14 @@ void EmulatorContainer::resizeEvent(QResizeEvent* event) {
+     }
+ }
+ 
++bool EmulatorContainer::viewportEvent(QEvent* event) {
++    const bool handled = QScrollArea::viewportEvent(event);
++    if (event->type() == QEvent::Resize) {
++        mEmulatorWindow->toolWindow()->dockMainWindow();
++    }
++    return handled;
++}
++
+ void EmulatorContainer::showEvent(QShowEvent* event) {
+ // Disable the minimize and maximize buttons on OSX. See the comment in the
+ // constructor for an explanation of why this is necessary.
+@@ -526,6 +541,10 @@ void EmulatorContainer::stopResizeTimer() {
+ QSize EmulatorContainer::viewportSize() const {
+     QSize output = this->size();
+ 
++    if (ToolWindow::inWindowNav()) {
++        output.rwidth() -= 54;
++    }
++
+     QScrollBar* vertical = this->verticalScrollBar();
+     output.setWidth(output.width() -
+                     (vertical->isVisible() ? vertical->width() : 0));
+@@ -570,7 +589,7 @@ void EmulatorContainer::slot_resizeDone() {
+     // are held down. If there are, then the user must not be done resizing
+     // yet.
+     if (numHeldMouseButtons() == 0) {
+-        mEmulatorWindow->doResize(this->size());
++        mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
+     } else {
+         startResizeTimer();
+     }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index 78ad98d60..baa3f73d3 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -62,6 +62,7 @@ public:
+     void moveEvent(QMoveEvent* event) override;
+     void resizeEvent(QResizeEvent* event) override;
+     void showEvent(QShowEvent* event) override;
++    bool viewportEvent(QEvent* event) override;
+ 
+     void show();
+     void showMinimized();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index f6a87dc79..8a51581f1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -746,6 +746,9 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+             FramelessDetector::isFramelessOk()
+                     ? settings.value(Ui::Settings::FRAME_ALWAYS, false).toBool()
+                     : true;
++    if (ToolWindow::inWindowNav()) {
++        mFrameAlways = true;
++    }
+     mPreviouslyFramed = mFrameAlways;
+ 
+     mToolWindow = new ToolWindow(this, &mContainer, mEventLogger,
+@@ -1447,9 +1450,15 @@ void EmulatorQtWindow::updateWindowTitle() {
+         QString title = QString("[Mouse captured, press %1 to release] %2")
+             .arg(releaseMouseShortcutName())
+             .arg(mBaseWindowTitle);
++        if (safeShutdownInProgress()) {
++            title += QString::fromUtf8("（正在关机…）");
++        }
+         mContainer.setWindowTitle(title);
+     } else {
+-        mContainer.setWindowTitle(mBaseWindowTitle);
++        mContainer.setWindowTitle(mBaseWindowTitle +
++                                  (safeShutdownInProgress()
++                                           ? QString::fromUtf8("（正在关机…）")
++                                           : QString()));
+     }
+ }
+ 
+@@ -1741,13 +1750,16 @@ void EmulatorQtWindow::maskWindowFrame() {
+     flags &= ~FRAME_WINDOW_FLAGS_MASK;
+     flags |= (haveFrame ? FRAMED_WINDOW_FLAGS : FRAMELESS_WINDOW_FLAGS);
+ #ifdef _WIN32
+-    if (mToolWindow && mToolWindow->isLeanToolbar() && haveFrame) {
+-        flags |= Qt::WindowMinimizeButtonHint | Qt::WindowCloseButtonHint;
++    if (ToolWindow::inWindowNav() && haveFrame) {
++        flags |= Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint |
++                 Qt::WindowCloseButtonHint;
+         flags &= ~Qt::WindowMaximizeButtonHint;
+     }
+ #endif
+ 
+-    mContainer.setWindowFlags(flags);
++    if (mContainer.windowFlags() != flags) {
++        mContainer.setWindowFlags(flags);
++    }
+ 
+     // Re-generate and apply the mask
+     if (haveFrame) {
+@@ -2590,6 +2602,9 @@ void EmulatorQtWindow::slot_setWindowPos(int x, int y, QSemaphore* semaphore) {
+ 
+ void EmulatorQtWindow::slot_setWindowSize(int w, int h, QSemaphore* semaphore) {
+     QSemaphoreReleaser semReleaser(semaphore);
++    if (ToolWindow::inWindowNav()) {
++        w += 54;
++    }
+     mContainer.resize(w, h);
+ }
+ 
+@@ -2670,16 +2685,18 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+     showNormal();
+     setFixedSize(rect.size());
+ 
+-    if (rect.width() < mContainer.minimumWidth() ||
++    const int guestMinimumWidth = mContainer.minimumWidth() -
++                                  (ToolWindow::inWindowNav() ? 54 : 0);
++    if (rect.width() < guestMinimumWidth ||
+         rect.height() < mContainer.minimumHeight()) {
+         // We're trying to go smaller than the container will allow.
+         // Increase our size to the container's minimum.
+         double horizIncreaseFactor =
+-                (double)(mContainer.minimumWidth()) / rect.width();
++                (double)guestMinimumWidth / rect.width();
+         double vertIncreaseFactor =
+                 (double)(mContainer.minimumHeight()) / rect.height();
+         if (horizIncreaseFactor > vertIncreaseFactor) {
+-            rect.setWidth(mContainer.minimumWidth());
++            rect.setWidth(guestMinimumWidth);
+             rect.setHeight((int)(horizIncreaseFactor * rect.height()));
+         } else {
+             rect.setWidth((int)(vertIncreaseFactor * rect.width()));
+@@ -2693,7 +2710,11 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+         mContainer.stopResizeTimer();
+         recenterFocusPoint();
+     } else if (!mNextIsZoom) {
+-        mContainer.resize(rect.size());
++        QSize containerSize = rect.size();
++        if (ToolWindow::inWindowNav()) {
++            containerSize.rwidth() += 54;
++        }
++        mContainer.resize(containerSize);
+     }
+     mNextIsZoom = false;
+ 
+@@ -2974,9 +2995,12 @@ void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
+         QRect screenDimensions;
+         slot_getScreenDimensions(&screenDimensions);
+ 
+-        if (newSize.width() > screenDimensions.width() ||
++        const int screenWidth = screenDimensions.width() -
++                                (ToolWindow::inWindowNav() ? 54 : 0);
++        if (newSize.width() > screenWidth ||
+             newSize.height() > screenDimensions.height()) {
+-            newSize.scale(screenDimensions.size(), Qt::KeepAspectRatio);
++            newSize.scale(QSize(screenWidth, screenDimensions.height()),
++                          Qt::KeepAspectRatio);
+         }
+     }
+ 
+@@ -3106,7 +3130,9 @@ void EmulatorQtWindow::resizeAndChangeAspectRatio(bool isFolded) {
+     simulateSetScale(std::max(.2, (double)scale));
+     QRect containerGeo = mContainer.geometry();
+     mContainer.setGeometry(containerGeo.x(), containerGeo.y(),
+-                           windowGeo.width(), windowGeo.height());
++                           windowGeo.width() +
++                                   (ToolWindow::inWindowNav() ? 54 : 0),
++                           windowGeo.height());
+ }
+ 
+ void EmulatorQtWindow::resizeAndChangeAspectRatio(int x,
+@@ -3141,7 +3167,9 @@ void EmulatorQtWindow::resizeAndChangeAspectRatio(int x,
+     simulateSetScale(std::max(.2, (double)scale));
+     QRect containerGeo = mContainer.geometry();
+     mContainer.setGeometry(containerGeo.x(), containerGeo.y(),
+-                           windowGeo.width(), windowGeo.height());
++                           windowGeo.width() +
++                                   (ToolWindow::inWindowNav() ? 54 : 0),
++                           windowGeo.height());
+ }
+ 
+ SkinMouseButtonType EmulatorQtWindow::getSkinMouseButton(
+@@ -4050,6 +4078,9 @@ bool EmulatorQtWindow::hasSkin() const {
+ }
+ 
+ bool EmulatorQtWindow::hasFrame() const {
++    if (ToolWindow::inWindowNav()) {
++        return true;
++    }
+     if (mFrameAlways || mInZoomMode) {
+         return true;
+     }
+@@ -4077,6 +4108,14 @@ EmulatorContainer* EmulatorQtWindow::containerWindow() {
+     return &mContainer;
+ }
+ 
++QSize EmulatorQtWindow::guestAreaSize() const {
++    QSize size = mContainer.size();
++    if (ToolWindow::inWindowNav()) {
++        size.rwidth() -= 54;
++    }
++    return size;
++}
++
+ void EmulatorQtWindow::showZoomIfNotUserHidden() {
+     if (!mOverlay.wasZoomUserHidden()) {
+         mOverlay.showForZoom();
+@@ -4104,19 +4143,20 @@ void EmulatorQtWindow::toggleZoomMode() {
+         mContainer.setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+         mContainer.setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+ 
+-        doResize(mContainer.size());
++        doResize(guestAreaSize());
+         mOverlay.hide();
+     } else {
+-        doResize(mContainer.size());
++        doResize(guestAreaSize());
+         mOverlay.showForZoom();
+     }
+     maskWindowFrame();
+ }
+ 
+ void EmulatorQtWindow::recenterFocusPoint() {
+-    mContainer.horizontalScrollBar()->setValue(mFocus.x() * width() -
++    const QSize viewport = mContainer.viewportSize();
++    mContainer.horizontalScrollBar()->setValue(mFocus.x() * viewport.width() -
+                                                mViewportFocus.x());
+-    mContainer.verticalScrollBar()->setValue(mFocus.y() * height() -
++    mContainer.verticalScrollBar()->setValue(mFocus.y() * viewport.height() -
+                                              mViewportFocus.y());
+ 
+     mFocus = QPointF();
+@@ -4136,20 +4176,21 @@ void EmulatorQtWindow::saveZoomPoints(const QPoint& focus,
+ }
+ 
+ void EmulatorQtWindow::scaleDown() {
+-    doResize(mContainer.size() / 1.1, true);
++    doResize(guestAreaSize() / 1.1, true);
+ }
+ 
+ void EmulatorQtWindow::scaleUp() {
+-    doResize(mContainer.size() * 1.1, true);
++    doResize(guestAreaSize() * 1.1, true);
+ }
+ 
+ void EmulatorQtWindow::fixScale() {
+-    doResize(mContainer.size(), true);
++    doResize(guestAreaSize(), true);
+ }
+ 
+ void EmulatorQtWindow::zoomIn() {
+     zoomIn(QPoint(width() / 2, height() / 2),
+-           QPoint(mContainer.width() / 2, mContainer.height() / 2));
++           QPoint(mContainer.viewportSize().width() / 2,
++                  mContainer.viewportSize().height() / 2));
+ }
+ 
+ void EmulatorQtWindow::zoomIn(const QPoint& focus,
+@@ -4174,7 +4215,8 @@ void EmulatorQtWindow::zoomIn(const QPoint& focus,
+ 
+ void EmulatorQtWindow::zoomOut() {
+     zoomOut(QPoint(width() / 2, height() / 2),
+-            QPoint(mContainer.width() / 2, mContainer.height() / 2));
++            QPoint(mContainer.viewportSize().width() / 2,
++                   mContainer.viewportSize().height() / 2));
+ }
+ 
+ void EmulatorQtWindow::zoomOut(const QPoint& focus,
+@@ -4194,13 +4236,14 @@ void EmulatorQtWindow::zoomTo(const QPoint& focus, const QSize& rectSize) {
+         return;
+ 
+     saveZoomPoints(focus,
+-                   QPoint(mContainer.width() / 2, mContainer.height() / 2));
++                   QPoint(mContainer.viewportSize().width() / 2,
++                          mContainer.viewportSize().height() / 2));
+ 
+     // The below scale = x creates a skin equivalent to calling "window
+     // scale x" through the emulator console. At scale = 1, the device
+     // should be at a 1:1 pixel mapping with the monitor. We allow going to
+     // twice this size.
+-    double scale = ((double)size().width() /
++    double scale = ((double)guestAreaSize().width() /
+                     (double)mBackingSurface->bitmap->size().width());
+ 
+     // Calculate the "ideal" zoom factor, which would perfectly frame this
+@@ -4520,6 +4563,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ 
+     mSafeShutdownState = SafeShutdownState::StoppingGuest;
++    updateWindowTitle();
+     mSafeShutdownTimeout.start();
+     auto* adb = *mAdbInterface;
+     if (!adb) {
+@@ -4603,6 +4647,7 @@ void EmulatorQtWindow::forceCloseNow() {
+         return;
+     }
+     mSafeShutdownState = SafeShutdownState::Forced;
++    updateWindowTitle();
+     mSafeShutdownTimeout.stop();
+     mSafeShutdownGraceTimer.stop();
+     queueQuitEvent();
+@@ -4990,7 +5035,7 @@ bool EmulatorQtWindow::addMultiDisplayWindow(uint32_t id,
+             LOG(INFO) << "DisplayId: " << id << ", Title: " << tId;
+             snprintf(title, 16, "Display %d", tId);
+             mMultiDisplayWindow[id]->setWindowTitle(title);
+-            QRect geoTool = mToolWindow->geometry();
++            QRect geoTool = mContainer.frameGeometry();
+             mMultiDisplayWindow[id]->move(
+                     geoTool.right() + (mMultiDisplayWindow.size() - 1) * 100,
+                     geoTool.top());
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 053f134a2..9215e4e6e 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -242,13 +242,14 @@ public:
+     void startSafeShutdown();
+     void forceCloseNow();
+     bool safeShutdownInProgress() const;
++    EmulatorContainer* containerWindow();
++    QSize guestAreaSize() const;
+     bool isInZoomMode() const;
+     bool isWindowMinimized() const { return mWindowIsMinimized; }
+     ToolWindow* toolWindow() const;
+     CarClusterWindow* carClusterWindow() const;
+     CarClusterConnector* carClusterConnector() const;
+ 
+-    EmulatorContainer* containerWindow();
+     void showZoomIfNotUserHidden();
+     QSize containerSize() const;
+     QRect deviceGeometry() const;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 3fc68e8ab..335efc13f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -217,6 +217,14 @@ static bool leanToolbar() {
+     return lean;
+ }
+ 
++bool ToolWindow::inWindowNav() {
++#ifdef _WIN32
++    return leanToolbar() && !getConsoleAgents()->settings->android_cmdLineOptions()->qt_hide_window;
++#else
++    return false;
++#endif
++}
++
+ template <typename T>
+ ToolWindow::WindowHolder<T>::WindowHolder(ToolWindow* tw,
+                                           OnCreatedCallback onCreated)
+@@ -274,13 +282,7 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+ #else
+     Qt::WindowFlags flag = Qt::Tool;
+ #endif
+-    if (leanToolbar()) {
+-        setWindowFlags(Qt::Widget | Qt::FramelessWindowHint |
+-                       Qt::NoDropShadowWindowHint);
+-    } else {
+-        setWindowFlags(flag | Qt::FramelessWindowHint |
+-                       Qt::NoDropShadowWindowHint);
+-    }
++    setWindowFlags(flag | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+     mToolsUi->setupUi(this);
+ 
+     const AvdInfo* avdInfo = getConsoleAgents()->settings->avdInfo();
+@@ -714,6 +716,10 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         mToolsUi->minimize_button->hide();
+     }
+ 
++    if (inWindowNav()) {
++        createWindowNavColumn();
++    }
++
+     sToolWindow = this;
+     skin_winsys_touch_qt_extended_virtual_sensors();
+ 
+@@ -921,7 +927,7 @@ void ToolWindow::hideEvent(QHideEvent*) {
+ }
+ 
+ void ToolWindow::show() {
+-    QFrame::show();
++    setVisible(true);
+     if (leanToolbar()) {
+         setFixedWidth(sizeHint().width());
+     } else {
+@@ -941,6 +947,87 @@ void ToolWindow::show() {
+     }
+ }
+ 
++void ToolWindow::setVisible(bool visible) {
++    if (inWindowNav()) {
++        QFrame::setVisible(false);
++        if (mWindowNavColumn) {
++            mWindowNavColumn->setVisible(true);
++            positionWindowNavColumn();
++        }
++        return;
++    }
++    QFrame::setVisible(visible);
++}
++
++void ToolWindow::createWindowNavColumn() {
++    if (mWindowNavColumn) {
++        return;
++    }
++    mWindowNavColumn = new QWidget(mEmulatorWindow->containerWindow());
++    mWindowNavColumn->setFocusPolicy(Qt::NoFocus);
++    auto* layout = new QVBoxLayout(mWindowNavColumn);
++    layout->setContentsMargins(10, 0, 10, 0);
++    layout->setSpacing(0);
++    layout->addStretch(1);
++
++    auto addButton = [&](QPushButton* source, auto pressed, auto released) {
++        if (source->isHidden()) {
++            return;
++        }
++        auto* button = new QPushButton(mWindowNavColumn);
++        button->setObjectName(QStringLiteral("windowNavButton"));
++        button->setFocusPolicy(Qt::NoFocus);
++        button->setFixedSize(34, 34);
++        button->setIcon(source->icon());
++        button->setIconSize(source->iconSize());
++        button->setProperty("themeIconName", source->property("themeIconName"));
++        button->setProperty("ToolWindowButton", true);
++        button->setProperty("iconSize", source->iconSize());
++        button->setProperty("minimumSize", QSize(34, 34));
++        button->setToolTip(source->toolTip());
++        QObject::connect(button, &QPushButton::pressed, this, pressed);
++        QObject::connect(button, &QPushButton::released, this, released);
++        layout->addWidget(button, 0, Qt::AlignHCenter);
++    };
++    addButton(mToolsUi->back_button, &ToolWindow::on_back_button_pressed,
++              &ToolWindow::on_back_button_released);
++    addButton(mToolsUi->home_button->isHidden() ? mToolsUi->all_apps_button
++                                                 : mToolsUi->home_button,
++              &ToolWindow::on_home_button_pressed,
++              &ToolWindow::on_home_button_released);
++    layout->addStretch(1);
++    mWindowNavColumn->show();
++    positionWindowNavColumn();
++}
++
++void ToolWindow::positionWindowNavColumn() {
++    if (!mWindowNavColumn || !inWindowNav()) {
++        return;
++    }
++    auto* container = mEmulatorWindow->containerWindow();
++    const QRect vr = container->viewport()->geometry();
++    mWindowNavColumn->setGeometry(vr.right() - 53, vr.top(), 54, vr.height());
++    mWindowNavColumn->raise();
++}
++
++void ToolWindow::syncWindowNavEnabled() {
++    if (mWindowNavColumn) {
++        mWindowNavColumn->setEnabled(isEnabled());
++        if (safeShutdownInProgress()) {
++            for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
++                button->setEnabled(false);
++            }
++        }
++    }
++}
++
++void ToolWindow::changeEvent(QEvent* event) {
++    QFrame::changeEvent(event);
++    if (event->type() == QEvent::EnabledChange) {
++        syncWindowNavEnabled();
++    }
++}
++
+ bool ToolWindow::needExtendedWindow(QtUICommand cmd) const {
+     switch (cmd) {
+         case QtUICommand::HOME:
+@@ -953,6 +1040,7 @@ bool ToolWindow::needExtendedWindow(QtUICommand cmd) const {
+         case QtUICommand::VOLUME_UP:
+         case QtUICommand::GLASSES:
+         case QtUICommand::TOGGLE_MICROPHONE:
++        case QtUICommand::ALL_APPS:
+             return false;
+         default:
+             return true;
+@@ -1628,17 +1716,21 @@ void ToolWindow::closeExtendedWindow() {
+ }
+ 
+ void ToolWindow::dockMainWindow() {
+-    if (leanToolbar()) {
+-        const int toolbarWidth = std::max(1, sizeHint().width());
+-        auto* area = qobject_cast<QScrollArea*>(parentWidget());
+-        if (area) {
+-            if (auto* container = qobject_cast<EmulatorContainer*>(area)) {
+-                container->setLeanToolbarWidth(toolbarWidth);
+-            }
+-            setGeometry(area->width() - toolbarWidth, 0, toolbarWidth,
+-                        area->height());
+-            raise();
+-            return;
++    if (inWindowNav()) {
++        const int toolbarWidth = 54;
++        if (auto* area = qobject_cast<EmulatorContainer*>(parentWidget())) {
++            area->setLeanToolbarWidth(toolbarWidth);
++            const QRect frame = area->frameGeometry();
++            move(frame.right() + TOOL_GAP_FRAMED - width() + 1,
++                 frame.top() + mEmulatorWindow->getTopTransparency());
++            positionWindowNavColumn();
++        }
++    } else if (leanToolbar()) {
++        const int toolbarHeight = std::max(1, parentWidget()->height() -
++                                                   mEmulatorWindow->getTopTransparency() -
++                                                   mEmulatorWindow->getBottomTransparency());
++        if (height() != toolbarHeight) {
++            setFixedHeight(toolbarHeight);
+         }
+     }
+ 
+@@ -1669,7 +1761,7 @@ bool ToolWindow::isLeanToolbar() const {
+ }
+ 
+ int ToolWindow::leanToolbarWidth() const {
+-    return leanToolbar() ? std::max(1, sizeHint().width()) : 0;
++    return inWindowNav() ? 54 : (leanToolbar() ? std::max(1, sizeHint().width()) : 0);
+ }
+ 
+ bool ToolWindow::safeShutdownInProgress() const {
+@@ -1687,6 +1779,10 @@ void ToolWindow::updateTheme(const QString& styleSheet) {
+     mTouchpadWindow.ifExists(
+             [&] { mTouchpadWindow.get()->setStyleSheet(styleSheet); });
+     setStyleSheet(styleSheet);
++    if (mWindowNavColumn) {
++        mWindowNavColumn->setStyleSheet(styleSheet);
++        remaskButtons();
++    }
+ }
+ 
+ // static
+@@ -1855,7 +1951,8 @@ bool ToolWindow::askWhetherToSaveSnapshot() {
+ 
+     int64_t startTime = get_uptime_ms();
+     QMessageBox msgBox(QMessageBox::Question, tr("Save quick-boot state"),
+-                       askMessage, (QMessageBox::Yes | QMessageBox::No), this);
++                       askMessage, (QMessageBox::Yes | QMessageBox::No),
++                       mEmulatorWindow->containerWindow());
+     // Add a Cancel button to enable the MessageBox's X.
+     // Since embedded has already disconnected by this point, we always assume shutdown.
+     if(!getConsoleAgents()
+@@ -1928,7 +2025,8 @@ void ToolWindow::on_close_button_clicked() {
+     if (leanToolbar() && mEmulatorWindow->safeShutdownInProgress()) {
+         QMessageBox box(QMessageBox::Question, QString::fromUtf8("正在关机"),
+                         QString::fromUtf8("强制关闭？最近几秒写入的数据可能丢失"),
+-                        QMessageBox::Yes | QMessageBox::No, this);
++                        QMessageBox::Yes | QMessageBox::No,
++                        mEmulatorWindow->containerWindow());
+         box.button(QMessageBox::Yes)->setText(QString::fromUtf8("是"));
+         box.button(QMessageBox::No)->setText(QString::fromUtf8("否"));
+         const auto answer = box.exec();
+@@ -1951,6 +2049,11 @@ void ToolWindow::on_close_button_clicked() {
+         for (QPushButton* button : findChildren<QPushButton*>()) {
+             button->setEnabled(false);
+         }
++        if (mWindowNavColumn) {
++            for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
++                button->setEnabled(false);
++            }
++        }
+         mEmulatorWindow->startSafeShutdown();
+         return;
+     }
+@@ -2805,7 +2908,11 @@ WorkerProcessingResult ToolWindow::foldableSyncToAndroidItemFunction(
+ }
+ 
+ void ToolWindow::remaskButtons() {
+-    for (QPushButton* button : findChildren<QPushButton*>()) {
++    QList<QPushButton*> buttons = findChildren<QPushButton*>();
++    if (mWindowNavColumn) {
++        buttons += mWindowNavColumn->findChildren<QPushButton*>();
++    }
++    for (QPushButton* button : buttons) {
+         const QString icon_name = button->property("themeIconName").toString();
+         if (!icon_name.isNull()) {
+             double dpr = 1.0;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index d8daf24c8..0d068a37d 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -25,6 +25,7 @@
+ #include <QRect>
+ #include <QString>
+ #include <QWidget>
++#include <QPushButton>
+ #include <QTimer>
+ 
+ #include "aemu/base/Compiler.h"
+@@ -97,6 +98,7 @@ public:
+     void allowExtWindowCreation();
+     void hide();
+     void show();
++    void setVisible(bool visible) override;
+     void dockMainWindow();
+     void raiseMainWindow();
+     void updateTheme(const QString& styleSheet);
+@@ -145,6 +147,7 @@ public:
+ 
+     bool isLeanToolbar() const;
+     int leanToolbarWidth() const;
++    static bool inWindowNav();
+ 
+     bool clipboardSharingSupported() const { return mClipboardSupported; }
+     void forwardKeyToEmulator(uint32_t keycode, bool down);
+@@ -211,10 +214,14 @@ private:
+     void updateRightHandButton(const QString& gesture);
+ 
+     virtual void closeEvent(QCloseEvent* ce) override;
++    void changeEvent(QEvent* event) override;
+     virtual void mousePressEvent(QMouseEvent* event) override;
+     virtual void paintEvent(QPaintEvent*) override;
+     virtual void hideEvent(QHideEvent* event) override;
+     void rebuildBackingStoreIfStale();
++    void createWindowNavColumn();
++    void positionWindowNavColumn();
++    void syncWindowNavEnabled();
+ 
+     EmulatorQtWindow* mEmulatorWindow;
+     android::base::MemberOnDemandT<ExtendedWindowHolder,
+@@ -231,6 +238,7 @@ private:
+                                    void (ToolWindow::*)(TouchpadWindow*)>
+             mTouchpadWindow;
+     std::unique_ptr<Ui::ToolControls> mToolsUi;
++    QWidget* mWindowNavColumn = nullptr;
+     bool mStartedAdbStopProcess = false;
+     ShortcutKeyStore<QtUICommand> mShortcutKeyStore;
+     bool mIsExtendedWindowVisibleOnShow = false;

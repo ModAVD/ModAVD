@@ -1,0 +1,78 @@
+From 482f595f4f8845b7f677cc6cc3f890e6a9303592 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:58:32 +0800
+Subject: [PATCH 24/25] vk: track logical staging buffer capacity separately
+ from allocation size
+
+Publish capacity after successful resource creation and clear both sizes on destruction. Grow and restore using logical size.
+
+Change-Id: Ia4d8e793228767b5fb0d0e7f0d8fe852fd9d075e
+---
+ host/vulkan/vk_common_operations.cpp | 11 +++++++----
+ host/vulkan/vk_common_operations.h   |  2 ++
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 0805b138..7546b58e 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -380,10 +380,14 @@ bool VkEmulation::StagingBuffer::create(VulkanDispatch* vk, VkDevice device,
+     debugUtilsHelper.addDebugLabel(mMemory, "AEMU_StagingBufferMemory");
+     debugUtilsHelper.addDebugLabel(mBuffer, "AEMU_StagingBuffer");
+ 
++    // Publish capacity only after creation, allocation, mapping and binding succeed.
++    mBufferSize = size;
+     return true;
+ }
+ 
+ void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
++    mBufferSize = 0;
++    mAllocationSize = 0;
+     if (!vk || device == VK_NULL_HANDLE) {
+         GFXSTREAM_WARNING("StagingBuffer::destroy: invalid parameters");
+         return;
+@@ -403,7 +407,7 @@ void VkEmulation::StagingBuffer::destroy(VulkanDispatch* vk, VkDevice device) {
+ }
+ 
+ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+-    if (size <= mStaging.mAllocationSize && mStaging.mMappedPtr) {
++    if (size <= mStaging.mBufferSize && mStaging.mMappedPtr) {
+         return true;
+     }
+     if (size > kMaxStagingBufferSize) {
+@@ -412,12 +416,12 @@ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+ 
+     // Every user of the staging buffer waits on mCommandBufferFence before releasing mMutex,
+     // so the current buffer is idle and can be replaced.
+-    const VkDeviceSize oldSize = mStaging.mAllocationSize;
++    const VkDeviceSize oldSize = mStaging.mBufferSize;
+     const VkDeviceSize newSize = std::max(size, std::min(oldSize * 2, kMaxStagingBufferSize));
+     mStaging.destroy(mDvk, mDevice);
+     if (mStaging.create(mDvk, mDevice, &mDeviceInfo.memProps, mDebugUtilsHelper, newSize)) {
+         GFXSTREAM_INFO("Grew Vulkan staging buffer from %" PRIu64 " to %" PRIu64 " bytes.", oldSize,
+-                       mStaging.mAllocationSize);
++                       mStaging.mBufferSize);
+         return true;
+     }
+ 
+@@ -428,7 +432,6 @@ bool VkEmulation::ensureStagingBufferSizeLocked(VkDeviceSize size) {
+         return false;
+     }
+     mStaging.destroy(mDvk, mDevice);
+-    mStaging.mAllocationSize = 0;
+     return false;
+ }
+ 
+diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
+index 83b6b1d8..35539b5c 100644
+--- a/host/vulkan/vk_common_operations.h
++++ b/host/vulkan/vk_common_operations.h
+@@ -687,6 +687,8 @@ class VkEmulation {
+     struct StagingBuffer {
+         VkDeviceMemory mMemory = VK_NULL_HANDLE;
+         VkBuffer mBuffer = VK_NULL_HANDLE;
++        // Logical VkBuffer capacity; memory requirements may include padding.
++        VkDeviceSize mBufferSize = 0;
+         VkDeviceSize mAllocationSize = 0;
+         void* mMappedPtr = nullptr;
+         bool mIsHostCoherent = false;

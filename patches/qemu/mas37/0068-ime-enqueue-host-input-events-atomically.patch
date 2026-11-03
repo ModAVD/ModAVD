@@ -1,7 +1,7 @@
-From e4a0737e895267dfc19d324b4207c0ce76f4c364 Mon Sep 17 00:00:00 2001
+From 02d2b00b987d8de09845a6f86fada38de7be1479 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Sat, 31 Oct 2026 08:16:15 +0800
-Subject: [PATCH] ime: enqueue host input events atomically
+Subject: [PATCH 68/80] ime: enqueue host input events atomically
 
 Serialize delete, commit, preedit and finish-composing into a single bounded batch. Check queue capacity and append under one lock, so a failed send queues no prefix. Use the batch path for multi-frame commits. Keep protocol v1, focus state and Qt UI behavior unchanged. Based on qemu/mas36.
 ---
@@ -10,7 +10,7 @@ Serialize delete, commit, preedit and finish-composing into a single bounded bat
  2 files changed, 117 insertions(+), 24 deletions(-)
 
 diff --git a/android/emu/hardware/include/android/emulation/ModavdImePipe.h b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
-index 939925b..0b68c05 100644
+index 939925bae..0b68c051f 100644
 --- a/android/emu/hardware/include/android/emulation/ModavdImePipe.h
 +++ b/android/emu/hardware/include/android/emulation/ModavdImePipe.h
 @@ -95,6 +95,22 @@ public:
@@ -45,7 +45,7 @@ index 939925b..0b68c05 100644
      void closeFromHostLocked();
      void detach();
 diff --git a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
-index 75fe1ef..341c101 100644
+index 75fe1eff2..341c10115 100644
 --- a/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
 +++ b/android/emu/hardware/src/android/emulation/ModavdImePipe.cpp
 @@ -53,6 +53,44 @@ void putU32(std::vector<uint8_t>* out, uint32_t value) {

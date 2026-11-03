@@ -1,0 +1,95 @@
+From 8491ec694c29772a73aef2b21e890395534c9a11 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 2 Nov 2026 17:07:34 +0100
+Subject: [PATCH 76/80] MAS local: keep the full toolbar close path unchanged
+
+The lean-toolbar series dropped the upstream close routing in closeEvent and
+slot_requestClose for every toolbar. Restore it when ANDROID_EMU_FULL_TOOLBAR=1
+so the full toolbar behaves as before; the lean toolbar keeps console and
+main-loop exits immediate. Also limit the safe-shutdown cleanup, the window-flag
+change check, the All Apps shortcut and the snapshot dialog parent to the lean
+or in-window navigation paths.
+
+Change-Id: I1c35f880ef598c53d18f0fe8c80aa3ff95cf3b89
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 19 +++++++++++++++++--
+ .../src/android/skin/qt/tool-window.cpp       |  7 +++++--
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index f40b29b2d..9ff5122c6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1189,6 +1189,14 @@ void EmulatorQtWindow::slot_gpuWarningMessageAccepted() {
+ }
+ 
+ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
++    // make sure to use the close button on tool window
++    if (!mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
++        !mToolWindow->closeButtonClicked()) {
++        mToolWindow->on_close_button_clicked();
++        event->ignore();
++        return;
++    }
++
+     if (mToolWindow && isMainThreadRunning() &&
+         mToolWindow->safeShutdownInProgress()) {
+         mToolWindow->on_close_button_clicked();
+@@ -1196,7 +1204,8 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+         return;
+     }
+ 
+-    if (!isMainThreadRunning()) {
++    if (!isMainThreadRunning() &&
++        mSafeShutdownState != SafeShutdownState::Idle) {
+         if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+             modal->close();
+         }
+@@ -1745,7 +1754,7 @@ void EmulatorQtWindow::maskWindowFrame() {
+     }
+ #endif
+ 
+-    if (mContainer.windowFlags() != flags) {
++    if (!ToolWindow::inWindowNav() || mContainer.windowFlags() != flags) {
+         mContainer.setWindowFlags(flags);
+     }
+ 
+@@ -2530,6 +2539,12 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
+ }
+ 
+ void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
++    // The lean toolbar keeps console and main-loop exits immediate; only its
++    // own close paths start the safe shutdown.
++    if (!mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
++        !mToolWindow->closeButtonClicked()) {
++        mToolWindow->on_close_button_clicked();
++    }
+     QSemaphoreReleaser semReleaser(semaphore);
+     mToolWindow->shouldClose();
+     if (isMainThreadRunning()) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index a034a265c..b98a72908 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -1055,8 +1055,9 @@ bool ToolWindow::needExtendedWindow(QtUICommand cmd) const {
+         case QtUICommand::VOLUME_UP:
+         case QtUICommand::GLASSES:
+         case QtUICommand::TOGGLE_MICROPHONE:
+-        case QtUICommand::ALL_APPS:
+             return false;
++        case QtUICommand::ALL_APPS:
++            return !leanToolbar();
+         default:
+             return true;
+     }
+@@ -1972,7 +1973,9 @@ bool ToolWindow::askWhetherToSaveSnapshot() {
+     int64_t startTime = get_uptime_ms();
+     QMessageBox msgBox(QMessageBox::Question, tr("Save quick-boot state"),
+                        askMessage, (QMessageBox::Yes | QMessageBox::No),
+-                       mEmulatorWindow->containerWindow());
++                       inWindowNav() ? static_cast<QWidget*>(
++                                               mEmulatorWindow->containerWindow())
++                                     : this);
+     // Add a Cancel button to enable the MessageBox's X.
+     // Since embedded has already disconnected by this point, we always assume shutdown.
+     if(!getConsoleAgents()

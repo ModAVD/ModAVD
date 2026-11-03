@@ -1,0 +1,209 @@
+From 3419edeb1ee3f69c4a12c4215aba032d3bee4c57 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 2 Nov 2026 19:02:14 +0100
+Subject: [PATCH 80/80] MAS local: tighten the lean safe shutdown state and
+ logging
+
+- Count the forced-exit state as shutting down: a close request in the
+  seconds before QEMU quits (taskkill without /f posts WM_CLOSE to the
+  hidden window) no longer falls through to the upstream close path,
+  which takes the snapshot lock or runs "adb shell stop".
+- The adb callbacks run on the AdbInterface looper and can complete
+  after the window is torn down; they now post to it only while it is
+  alive, checked under a lock that the destructor takes.
+- Do not ask whether to save a quick-boot snapshot and do not save one:
+  the guest is powering off, and a snapshot of it shutting down would
+  resume the shutdown on the next quick boot. The manager and AUTO-MAS
+  boot with -no-snapshot, so only instances started by hand are
+  affected.
+- Log through dinfo/dwarning. LOG() from this file does not reach the
+  emulator log, so the timeout and failure paths left no trace.
+
+Change-Id: Iabc5ed7c4c92fa17d07d12361b124a956cef201c
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 57 ++++++++++++++-----
+ .../src/android/skin/qt/tool-window.cpp       | 13 +++--
+ 2 files changed, 51 insertions(+), 19 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index f9f8ea846..107ea3cbf 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -161,6 +161,16 @@ using android::emulation::AvdCompatibilityManager;
+ using android::emulation::FilePusher;
+ using android::emulation::ModavdImePipe;
+ 
++// The adb callbacks of the lean toolbar's safe shutdown run on the
++// AdbInterface looper and can complete after the window is gone (Qt tears it
++// down once Android has powered off). They post to the window only while it
++// is still alive; the destructor clears the pointer under the lock.
++static Lock& safeShutdownLock() {
++    static Lock lock;
++    return lock;
++}
++static EmulatorQtWindow* sSafeShutdownWindow = nullptr;
++
+ namespace {
+ 
+ #define QT_TO_LINUX_KEY(x, y) {Qt::Key_##x, LINUX_KEY_##y}
+@@ -793,7 +803,7 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+     mSafeShutdownTimeout.setInterval(15000);
+     QObject::connect(&mSafeShutdownTimeout, &QTimer::timeout, this, [this] {
+         if (mSafeShutdownState == SafeShutdownState::StoppingGuest) {
+-            LOG(WARNING) << "Safe toolbar shutdown timed out; syncing guest";
++            dwarning("Safe toolbar shutdown timed out; syncing guest");
+             startSafeShutdownSync();
+         }
+     });
+@@ -1032,6 +1042,12 @@ EmulatorQtWindow* EmulatorQtWindow::getInstance() {
+ }
+ 
+ EmulatorQtWindow::~EmulatorQtWindow() {
++    {
++        AutoLock lock(safeShutdownLock());
++        if (sSafeShutdownWindow == this) {
++            sSafeShutdownWindow = nullptr;
++        }
++    }
+     ModavdImePipe::removeStateCallback(mHostImeCallbackId);
+     if (mApkInstallCommand) {
+         mApkInstallCommand->cancel();
+@@ -4565,8 +4581,9 @@ void EmulatorQtWindow::slot_adbWarningMessageAccepted() {
+ }
+ 
+ bool EmulatorQtWindow::safeShutdownInProgress() const {
+-    return mSafeShutdownState != SafeShutdownState::Idle &&
+-           mSafeShutdownState != SafeShutdownState::Forced;
++    // Forced counts too: a close request in the seconds before QEMU quits
++    // must not fall through to the upstream close path.
++    return mSafeShutdownState != SafeShutdownState::Idle;
+ }
+ 
+ // The private adb server may have been restarted since this instance
+@@ -4599,12 +4616,17 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ 
+     mSafeShutdownState = SafeShutdownState::StoppingGuest;
++    {
++        AutoLock lock(safeShutdownLock());
++        sSafeShutdownWindow = this;
++    }
++    dinfo("Safe toolbar shutdown: asking Android to power off");
+     System::get()->waitAndKillSelf(25);
+     updateWindowTitle();
+     mSafeShutdownTimeout.start();
+     auto* adb = *mAdbInterface;
+     if (!adb) {
+-        LOG(WARNING) << "Safe toolbar shutdown has no ADB interface; syncing guest";
++        dwarning("Safe toolbar shutdown has no ADB interface; syncing guest");
+         startSafeShutdownSync();
+         return;
+     }
+@@ -4615,6 +4637,10 @@ void EmulatorQtWindow::startSafeShutdown() {
+              "shutdown"},
+             [this](const android::emulation::OptionalAdbCommandResult& result) {
+                 const bool success = result && result->exit_code == 0;
++                AutoLock lock(safeShutdownLock());
++                if (sSafeShutdownWindow != this) {
++                    return;
++                }
+                 QMetaObject::invokeMethod(
+                         this,
+                         [this, success] {
+@@ -4623,19 +4649,18 @@ void EmulatorQtWindow::startSafeShutdown() {
+                                 return;
+                             }
+                             if (!success) {
+-                                LOG(WARNING)
+-                                        << "Guest shutdown command failed; syncing guest";
++                                dwarning("Guest shutdown command failed; syncing guest");
+                                 startSafeShutdownSync();
+                                 return;
+                             }
+ 
+-                            LOG(INFO) << "Guest shutdown command accepted; waiting for Android to power off";
++                            dinfo("Guest shutdown command accepted; waiting for Android to power off");
+                         },
+                         Qt::QueuedConnection);
+             },
+             15000);
+     if (!command) {
+-        LOG(WARNING) << "Safe toolbar shutdown command could not start; syncing guest";
++        dwarning("Safe toolbar shutdown command could not start; syncing guest");
+         startSafeShutdownSync();
+     }
+ }
+@@ -4650,7 +4675,7 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+     mSafeShutdownTimeout.stop();
+     auto* adb = *mAdbInterface;
+     if (!adb) {
+-        LOG(WARNING) << "Safe toolbar shutdown could not run guest sync";
++        dwarning("Safe toolbar shutdown could not run guest sync");
+         forceCloseNow();
+         return;
+     }
+@@ -4660,15 +4685,20 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+             {"wait-for-device", "shell", "sync"},
+             [this](const android::emulation::OptionalAdbCommandResult& result) {
+                 const bool success = result && result->exit_code == 0;
++                AutoLock lock(safeShutdownLock());
++                if (sSafeShutdownWindow != this) {
++                    return;
++                }
+                 QMetaObject::invokeMethod(
+                         this,
+                         [this, success] {
+                             if (mSafeShutdownState != SafeShutdownState::Syncing) {
+                                 return;
+                             }
+-                            if (!success) {
+-                                LOG(WARNING)
+-                                        << "Safe toolbar shutdown guest sync failed; forcing exit";
++                            if (success) {
++                                dinfo("Safe toolbar shutdown: guest synced; quitting");
++                            } else {
++                                dwarning("Safe toolbar shutdown guest sync failed; forcing exit");
+                             }
+                             forceCloseNow();
+                         },
+@@ -4678,7 +4708,7 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+             // sync with a lot of dirty data time to finish.
+             5000);
+     if (!command) {
+-        LOG(WARNING) << "Safe toolbar shutdown guest sync could not start; forcing exit";
++        dwarning("Safe toolbar shutdown guest sync could not start; forcing exit");
+         forceCloseNow();
+     }
+ }
+@@ -4708,6 +4738,7 @@ void EmulatorQtWindow::forceCloseNow() {
+         return;
+     }
+     mSafeShutdownState = SafeShutdownState::Forced;
++    dwarning("Safe toolbar shutdown: quitting without waiting for Android to power off");
+     updateWindowTitle();
+     mSafeShutdownTimeout.stop();
+     queueQuitEvent();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 726001518..97ada3768 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -2054,12 +2054,13 @@ void ToolWindow::on_close_button_clicked() {
+     mIsExiting = true;
+     mCloseClicked = true;
+     if (leanToolbar()) {
+-        if (!shouldClose()) {
+-            mAskedWhetherToSaveSnapshot = false;
+-            mIsExiting = false;
+-            mCloseClicked = false;
+-            return;
+-        }
++        // Android powers off behind the hidden windows. A quick-boot snapshot
++        // of a guest that is shutting down is of no use, so neither ask nor
++        // save one (the same as a shift-click on the full toolbar's close).
++        mAskedWhetherToSaveSnapshot = true;
++        mShouldClose = true;
++        getConsoleAgents()->settings->avdParams()->flags |=
++                AVDINFO_NO_SNAPSHOT_SAVE_ON_EXIT;
+ 
+         for (QPushButton* button : findChildren<QPushButton*>()) {
+             button->setEnabled(false);
