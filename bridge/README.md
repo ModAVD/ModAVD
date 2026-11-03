@@ -89,6 +89,27 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 
 原生测试通过还需要真实游戏验证：如鸢冷启动到资源更新提示、名单内旧游戏的运行、名单外应用撤回 `5/5`。协议页或资源更新提示只能证明该阶段启动成功，不能代替登录、庭院、战斗和长期运行回归。
 
+## 下载 fsync 延后（#35）
+
+`companion/jni/fsync_defer.cc` 是和上面的桥、raw clone 保护完全分开的一个模块，为的是让《明日方舟》下载资源不再被每小块一次 fsync 卡在约 8 MB/s。它和 arm64 名单（`modavd.gate.target`）无关：明日方舟是 x86 应用，不经转译，也不在那份名单里。
+
+- **只在名单内的应用里装**：名单是 `modavd.fsync.defer`，编进去的默认只有 `com.hypergryph.arknights`；`setprop modavd.fsync.defer none` 整体关掉。shim 在每个应用进程的 `initialize()` 里把包名交给本模块（在 detach 判断之前，所以名单外的桥应用也会跑这一步），不在名单里就什么都不装。
+- **只钩下载临时文件**：改写宿主 `libjavacore.so` / `libopenjdk.so`（`java.io.FileDescriptor` 背后的两个库）导入 libc 的 GOT 槽 `fsync`、`fdatasync`、`close`、`android_fdsan_close_with_tag`、`rename`、`renameat`、`renameat2`。fsync 进来时 `readlink /proc/self/fd/N`，和 `modavd.fsync.paths`（默认 `*/HGGameUpdate/HGDownload/*.downloading`）比对，按 fd 缓存结果，并用 `fstat` 的 (st_dev, st_ino) 防 fd 复用误判。libc 本身、其他进程都不碰。
+- **补付**：匹配的 fsync 先不等（记一次「欠账」），在关闭该 fd、对它的路径改名、或离上次真正 fsync 满 5 s 时补一次真正的 fsync。所以临时文件一拿到正式名字或被关闭，就和现在一样可靠；只有正在下载、还没改名的 `*.downloading`，在硬杀或断电时可能少最近约 5 s 的内容，游戏续传时按校验重下这一段。索引、SQLite、设置、账号信息照常 fsync。
+- **默认是只记录的诊断模式**（`modavd.fsync.defer.mode` 默认 `observe`）：钩子都装上，但每次 fsync 照常执行，只记录调用的路径类别和 close / rename 的先后，用来在一次完整下载上确认三件事——每块都 fsync 的只有 `.downloading`、正式文件是 Java 改名得来的（不是复制）、改名时写 fd 是不是已经关了。`active` 才真正延后 fsync，要在诊断确认且经用户同意后才开；发版默认值在硬杀回归通过后再翻成 `active`。
+- **属性**：`modavd.fsync.defer`（包名名单 / `none`）、`modavd.fsync.paths`（路径规则）、`modavd.fsync.defer.mode`（`observe` / `active`）、`modavd.fsync.log=1`（逐条日志，默认每 60 s 一行计数）。都不持久，改完要新进程重新读。
+
+原生测试 `tests/fsync_defer_test.cc` 直接编译本模块，用计数假函数替掉真正的 fsync，覆盖路径和包名匹配、classify 与 fd 复用重判、observe 从不延后、active 在 5 s 内延后而首次和到期补付、关闭补付、改名补付、名单外一律真 fsync。它不需要转译层、游戏或 GOT 补丁。构建通过不代表运行测试通过；编译后在测试实例执行：
+
+```powershell
+& '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\fsync_defer_test.cc -llog -o '<输出>\fsync-defer-test'
+& '<adb>' -P <私有端口> -s <测试实例> push '<输出>\fsync-defer-test' /data/local/tmp/fsync-defer-test
+& '<adb>' -P <私有端口> -s <测试实例> shell chmod 755 /data/local/tmp/fsync-defer-test
+& '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/fsync-defer-test
+```
+
+真正的下载提速和硬杀安全要在实机上验证：observe 一轮确认调用路径，再跑 active 下的下载 A/B 和下载中途硬杀，确认重下能修复、不留 0 字节索引，名单外应用和官服《阴阳师》回归不变。
+
 ## 信号顺序
 
 执行桥靠 SIGSEGV 工作：原生代码经被改写的 GOT 槽跳进客体页时触发的那次取指错误，就是桥的入口。这个错误必须第一个到我们手里，否则会被别的处理函数当成真崩溃，比如 WebView 的 crashpad。
