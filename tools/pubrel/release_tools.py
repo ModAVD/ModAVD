@@ -911,8 +911,10 @@ def sources(args):
         summary.append({"file": name, "action": "archived", "revision": rev, "sha256": sha(dest / name)})
     if data["build"] != "mas30":
         series = load(out / "patches/series.json")
+        published_series = load(Path(data["own"]["modavd"]["repo"]) / "patches/series.json")
         (dest / ("manifest-" + data["build"] + ".xml")).write_text(
-            annotated_manifest(MANIFEST_MAS30.read_text(encoding="utf-8"), new_manifest, data["build"], series, data["upstream"]),
+            annotated_manifest(MANIFEST_MAS30.read_text(encoding="utf-8"), new_manifest, data["build"], series,
+                               data["upstream"], published_series),
             encoding="utf-8")
         base = ET.fromstring(new_text)
         for p in base.findall("project"):
@@ -920,7 +922,8 @@ def sources(args):
                 if p.get("path") == s["repo"]:
                     p.set("revision", s["base"])
         (dest / "manifest-aosp-base.xml").write_text(
-            annotated_manifest((baseline / "source/manifest-aosp-base.xml").read_text(encoding="utf-8-sig"), base, data["build"], series, data["upstream"]),
+            annotated_manifest((baseline / "source/manifest-aosp-base.xml").read_text(encoding="utf-8-sig"), base,
+                               data["build"], series, data["upstream"], published_series),
             encoding="utf-8")
         text = (baseline / "source/SOURCES.txt").read_text(encoding="utf-8-sig")
         # "ModAVD-37.2.10-mas30.zip" is the main ZIP name, which is now ModAVD-<version>-<platform>.zip.
@@ -986,14 +989,14 @@ def manifest_shape(root):
     return [(e.tag, sorted(e.attrib.items()), [(c.tag, sorted(c.attrib.items())) for c in e]) for e in root]
 
 
-def annotated_manifest(template, expected, build, series, upstream):
+def annotated_manifest(template, expected, build, series, upstream, published_series):
     """Rewrite a reviewed mas30 manifest so its comments survive; fail closed unless it parses to `expected`."""
     text = template.replace("mas-30", "mas-" + build[3:]).replace("emulator 37.2.10", "emulator " + upstream)
     text, n = re.subn(r"\d{4}-\d{2}-\d{2} 生成", datetime.date.today().isoformat() + " 生成", text)
     if n != 1:
         raise ValueError("Manifest header date not found")
     # Unchanged series keep their published directory, even when the snapshot exports them under this build.
-    published = {(s["repo"], s["base"], s["head"]): s["dir"] for s in load(REPO / "patches/series.json")}
+    published = {(s["repo"], s["base"], s["head"]): s["dir"] for s in published_series}
     for s in series:
         directory = published.get((s["repo"], s["base"], s["head"]), s["dir"])
         text, n = re.subn(rf"(<!-- {re.escape(s['repo'])}：AOSP 基准 )[0-9a-f]{{40}}，本地分支 \S+ = 基准 \+ \d+ 个提交，HEAD [0-9a-f]{{40}} -->",

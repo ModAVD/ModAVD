@@ -492,8 +492,6 @@ class ReleaseChecks(unittest.TestCase):
                 checks.version_key(bad)
 
     def annotated_series(self, series, recorded):
-        root = self.folder()
-        release.save(root / "patches/series.json", recorded)
         template = '<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
         for s in series:
             template += (f"  <!-- {s['repo']}：AOSP 基准 {'0' * 40}，本地分支 old = 基准 + 1 个提交，HEAD {'1' * 40} -->\n"
@@ -502,10 +500,9 @@ class ReleaseChecks(unittest.TestCase):
         expected = ET.fromstring(template)
         for p, s in zip(expected.findall("project"), series):
             p.set("revision", s["head"])
-        original = json.dumps(series, sort_keys=True)
-        with mock.patch.object(release, "REPO", root):
-            text = release.annotated_manifest(template, expected, "mas36", series, "37.2.10")
-        self.assertEqual(json.dumps(series, sort_keys=True), original)
+        original = json.dumps([series, recorded], sort_keys=True)
+        text = release.annotated_manifest(template, expected, "mas36", series, "37.2.10", recorded)
+        self.assertEqual(json.dumps([series, recorded], sort_keys=True), original)
         self.assertEqual(release.manifest_shape(ET.fromstring(text)), release.manifest_shape(expected))
         return text
 
@@ -533,6 +530,46 @@ class ReleaseChecks(unittest.TestCase):
         text = self.annotated_series(series, recorded)
         comments = dict(re.findall(r"<!-- (\S+)：AOSP 基准 [0-9a-f]{40}，补丁系列 patches/(\S+) =", text))
         self.assertEqual(comments, {s["repo"]: s["dir"] for s in recorded})
+
+    def test_sources_uses_release_checkout_patch_directories(self):
+        root = self.folder()
+        tools, repo, baseline, out = [root / name for name in ["tools", "pub", "baseline", "out"]]
+        s = {"repo": "external/example", "base": "a" * 40, "head": "b" * 40, "dir": "example/mas36", "count": 1}
+        release.save(tools / "patches/series.json", [{**s, "dir": "example/mas34"}])
+        release.save(repo / "patches/series.json", [{**s, "dir": "example/mas35"}])
+        release.save(out / "patches/series.json", [s])
+        template = (f'<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
+                    f'  <!-- {s["repo"]}：AOSP 基准 {s["base"]}，本地分支 old = 基准 + 1 个提交，HEAD {s["head"]} -->\n'
+                    f'  <project path="{s["repo"]}" revision="{s["base"]}"/>\n</manifest>\n')
+        manifest = root / "manifest-mas30.xml"
+        manifest.write_text(template, encoding="utf-8")
+        expected = ET.fromstring(template)
+        expected.find("project").set("revision", s["head"])
+        release.save(out / "snapshot.json", {"build": "mas36", "version": "0.36.0", "upstream": "37.2.10", "series": [s],
+                                             "manifest_xml": ET.tostring(expected, encoding="unicode"),
+                                             "own": {"modavd": {"repo": str(repo)}}})
+        (tools / "config").mkdir()
+        (tools / "config/source-projects.txt").write_text("", encoding="utf-8")
+        (baseline / "source").mkdir(parents=True)
+        (baseline / "source/manifest-aosp-base.xml").write_text(template, encoding="utf-8")
+        (baseline / "source/SOURCES.txt").write_text("sources\n", encoding="utf-8")
+        payload = baseline / "source/unchanged.tar.xz"
+        payload.write_bytes(b"unchanged source archive")
+        sums = release.sha(payload) + "  unchanged.tar.xz\n"
+        (tools / "config/mas30.SHA256SUMS.txt").write_text(sums, encoding="utf-8")
+        (baseline / "SHA256SUMS-sources.txt").write_text(sums, encoding="utf-8")
+        with (mock.patch.object(release, "REPO", tools), mock.patch.object(release, "HERE", tools),
+              mock.patch.object(release, "MANIFEST_MAS30", manifest),
+              mock.patch.object(release, "own_sources", return_value={"action": "reused"}),
+              mock.patch.object(release, "own_sources_text", return_value="")):
+            release.sources(SimpleNamespace(output=str(out), baseline=str(baseline)))
+        for name, revision in [("manifest-mas36.xml", s["head"]), ("manifest-aosp-base.xml", s["base"])]:
+            text = (out / "source" / name).read_text(encoding="utf-8")
+            self.assertIn("补丁系列 patches/example/mas35 =", text)
+            self.assertNotIn("patches/example/mas34", text)
+            self.assertNotIn("patches/example/mas36", text)
+            self.assertEqual(ET.fromstring(text).find("project").get("revision"), revision)
+        self.assertEqual(release.sha(out / "source/unchanged.tar.xz"), release.sha(payload))
 
     def test_annotated_manifest_mas36(self):
         root = self.folder()
@@ -568,7 +605,7 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual(directories, {"external/qemu": "qemu/mas36", "hardware/google/gfxstream": "gfxstream/mas35",
                                        "external/crashpad": "crashpad/module-version22"})
         for name, tree in manifests:
-            text = release.annotated_manifest(template, tree, "mas36", series, "37.2.10")
+            text = release.annotated_manifest(template, tree, "mas36", series, "37.2.10", recorded)
             (root / name).write_text(text, encoding="utf-8")
             comments = dict(re.findall(r"<!-- (\S+)：AOSP 基准 [0-9a-f]{40}，补丁系列 patches/(\S+) =", text))
             self.assertEqual(comments, directories)
