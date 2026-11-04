@@ -91,15 +91,18 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 
 ## 下载 fsync 延后（#35）
 
-`companion/jni/fsync_defer.cc` 是和上面的桥、raw clone 保护完全分开的一个模块，为的是让《明日方舟》下载资源不再被每小块一次 fsync 卡在约 8 MB/s。它和 arm64 名单（`modavd.gate.target`）无关：明日方舟是 x86 应用，不经转译，也不在那份名单里。
+`companion/jni/fsync_defer.cc` 是和上面的桥、raw clone 保护完全分开的一个模块，为的是让《明日方舟》下载资源不再被每小块一次 fsync 卡在约 6–8 MB/s。它和 arm64 名单（`modavd.gate.target`）无关：明日方舟只有 arm64 代码、整个跑在转译层上（所以它才会走到 native bridge 的 `initialize()`），但它不在那份名单里。
 
-- **只在名单内的应用里装**：名单是 `modavd.fsync.defer`，编进去的默认只有 `com.hypergryph.arknights`；`setprop modavd.fsync.defer none` 整体关掉。shim 在每个应用进程的 `initialize()` 里把包名交给本模块（在 detach 判断之前，所以名单外的桥应用也会跑这一步），不在名单里就什么都不装。
-- **只钩下载临时文件**：改写宿主 `libjavacore.so` / `libopenjdk.so`（`java.io.FileDescriptor` 背后的两个库）导入 libc 的 GOT 槽 `fsync`、`fdatasync`、`close`、`android_fdsan_close_with_tag`、`rename`、`renameat`、`renameat2`。fsync 进来时 `readlink /proc/self/fd/N`，和 `modavd.fsync.paths`（默认 `*/HGGameUpdate/HGDownload/*.downloading`）比对，按 fd 缓存结果，并用 `fstat` 的 (st_dev, st_ino) 防 fd 复用误判。libc 本身、其他进程都不碰。
-- **补付**：匹配的 fsync 先不等（记一次「欠账」），在关闭该 fd、对它的路径改名、或离上次真正 fsync 满 5 s 时补一次真正的 fsync。所以临时文件一拿到正式名字或被关闭，就和现在一样可靠；只有正在下载、还没改名的 `*.downloading`，在硬杀或断电时可能少最近约 5 s 的内容，游戏续传时按校验重下这一段。索引、SQLite、设置、账号信息照常 fsync。
-- **默认是只记录的诊断模式**（`modavd.fsync.defer.mode` 默认 `observe`）：钩子都装上，但每次 fsync 照常执行，只记录调用的路径类别和 close / rename 的先后，用来在一次完整下载上确认三件事——每块都 fsync 的只有 `.downloading`、正式文件是 Java 改名得来的（不是复制）、改名时写 fd 是不是已经关了。`active` 才真正延后 fsync，要在诊断确认且经用户同意后才开；发版默认值在硬杀回归通过后再翻成 `active`。
+- **在哪拦**：这个版本的下载对 `*.downloading` 临时文件的 fsync 是**原生**调用（不是 Java 的 `FileDescriptor.sync`），而且转译层发客体系统调用走的是内联 syscall 指令、不经过它导入的 `syscall()`——所以钩 GOT（无论是 libjavacore 还是转译层的导入）都抓不到。改用 **seccomp**：装一个 seccomp-BPF 过滤器，对宿主的 `fsync`(74) / `fdatasync`(75) 返回 `SECCOMP_RET_USER_NOTIF`，其余系统调用（含 `close`、`rename`）一律放行；同进程里一个监督线程从过滤器的监听 fd 读通知、决定放行还是延后。拦的是转译之后最终那个宿主系统调用，和转译层怎么发无关。游戏的 arm64 库一个字节都不改。
+- **只在名单内的应用里装**：名单是 `modavd.fsync.defer`，编进去的默认只有 `com.hypergryph.arknights`；`setprop modavd.fsync.defer none` 整体关掉。shim 在每个应用进程的 `initialize()` 里把包名交给本模块（在 detach 判断之前，所以名单外的桥应用也会跑这一步），不在名单里就什么都不装。按包名在**进程启动时**判，不依赖开机时应用是否已装——开机后才装的游戏，首次启动照样装得上。
+- **只延后下载临时文件**：监督线程在放行之后 `readlink /proc/self/fd/N`，和 `modavd.fsync.paths`（默认 `*/HGGameUpdate/HGDownload/*.downloading`）比对，按 fd 缓存结果，并用 `fstat` 的 (st_dev, st_ino) 防 fd 复用误判。认不准的（没分类、异进程、文件被换、补付槽满）一律放行真跑——安全的一侧。
+- **补付**：匹配到一个 `.downloading` fd 时，从游戏那个 fd `dup` 一份我们自己的只读句柄；延后只记一次时间戳，扫描线程每秒看一遍，对有欠账、离上次补付满 5 s 的文件用这个句柄补一次真 fsync（带魔数，过滤器放行、不再进监督线程）。因为补的是 dup 出来的句柄，下载在最后一步把文件改名出 `*.downloading`、关掉自己的 fd 之后，**这份延后的尾巴照样刷得下去**——游戏当成已完成的那个盘上文件不会留着没刷的尾巴。某个文件补完、空闲一段时间后，这个槽连句柄一起释放（32 个槽不会漏满）。只有**正在下载、还没补过**的 `*.downloading`，在 qemu 被杀或客体崩溃时可能少最近约 5 s 的内容（数据盘是 `cache=unsafe`，宿主断电本来就保不住，所以只有这两种情形），游戏续传时按校验重下这一段。索引、SQLite、设置、账号信息不在 `*.downloading` 路径下，照常 fsync。
+- **两种模式**（`modavd.fsync.defer.mode`，默认 `observe`）：`observe` 下每次 fsync 都照常真跑、只计数，用来确认 seccomp 确实拦得到；但要注意，即使 observe，游戏的每次 fsync/fdatasync 也都绕监督线程走一趟。`active` 才真正延后匹配的 fsync 并补付；扫描线程起不来就自动退回 observe，绝不在没人补付时延后。
+- **装了之后能看到的痕迹**（给「默认开还是关」的决定做参考）：`/proc/<pid>/status` 的 `Seccomp_filters` 由 1 变 2（`Seccomp:` 行本来就是 2，zygote 装的）；`NoNewPrivs` 可能由 0 变 1（进程没有时我们设上，待实机核实）；`/proc/<pid>/fd` 多一个 ≥900 的 `anon_inode:[seccomp notify]`；`/proc/<pid>/task` 多出 2–3 个和进程同名的线程。还有：被延后的 fsync 在内核里是可中断等待，没有 `SA_RESTART` 的信号可能让客体 fsync 返回 EINTR（真 ext4 fsync 不会），窗口只有微秒级，但 SQLite 不重试会报 `SQLITE_IOERR_FSYNC`。
+- **发版默认值、以及登录态怎么用，由用户定**：现在编进去的默认名单就是明日方舟，所以 observe 对它默认就会装；要不要发版默认开 `active`、要不要默认就给明日方舟装过滤器，都还没定，登录态、反作弊、崩溃路径也都还没在实机验过。
 - **属性**：`modavd.fsync.defer`（包名名单 / `none`）、`modavd.fsync.paths`（路径规则）、`modavd.fsync.defer.mode`（`observe` / `active`）、`modavd.fsync.log=1`（逐条日志，默认每 60 s 一行计数）。都不持久，改完要新进程重新读。
 
-原生测试 `tests/fsync_defer_test.cc` 直接编译本模块，用计数假函数替掉真正的 fsync，覆盖路径和包名匹配、classify 与 fd 复用重判、observe 从不延后、active 在 5 s 内延后而首次和到期补付、关闭补付、改名补付、名单外一律真 fsync。它不需要转译层、游戏或 GOT 补丁。构建通过不代表运行测试通过；编译后在测试实例执行：
+原生测试 `tests/fsync_defer_test.cc` 直接编译本模块，用真实文件和构造的 `seccomp_notif` 驱动它的内部（分类、延后判定、补付），不装真过滤器；另 fork 一个子进程装上真过滤器，验证 `fsync`/`fdatasync` 会进通知、带魔数的 fsync 和别的调用不进。覆盖路径和包名匹配、classify 与 fd 复用重判、observe 从不延后、active 首次放行后续延后、异进程 / 换文件一律放行、补付 5 s 节流、改名后仍补得到、补完空闲退槽、槽满返回 -1 不越界。不需要转译层、游戏或真实下载。构建通过不代表运行测试通过；编译后在测试实例执行：
 
 ```powershell
 & '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\fsync_defer_test.cc -llog -o '<输出>\fsync-defer-test'
@@ -108,7 +111,7 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 & '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/fsync-defer-test
 ```
 
-真正的下载提速和硬杀安全要在实机上验证：observe 一轮确认调用路径，再跑 active 下的下载 A/B 和下载中途硬杀，确认重下能修复、不留 0 字节索引，名单外应用和官服《阴阳师》回归不变。
+真正的下载提速和硬杀安全要在实机上验证：observe 一轮确认拦得到，再跑 active 下的下载 A/B 和下载中途硬杀，确认重下能修复、不留截短或 0 字节的「已完成」文件，名单外应用和官服《阴阳师》回归不变。另外要在实机核实 `NoNewPrivs` 会不会由 0 变 1、崩溃路径（`kill -SEGV` 等）在装了过滤器后是否还能几秒内产生 tombstone / Bugly 文件。
 
 ## 信号顺序
 

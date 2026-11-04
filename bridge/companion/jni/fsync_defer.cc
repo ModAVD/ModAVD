@@ -41,14 +41,17 @@
  * as a matched .downloading file (same dev/ino, this process, with a payback slot), the
  * supervisor answers val=0/error=0 WITHOUT CONTINUE — the kernel returns success to the
  * guest and skips the fsync (deferred) — and stamps the file's slot. A scanner thread
- * pays the file back out of band (open + magic fsync + close, at most once per
- * kPaybackEveryNs), bounding a hard-kill's loss for an in-flight file to that window.
- * The FIRST fsync on each fd, an fd whose identity cannot be confirmed, a foreign
- * (forked-child) pid, or a full matched list all CONTINUE — the safe direction. close and
- * rename are not filtered: a renamed/deleted file just drops from the table (its data
- * reaches disk via normal writeback; a crash in the last window re-fetches that file's
- * tail, which is the downloader's normal resume). If the scanner cannot start, active
- * falls back to observe so nothing is ever deferred without a payer.
+ * pays the file back out of band (one magic fsync at most once per kPaybackEveryNs),
+ * bounding a hard-kill's loss for an in-flight file to that window. The payback fsync
+ * targets a private handle dup'd from the game's fd when the file was first matched, so the
+ * deferred tail is flushed even after the download's final step renames the file out of
+ * *.downloading and closes its own fd — the on-disk file the game treats as complete is not
+ * left with an unflushed tail. close and rename are not filtered; a slot that has been
+ * fully paid and idle for kRetireIdleNs is freed (its handle closed) so the 32 slots cannot
+ * leak. The FIRST fsync on each fd, an fd whose identity cannot be confirmed, a foreign
+ * (forked-child) pid, or a full matched list all CONTINUE — the safe direction. If the
+ * scanner cannot start, active falls back to observe so nothing is ever deferred without a
+ * payer.
  *
  * SAFETY STRUCTURE (design §5, §9)
  * --------------------------------
@@ -58,15 +61,19 @@
  *     fails (NO_NEW_PRIVS, thread create, seccomp()), nothing is installed and fsync
  *     behaves exactly as today (module inert). The bad state "filter without supervisor"
  *     can therefore not arise from our own error paths.
- *  2. The notification path never blocks: the only work before the reply is the active
- *     defer decision (atomic fd-state reads plus one fstat/access — no lock, no readlink,
- *     no open, no allocation, no real fsync), then SEND. All classification (readlink),
- *     payback (open+fsync) and logging happen AFTER the reply or on other threads. Any
- *     per-notification error is counted and swallowed; the loop never exits. (A
- *     persistent error on the listener fd only slows the loop with a short sleep so
- *     it cannot spin.) A separate watchdog thread reports a supervisor that is stuck
- *     or gone, and prints the periodic summary, so the supervisor never logs on a
- *     timer.
+ *  2. The notification path does only minimal work before the reply: the active defer
+ *     decision (atomic fd-state reads plus one fstat/access — no lock, no readlink, no
+ *     open, no allocation, no real fsync), then SEND. All classification (readlink),
+ *     payback (fsync) and logging happen AFTER the reply or on other threads. The one
+ *     fstat/access on the notify path (and the readlink during classification) acts on the
+ *     file; for a FUSE-backed emulated-storage file that can wait on the FUSE daemon — the
+ *     same dependency the real fsync it replaces already has. The supervisor is serial, so
+ *     a FUSE request stuck there would delay the fsyncs queued behind it (including ones on
+ *     /data); not worse than today's fsync, but worth noting. Any per-notification error is
+ *     counted and swallowed; the loop never exits. (A persistent error on the listener fd
+ *     only slows the loop with a short sleep so it cannot spin.) A separate watchdog thread
+ *     reports a supervisor that is stuck or gone, and prints the periodic summary, so the
+ *     supervisor never logs on a timer.
  *  3. The listener fd lives in the game's fd table, so a stray close() by the game (or
  *     fd-number reuse) would make every later fsync fail with ENOSYS. It is moved to a
  *     high number (>= 900, above where games allocate) with F_DUPFD_CLOEXEC and given
@@ -88,6 +95,17 @@
  *                            default "<any>/HGGameUpdate/HGDownload/<any>.downloading".
  *   modavd.fsync.defer.mode  "observe" (default) or "active" (defer + pay back, see MODES).
  *   modavd.fsync.log         "1" logs every notification; default is a 60 s summary.
+ *
+ * KNOWN EFFECTS (observe and active alike; input to the user decision on defaults)
+ *   - Observable traces of an armed process: Seccomp_filters in /proc/<pid>/status goes
+ *     1 -> 2 (the Seccomp: line stays 2, already set by zygote); NoNewPrivs MAY go 0 -> 1
+ *     (set here if the process lacked it — to be confirmed on device); /proc/<pid>/fd has
+ *     one >= 900 anon_inode:[seccomp notify]; /proc/<pid>/task has 2-3 extra threads named
+ *     like the process (supervisor, watchdog, and in active the scanner).
+ *   - A filtered fsync waits in the kernel interruptibly; a signal delivered without
+ *     SA_RESTART can make the guest's fsync return EINTR, which a real ext4 fsync would
+ *     not. The window is microseconds, but SQLite does not retry and would surface
+ *     SQLITE_IOERR_FSYNC; watch for it on long logged-in runs.
  */
 
 #include <android/fdsan.h>
@@ -157,7 +175,7 @@ constexpr uint32_t kNrFsync = 74;
 constexpr uint32_t kNrFdatasync = 75;
 static_assert(__NR_fsync == 74 && __NR_fdatasync == 75, "x86_64 only");
 
-// Magic second argument that marks an fsync issued by our own (future) payback code:
+// Magic second argument that marks an fsync issued by our own payback code (the scanner):
 // the filter lets such a call through without a notification. fsync(2) only uses its
 // first argument, so the kernel ignores args[1]; a value both non-zero and in the low
 // 32 bits (high 32 bits must be 0) is checked. 0x4D4F4446 = "MODF" (ModAVD fsync).
@@ -173,9 +191,14 @@ constexpr uint64_t kFdsanTagValue = 0x4D4F44465359ull;  // "MODFSY"
 
 constexpr long kSummaryEveryNs = 60L * 1000 * 1000 * 1000;
 constexpr long kStuckAfterNs = 2L * 1000 * 1000 * 1000;
-// (active) a dirty matched file is paid back (one open+fsync+close) at most this often;
-// bounds the data a hard-kill can lose for a file still being written to this window.
+// (active) a dirty matched file is paid back (one magic fsync) at most this often; bounds
+// the data a hard-kill can lose for a file still being written to this window.
 constexpr long kPaybackEveryNs = 5L * 1000 * 1000 * 1000;
+// (active) a matched slot that is fully paid and has seen no new deferral for this long is
+// treated as done (the download renamed the file out of *.downloading and closed it): its
+// payback handle is closed and the slot freed, so the 32 slots cannot leak and a gone file
+// is not retried forever.
+constexpr long kRetireIdleNs = 2L * kPaybackEveryNs;
 
 enum Mode { kObserve = 0, kActive = 1 };
 
@@ -217,7 +240,9 @@ int g_fd_cap = 0;
 // pays at most once per kPaybackEveryNs, by path, with a magic fsync.
 constexpr int kMaxMatched = 32;
 struct MatchedFile {
-  int fd = -1;
+  int fd = -1;          // the game fd that classified this slot (for fd-reuse detection)
+  int payback_fd = -1;  // our own handle to the file, dup'd from the game fd at match time;
+                        // survives the download's final rename so the tail still gets fsync'd
   char path[512] = {};
   std::atomic<long> deferred_ns{0};  // time of most recent deferred fsync (0 = none)
   std::atomic<long> paid_ns{0};      // time of most recent payback (0 = none)
@@ -294,6 +319,12 @@ int MatchedAdd(int fd, const char* path) {
       g_matched[i].fd = fd;
       strncpy(g_matched[i].path, path, sizeof(g_matched[i].path) - 1);
       g_matched[i].path[sizeof(g_matched[i].path) - 1] = '\0';
+      // Dup the game's own fd now, while it still names this .downloading file. Payback
+      // fsyncs this private handle, so the last deferred writes are flushed even after the
+      // download renames the file and closes its fd (96-2). dup is a pure fd-table op (no
+      // FUSE round-trip, unlike open-by-path); if the game already closed the fd (a
+      // post-SEND race) the dup fails and payback falls back to open-by-path.
+      g_matched[i].payback_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
       g_matched[i].deferred_ns.store(0, std::memory_order_relaxed);
       g_matched[i].paid_ns.store(0, std::memory_order_relaxed);
       return i;
@@ -307,6 +338,8 @@ int MatchedAdd(int fd, const char* path) {
 void MatchedRemove(int fd) {
   for (int i = 0; i < kMaxMatched; ++i) {
     if (g_matched[i].fd == fd) {
+      if (g_matched[i].payback_fd >= 0) close(g_matched[i].payback_fd);
+      g_matched[i].payback_fd = -1;
       g_matched[i].fd = -1;
       g_matched[i].path[0] = '\0';
       return;
@@ -435,20 +468,40 @@ void* SupervisorMain(void*) {
 
   // Buffers sized from the kernel's own sizes (it requires exactly-zeroed request
   // space of that size); allocated once, before the loop, so the loop never allocates.
-  auto* req = static_cast<struct seccomp_notif*>(calloc(1, notif_size));
-  auto* resp = static_cast<struct seccomp_notif_resp*>(calloc(1, resp_size));
-  if (req == nullptr || resp == nullptr) {
-    // The filter is already installed; with no buffers we cannot answer. Fall back to
-    // stack buffers of the compiled-in size (kernel 6.1 sizes == sizeof).
-    FD_LOGE("supervisor buffer alloc failed; using stack buffers");
-  }
+  void* reqbuf = calloc(1, notif_size);
+  void* respbuf = calloc(1, resp_size);
   struct seccomp_notif sreq;
   struct seccomp_notif_resp sresp;
-  const bool use_stack = (req == nullptr || resp == nullptr);
-  if (use_stack) {
-    req = &sreq;
-    resp = &sresp;
+  bool use_stack = false;
+  if (reqbuf == nullptr || respbuf == nullptr) {
+    // The filter is already installed; we must get buffers or the game hangs. Prefer the
+    // compiled-in stack structs, but ONLY if the kernel's required sizes fit inside them --
+    // otherwise NOTIF_RECV would write past the buffer. If they do not fit (the kernel's
+    // struct is larger than the one we were built against AND the heap failed), keep
+    // retrying the small allocation rather than risk an out-of-bounds write.
+    if (notif_size <= sizeof(sreq) && resp_size <= sizeof(sresp)) {
+      FD_LOGE("supervisor heap alloc failed; using stack buffers");
+      free(reqbuf);
+      free(respbuf);
+      use_stack = true;
+    } else {
+      FD_LOGE("supervisor heap alloc failed and kernel notif size %zu/%zu exceeds stack "
+              "%zu/%zu; retrying alloc", notif_size, resp_size, sizeof(sreq), sizeof(sresp));
+      while (reqbuf == nullptr) {
+        struct timespec ts = {1, 0};
+        nanosleep(&ts, nullptr);
+        reqbuf = calloc(1, notif_size);
+      }
+      while (respbuf == nullptr) {
+        struct timespec ts = {1, 0};
+        nanosleep(&ts, nullptr);
+        respbuf = calloc(1, resp_size);
+      }
+    }
   }
+  struct seccomp_notif* req = use_stack ? &sreq : static_cast<struct seccomp_notif*>(reqbuf);
+  struct seccomp_notif_resp* resp =
+      use_stack ? &sresp : static_cast<struct seccomp_notif_resp*>(respbuf);
 
   g_sup_alive.store(true, std::memory_order_release);
   g_last_recv_ns.store(NowNs(), std::memory_order_relaxed);
@@ -564,37 +617,76 @@ void* WatchdogMain(void*) {
 // fails) there is nothing left to flush at that path, so the slot is retired; the
 // downloader re-fetches any tail it cannot verify, which is its normal resume path.
 // Pay back one matched slot if it has unpaid deferred fsyncs and was last paid longer ago
-// than kPaybackEveryNs. Returns true if a payback was due (and attempted). Off the notify
-// path: the lock is held only to copy the path, never across the open/fsync/close I/O.
+// than kPaybackEveryNs. The fsync targets the private handle dup'd at match time, which
+// still names the file after the download renames it out of *.downloading, so the deferred
+// tail is flushed (96-2); only if that handle was never captured does it fall back to
+// open-by-path. Returns true if a payback was due (and attempted). No I/O under g_lock:
+// the lock only guards the path copy for the fallback; the fsync runs on a stable fd.
 bool PaybackSlotIfDue(int i, long now) {
   const long deferred = g_matched[i].deferred_ns.load(std::memory_order_acquire);
   const long paid = g_matched[i].paid_ns.load(std::memory_order_relaxed);
   if (deferred == 0 || deferred <= paid) return false;  // nothing unpaid
   if (now - paid < kPaybackEveryNs) return false;        // paid recently enough
-  char path[512];
-  pthread_mutex_lock(&g_lock);  // only to copy the path; no I/O under the lock
-  strncpy(path, g_matched[i].path, sizeof(path) - 1);
-  path[sizeof(path) - 1] = '\0';
-  pthread_mutex_unlock(&g_lock);
-  if (path[0] == '\0') {
-    g_matched[i].paid_ns.store(now, std::memory_order_relaxed);
-    return true;
+  int fd = g_matched[i].payback_fd;
+  bool opened = false;
+  if (fd < 0) {  // handle not captured at match time: fall back to open-by-path
+    char path[512];
+    pthread_mutex_lock(&g_lock);  // only to copy the path; no I/O under the lock
+    strncpy(path, g_matched[i].path, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    pthread_mutex_unlock(&g_lock);
+    if (path[0] != '\0') {
+      fd = open(path, O_RDONLY | O_CLOEXEC);
+      opened = true;
+    }
   }
-  const int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {  // renamed/deleted: nothing to flush here
+  if (fd < 0) {  // renamed/deleted and no captured handle: nothing left to flush here
     g_matched[i].paid_ns.store(now, std::memory_order_relaxed);
     g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   // Magic fsync: the filter lets args[1]==kMagic through without a notification.
   const long r = syscall(__NR_fsync, fd, static_cast<long>(kMagic));
-  close(fd);
+  if (opened) close(fd);
   g_matched[i].paid_ns.store(now, std::memory_order_relaxed);
   if (r == 0)
     g_c_payback.fetch_add(1, std::memory_order_relaxed);
   else
     g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
   return true;
+}
+
+// Free a matched slot whose file is done: fully paid and no new deferral for kRetireIdleNs
+// (the download renamed the file out of *.downloading and stopped fsyncing it). Closes the
+// payback handle, frees the slot, and resets the owning fd to kUnknown so it reclassifies
+// if ever used again. Without this the 32 slots would leak and a gone file be retried
+// forever (96-6). Only a used, fully-paid, quiescent slot is retired.
+void RetireSlotIfIdle(int i, long now) {
+  const long deferred = g_matched[i].deferred_ns.load(std::memory_order_relaxed);
+  const long paid = g_matched[i].paid_ns.load(std::memory_order_relaxed);
+  if (deferred == 0 || deferred > paid) return;  // never deferred, or an unpaid tail remains
+  if (now - paid < kRetireIdleNs) return;        // not quiescent long enough
+  int to_close = -1;
+  pthread_mutex_lock(&g_lock);
+  // Re-check under the lock; the classifier may have reused the slot since.
+  if (g_matched[i].fd >= 0 &&
+      g_matched[i].deferred_ns.load(std::memory_order_relaxed) <=
+          g_matched[i].paid_ns.load(std::memory_order_relaxed)) {
+    const int ownfd = g_matched[i].fd;
+    if (ownfd >= 0 && ownfd < g_fd_cap &&
+        g_fds[ownfd].matched_idx.load(std::memory_order_relaxed) == i) {
+      g_fds[ownfd].matched_idx.store(-1, std::memory_order_relaxed);
+      g_fds[ownfd].state.store(kUnknown, std::memory_order_release);
+    }
+    to_close = g_matched[i].payback_fd;
+    g_matched[i].payback_fd = -1;
+    g_matched[i].fd = -1;
+    g_matched[i].path[0] = '\0';
+    g_matched[i].deferred_ns.store(0, std::memory_order_relaxed);
+    g_matched[i].paid_ns.store(0, std::memory_order_relaxed);
+  }
+  pthread_mutex_unlock(&g_lock);
+  if (to_close >= 0) close(to_close);
 }
 
 void* ScannerMain(void*) {
@@ -608,7 +700,10 @@ void* ScannerMain(void*) {
     struct timespec ts = {1, 0};
     nanosleep(&ts, nullptr);
     const long now = NowNs();
-    for (int i = 0; i < kMaxMatched; ++i) PaybackSlotIfDue(i, now);
+    for (int i = 0; i < kMaxMatched; ++i) {
+      PaybackSlotIfDue(i, now);
+      RetireSlotIfIdle(i, now);
+    }
   }
   return nullptr;
 }
@@ -719,6 +814,10 @@ void ForgetAfterFork() {
     g_fds[i].matched_idx.store(-1, std::memory_order_relaxed);
   }
   for (int i = 0; i < kMaxMatched; ++i) {
+    // Close the handles dup'd in the parent (our own copies in the child's fd table); the
+    // child never defers, so it needs none of them.
+    if (g_matched[i].payback_fd >= 0) close(g_matched[i].payback_fd);
+    g_matched[i].payback_fd = -1;
     g_matched[i].fd = -1;
     g_matched[i].path[0] = '\0';
     g_matched[i].deferred_ns.store(0, std::memory_order_relaxed);

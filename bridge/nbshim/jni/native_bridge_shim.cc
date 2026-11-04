@@ -157,8 +157,9 @@ using GateDetachFn = int (*)(const char* pkg);
 GateDetachFn g_companion_detach = nullptr;
 
 // The companion's modavd_fsync_defer_init (see ShimInitialize). Independent of the
-// arm64 gate: ModAVD#35 defers download fsync in a listed x86 app that needs no
-// translation and is not on the gate list.
+// arm64 gate: ModAVD#35 defers download fsync for a listed app via a seccomp filter on the
+// host fsync syscall. It is called for the listed package whether or not that package is
+// on the gate list.
 using FsyncDeferInitFn = void (*)(const char* pkg);
 FsyncDeferInitFn g_companion_fsync_init = nullptr;
 
@@ -329,10 +330,11 @@ bool ShimInitialize(const void* runtime_cbs, const char* private_dir,
   const GateDetachFn detach = __atomic_load_n(&g_companion_detach, __ATOMIC_ACQUIRE);
   char pkg[128];
   const bool have_pkg = PackageFromPrivateDir(private_dir, pkg, sizeof(pkg));
-  // ModAVD#35: arm fsync deferral for the listed app. Done here, before the detach
-  // branch, so it runs for a NON-gate app too (Arknights is one — it is x86 and
-  // needs no translation). The companion itself no-ops unless the package is on
-  // modavd.fsync.defer, so this call is free for every other app.
+  // ModAVD#35: download fsync deferral for the listed app. Done here, before the detach
+  // branch, so it runs for a NON-gate app too. Arknights is one such app: it ships only
+  // arm64 code and so runs under translation (which is why it reaches this native-bridge
+  // initialize() at all), but it is not on the gate list. The companion itself no-ops
+  // unless the package is on modavd.fsync.defer, so this call is free for every other app.
   const FsyncDeferInitFn fsync_init = __atomic_load_n(&g_companion_fsync_init, __ATOMIC_ACQUIRE);
   if (fsync_init != nullptr && have_pkg) fsync_init(pkg);
   if (detach != nullptr && have_pkg && detach(pkg) == 0) {
