@@ -12,7 +12,7 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 
 **Documentation: <https://modavd.github.io/en/>** (installation, upgrade, feedback, privacy, the components and how to contribute are all there)
 
-> **Version note (current Release vs. `main`)**: this document describes the latest released package, `v0.37.0`. `main` may contain changes that have not been released yet. When you use a downloaded package, go by the notes of that Release and the version inside the package.
+> **Version note (current Release vs. `main`)**: this document describes the latest released package, `v0.37.1`. `main` may contain changes that have not been released yet. When you use a downloaded package, go by the notes of that Release and the version inside the package.
 
 - [What is ModAVD](#what-is-modavd)
 - [Requirements](#requirements)
@@ -31,9 +31,9 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 - The emulator itself comes from Google's open-source [Android Emulator](https://android.googlesource.com/platform/external/qemu/). We changed parts of QEMU, gfxstream (graphics streaming) and Crashpad (crash handling), and the changes are published as patches (`patches/`).
 - adb and the Android system images belong to Google and are covered by the Android Software Development Kit License Agreement, so we cannot distribute them. They are not in the Release; `补全组件.bat` in the package (fetches the Google components) downloads them from the official channels on your computer.
 
-Compared with the official emulator, the published 0.37.0 build no longer uploads usage statistics or crash reports to Google, and no longer checks Google for updates or downloads feature flags. Write-through lowers the risk of qcow2 metadata corruption when an instance is force-killed, but you should still run `sync` first. Memory that Android frees goes back to Windows. The data disk can be enlarged. A batch of graphics, networking and WHPX problems are fixed. From 0.36.0 the package includes the arm64 execution bridge. It has been tested on the official server of *Onmyoji* and, from 0.37.0, on the China server of *Ruyuan*; the other channel builds of *Onmyoji* are on the list because they use the same game and hardening, and any other arm64-only game still has to be verified one by one. For the item-by-item differences see [How ModAVD differs from the official emulator](https://modavd.github.io/en/guide/changes) on the docs site; for each patch see `patches/`.
+Compared with the official emulator, the published 0.37.1 build no longer uploads usage statistics or crash reports to Google, and no longer checks Google for updates or downloads feature flags. Write-through lowers the risk of qcow2 metadata corruption when an instance is force-killed, but you should still run `sync` first. Memory that Android frees goes back to Windows. The data disk can be enlarged. A batch of graphics, networking and WHPX problems are fixed. From 0.36.0 the package includes the arm64 execution bridge. It has been tested on the official server of *Onmyoji* and, from 0.37.1, on the China server of *Ruyuan*; the other channel builds of *Onmyoji* are on the list because they use the same game and hardening, and any other arm64-only game still has to be verified one by one. For the item-by-item differences see [How ModAVD differs from the official emulator](https://modavd.github.io/en/guide/changes) on the docs site; for each patch see `patches/`.
 
-Version numbers have been written as `0.<build number>.<repackage count>` since `0.32.1`: 0 means it is still in beta, and the build number is the mas-N. The current version is `0.37.0` (build number mas-37).
+Version numbers have been written as `0.<build number>.<repackage count>` since `0.32.1`: 0 means it is still in beta, and the build number is the mas-N. The current version is `0.37.1` (build number mas-37).
 
 This repository holds the emulator patches, the arm64 execution bridge ([bridge/](bridge/), in Chinese) and the bundled scripts ([package/](package/), in Chinese). The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), and the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME).
 
@@ -52,7 +52,7 @@ This repository holds the emulator patches, the arm64 execution bridge ([bridge/
 
 ## Install
 
-1. Download `ModAVD-0.37.0-win-x64.zip` from [Releases](../../releases).
+1. Download `ModAVD-0.37.1-win-x64.zip` from [Releases](../../releases).
 2. Right-click it and choose Extract All (the zip has no outer folder, so do not use "extract here"), and put the resulting folder in a path with only ASCII letters and digits, for example `D:\ModAVD`.
 3. Double-click `补全组件.bat` in the folder (fetches the Google components). After you accept Google's license agreement, it downloads adb and the Android 14 system image (about 1.5 GB).
 4. In AUTO-MAS, open **模拟器管理** (Emulator Management), click **管理模拟器** (Manage emulators) → **添加魔改 AVD（内测）** (Add ModAVD (beta)), choose this folder, and add it once the check passes. You can also point the bundled `ModAVD.exe` or `tools\modavd.exe` at this root folder directly.

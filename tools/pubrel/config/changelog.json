@@ -1,5 +1,25 @@
 [
   {
+    "version": "v0.37.1",
+    "build": 37,
+    "min_automas": "5.7.0",
+    "changes": {
+      "变更": [
+        "包里的管理器 ModAVD.exe 和命令行 tools\\modavd.exe 从 0.3.0 升到 0.3.1；模拟器还是 mas-37，没有重编。各项改动见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases)。",
+        "开发、测试用的根目录可以在 mas-avd.json 里写 portBase，换一段实例端口，不再和同一台电脑上别的根目录抢端口。AUTO-MAS 不认这个设置，设了的根目录不要加进 AUTO-MAS。（[#75](https://github.com/ModAVD/ModAVD/issues/75)）"
+      ],
+      "修复": [
+        "用管理器或命令行开机的实例不再用 netsim，也就不再连整机共用的 netsimd；以前它一卡住，之后开的模拟器都开不了机。（[#82](https://github.com/ModAVD/ModAVD/issues/82)）",
+        "用管理器或命令行关机时，先让前台应用退到后台存数据、把数据写回磁盘，再走安卓的正常关机。以前等安卓关机超时以后只能直接结束进程，等于断电，游戏最后写的文件可能丢失。（[#88](https://github.com/ModAVD/ModAVD/issues/88)）",
+        "只在 Windows「Internet 选项」里设了代理的电脑上，用 modavd update 从 GitHub 更新连不上；现在和补全组件一样读这个代理。（[#78](https://github.com/ModAVD/ModAVD/issues/78)）",
+        "打开管理器时，不会再另外弹出一个完整的 Edge 浏览器窗口：管理器用的 Edge 不再自动登录 Microsoft 账户，也不同步、不加载扩展；关掉管理器窗口时，也不会再在后台启动你自己的 Edge。（[#90](https://github.com/ModAVD/ModAVD/issues/90)）"
+      ],
+      "说明": [
+        "升级后打开管理器，窗口出来以后会在后台删掉管理器旧的浏览器配置目录 %LOCALAPPDATA%\\ModAVD\\ui-edge；同一台电脑上还开着旧版管理器时先跳过，下次打开再删。里面是以前同步进去的收藏夹、历史记录和密码的副本，你自己的 Edge 和 Microsoft 账户里的数据不受影响。（[#90](https://github.com/ModAVD/ModAVD/issues/90)）"
+      ]
+    }
+  },
+  {
     "version": "v0.37.0",
     "build": 37,
     "min_automas": "5.7.0",
