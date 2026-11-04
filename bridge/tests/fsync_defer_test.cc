@@ -104,10 +104,10 @@ void SetUp(int mode) {
     g_fds[i].matched_idx.store(-1);
   }
   for (int i = 0; i < kMaxMatched; ++i) {
-    if (g_matched[i].payback_fd >= 0) close(g_matched[i].payback_fd);
-    g_matched[i].payback_fd = -1;
+    ClosePaybackHandle(g_matched[i].payback_fd.exchange(-1));  // tagged close; no-op if -1
     g_matched[i].fd = -1;
     g_matched[i].path[0] = '\0';
+    g_matched[i].matched_ns.store(0);
     g_matched[i].deferred_ns.store(0);
     g_matched[i].paid_ns.store(0);
   }
@@ -219,7 +219,7 @@ int main() {
     CHECK(Classify(fd, nullptr, 0) == kMatched);
     const int idx = g_fds[fd].matched_idx.load();
     CHECK(idx >= 0);
-    CHECK(g_matched[idx].payback_fd >= 0);   // a private handle was dup'd at match time
+    CHECK(g_matched[idx].payback_fd.load() >= 0);  // a private handle was dup'd at match time
     const long now = NowNs();
     g_matched[idx].deferred_ns.store(now);   // one unpaid deferred fsync
     g_matched[idx].paid_ns.store(0);
@@ -259,7 +259,7 @@ int main() {
     CHECK(g_matched[idx].fd == fd);
     RetireSlotIfIdle(idx, now + kRetireIdleNs + 1);  // idle past the cap -> retire
     CHECK(g_matched[idx].fd == -1);                  // slot freed
-    CHECK(g_matched[idx].payback_fd == -1);          // handle closed
+    CHECK(g_matched[idx].payback_fd.load() == -1);   // handle closed
     CHECK(g_fds[fd].matched_idx.load() == -1);
     CHECK(g_fds[fd].state.load() == kUnknown);       // will reclassify if used again
     close(fd);
