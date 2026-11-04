@@ -221,6 +221,10 @@ int g_pattern_count = 0;
 int g_mode = kObserve;
 std::atomic<bool> g_log_each{false};
 std::atomic<bool> g_installed{false};
+// Set by the atexit handler (FlushAndTeardown) on the normal exit() path: the scanner and
+// watchdog loops see it and stop. The supervisor deliberately ignores it -- it must keep
+// answering fsyncs until the process actually dies (see FlushAndTeardown).
+std::atomic<bool> g_shutdown{false};
 char g_pkg[128] = {};
 pid_t g_pid = 0;
 
@@ -503,6 +507,21 @@ bool DecideDefer(const struct seccomp_notif* req) {
 
 // The notify path's full decision: observe never defers; active defers only what
 // DecideDefer approves. One function so the call site and the unit test share it.
+//
+// EINTR / SQLite (hardening item 2): the filter traps *every* fsync/fdatasync (classic BPF
+// cannot see the path), so a database fsync is trapped too -- but DecideDefer only ever defers
+// a kMatched *.downloading fd, so a db/SQLite fsync is always CONTINUE'd (run for real), never
+// deferred: "db goes around the deferral" is structural here, not a special case. What CANNOT
+// be removed in a pure-seccomp design is the EINTR window: while the guest thread waits for our
+// SEND, a signal without SA_RESTART makes the trapped fsync return EINTR to the guest, and
+// SQLite does not retry fsync -> SQLITE_IOERR_FSYNC. The kernel makes the USER_NOTIF wait
+// interruptible and offers no "uninterruptible"/auto-restart filter flag on mainline / this
+// kernel, and BPF cannot tell a db fsync from a download fsync by path to spare it the trap. We
+// only minimize the window (the CONTINUE decision is cheap; one fast supervisor); g_c_send_enoent
+// already counts how often a trapped fsync was interrupted/gone before SEND -- the on-device
+// EINTR exposure. Full elimination needs either narrowing the filter to just the syscall the
+// downloader uses, IF on-device shows the downloader and SQLite use different fsync vs fdatasync
+// (untested), or the in-kernel .ko route (no userspace trap at all).
 bool ShouldDefer(const struct seccomp_notif* req) {
   return (g_mode == kActive) && DecideDefer(req);
 }
@@ -560,7 +579,7 @@ void* SupervisorMain(void*) {
   g_sup_alive.store(true, std::memory_order_release);
   g_last_recv_ns.store(NowNs(), std::memory_order_relaxed);
 
-  for (;;) {  // never exits
+  for (;;) {  // never exits: answers fsyncs until the process dies (FlushAndTeardown leaves it running on purpose)
     // ---- notification path: RECV -> (cheap defer decision) -> SEND ------------
     if (!use_stack) {
       memset(req, 0, notif_size);
@@ -633,6 +652,7 @@ void* WatchdogMain(void*) {
   for (;;) {
     struct timespec ts = {1, 0};
     nanosleep(&ts, nullptr);
+    if (g_shutdown.load(std::memory_order_acquire)) break;  // process exiting: stop the periodic summary
     const long now = NowNs();
     const long since = g_handling_since_ns.load(std::memory_order_acquire);
     if (since != 0 && now - since > kStuckAfterNs && since != reported_since) {
@@ -762,6 +782,7 @@ void* ScannerMain(void*) {
   for (;;) {
     struct timespec ts = {1, 0};
     nanosleep(&ts, nullptr);
+    if (g_shutdown.load(std::memory_order_acquire)) break;  // process exiting: FlushAndTeardown has flushed
     const long now = NowNs();
     for (int i = 0; i < kMaxMatched; ++i) {
       PaybackSlotIfDue(i, now);
@@ -769,6 +790,47 @@ void* ScannerMain(void*) {
     }
   }
   return nullptr;
+}
+
+// (active) hardening item 1 -- exit flush. On the normal exit() path, flush every matched file
+// that still has an unpaid deferred fsync RIGHT NOW: do not wait for the scanner's next 1s tick
+// or the kPaybackEveryNs cap. A magic fsync (args[1]==kMagic) is let through by the filter, so
+// this runs in-kernel and needs no supervisor. It uses only the handle dup'd at match time (no
+// g_lock, no open-by-path) so it is safe to call from an atexit handler while other threads run;
+// a slot whose handle was never captured keeps at most its <=kPaybackEveryNs tail, which the
+// downloader re-fetches on resume. Called before g_shutdown stops the scanner, so nothing is
+// left unflushed when the process exits cleanly.
+void FlushAllDeferred() {
+  for (int i = 0; i < kMaxMatched; ++i) {
+    const long deferred = g_matched[i].deferred_ns.load(std::memory_order_acquire);
+    const long paid = g_matched[i].paid_ns.load(std::memory_order_relaxed);
+    if (deferred == 0 || deferred <= paid) continue;  // nothing unpaid
+    const int fd = g_matched[i].payback_fd.load(std::memory_order_relaxed);
+    if (fd < 0) {  // no captured handle: nothing to flush here (tail re-downloads)
+      g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    const long r = syscall(__NR_fsync, fd, static_cast<long>(kMagic));
+    g_matched[i].paid_ns.store(NowNs(), std::memory_order_relaxed);
+    if (r == 0)
+      g_c_payback.fetch_add(1, std::memory_order_relaxed);
+    else
+      g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// atexit handler (registered after arming). Hardening items 1 and 3. (1) flush the download's
+// still-deferred tail now; (3) tell the periodic threads to stop. We deliberately do NOT close
+// the listener or stop the supervisor: on the normal exit() path other threads can still fsync
+// (the Java runtime, SQLite close, libc cleanup), and a trapped fsync with the listener gone
+// returns ENOSYS -- turning teardown into IO errors, a regression, not a hardening. Leaving the
+// supervisor answering until the process dies (microseconds later) is strictly safer; the
+// listener fd and the supervisor thread die with the process. So item 3 here is "stop the
+// non-critical scanner/watchdog cleanly", not "tear the filter down early".
+void FlushAndTeardown() {
+  if (!g_installed.load(std::memory_order_acquire)) return;
+  g_shutdown.store(true, std::memory_order_release);  // (3): scanner + watchdog loops exit on their next tick
+  if (g_mode == kActive) FlushAllDeferred();          // (1): flush the deferred tail immediately
 }
 
 // Tell both threads to go (listener >= 0) or to give up (listener < 0).
@@ -1038,6 +1100,11 @@ extern "C" __attribute__((visibility("default"))) void modavd_fsync_defer_init(c
   const int listener = InstallSeccompObserver();
   if (listener < 0) return;
   g_installed.store(true, std::memory_order_release);
+  // Hardening items 1 and 3: on the normal exit() path, flush the still-deferred download tail
+  // and stop the periodic threads (see FlushAndTeardown). atexit runs for exit()/return-from-main
+  // only, not _exit/abort/kill -- a hard-kill still loses at most the <=kPaybackEveryNs tail,
+  // which the downloader re-fetches on resume.
+  atexit(&FlushAndTeardown);
   FD_LOGI("armed pkg=%s mode=%s(seccomp-user-notif) listener_fd=%d patterns=%d (first=%s) fd_cap=%d log=%d",
           pkg, g_mode == kActive ? "active" : "observe", listener, g_pattern_count, g_patterns[0],
           g_fd_cap, g_log_each.load() ? 1 : 0);

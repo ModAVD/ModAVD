@@ -97,12 +97,14 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 - **只在名单内的应用里装**：名单是 `modavd.fsync.defer`，编进去的默认只有 `com.hypergryph.arknights`；`setprop modavd.fsync.defer none` 整体关掉。shim 在每个应用进程的 `initialize()` 里把包名交给本模块（在 detach 判断之前，所以名单外的桥应用也会跑这一步），不在名单里就什么都不装。按包名在**进程启动时**判，不依赖开机时应用是否已装——开机后才装的游戏，首次启动照样装得上。
 - **只延后下载临时文件**：监督线程在放行之后 `readlink /proc/self/fd/N`，和 `modavd.fsync.paths`（默认 `*/HGGameUpdate/HGDownload/*.downloading`）比对，按 fd 缓存结果，并用 `fstat` 的 (st_dev, st_ino) 防 fd 复用误判。认不准的（没分类、异进程、文件被换、补付槽满）一律放行真跑——安全的一侧。
 - **补付**：匹配到一个 `.downloading` fd 时，从游戏那个 fd `dup` 一份我们自己的句柄（和游戏共用同一个打开的文件、权限相同，不是只读；只在 active 模式 dup，放到 ≥900 的高号、打 fdsan 标记）；延后只记一次时间戳，扫描线程每秒看一遍，对有欠账、离上次补付满 5 s 的文件用这个句柄补一次真 fsync（带魔数，过滤器放行、不再进监督线程）。因为补的是 dup 出来的句柄，下载在最后一步把文件改名出 `*.downloading`、关掉自己的 fd 之后，**这份延后的尾巴照样刷得下去**——把「游戏当成已完成、却还没落盘的尾部」的硬杀丢失窗口从正常回写的约 30 s 缩到最多约 5–6 s（最后一次延后到下一次补付之间），不是 0。某个文件补完、或只收到过首次 fsync（从没延后过），空闲一段时间后这个槽连句柄一起释放（32 个槽不会漏满、句柄不会一直开着）。正在下载、还没补过的 `*.downloading`，在 qemu 被杀或客体崩溃时可能少最近约 5 s 的内容（数据盘是 `cache=unsafe`，宿主断电本来就保不住，所以只有这两种情形），游戏续传时按校验重下这一段。索引、SQLite、设置、账号信息不在 `*.downloading` 路径下，照常 fsync。
+- **退出时收尾（退出必刷 + 停线程）**：进程走正常 `exit()` 退出时（`atexit` 钩子），先把所有还欠账的 `.downloading` 立刻各补一次真 fsync（不等扫描线程下一个 1 s tick、也不受 5 s 节流限制），所以**优雅退出不丢尾巴**；只有 `_exit`／`abort`／被杀不走 `atexit`，才会丢最近约 5 s、靠续传重下。补完置一个关停标志，让扫描线程和看门狗线程各自退出循环。但**监督线程和监听 fd 不在退出时主动关**：正常退出路径上别的线程（Java 运行时、SQLite 关库、libc 收尾）可能还在发 fsync，提前关掉监听 fd 会让这些 fsync 收到 `ENOSYS`、变成 IO 错误（那是退步不是加固）；让监督线程一直答到进程真正消失（之后几微秒随进程一起没）更安全。
 - **两种模式**（`modavd.fsync.defer.mode`，默认 `observe`）：`observe` 下每次 fsync 都照常真跑、只计数，用来确认 seccomp 确实拦得到；但要注意，即使 observe，游戏的每次 fsync/fdatasync 也都绕监督线程走一趟。`active` 才真正延后匹配的 fsync 并补付；扫描线程起不来就自动退回 observe，绝不在没人补付时延后。
-- **装了之后能看到的痕迹**（给「默认开还是关」的决定做参考）：`/proc/<pid>/status` 的 `Seccomp_filters` 由 1 变 2（`Seccomp:` 行本来就是 2，zygote 装的）；`NoNewPrivs` 可能由 0 变 1（进程没有时我们设上，待实机核实）；`/proc/<pid>/fd` 多一个 ≥900 的 `anon_inode:[seccomp notify]`；`/proc/<pid>/task` 多出 2–3 个和进程同名的线程。还有：被延后的 fsync 在内核里是可中断等待，没有 `SA_RESTART` 的信号可能让客体 fsync 返回 EINTR（真 ext4 fsync 不会），窗口只有微秒级，但 SQLite 不重试会报 `SQLITE_IOERR_FSYNC`。
+- **装了之后能看到的痕迹**（给「默认开还是关」的决定做参考）：`/proc/<pid>/status` 的 `Seccomp_filters` 由 1 变 2（`Seccomp:` 行本来就是 2，zygote 装的）；`NoNewPrivs` 由 0 变 1（进程没有时我们设上，实机已核实确会 0→1，见 96-3）；`/proc/<pid>/fd` 多一个 ≥900 的 `anon_inode:[seccomp notify]`；`/proc/<pid>/task` 多出 2–3 个和进程同名的线程。
+- **EINTR 不能在纯 seccomp 里消除**：过滤器拦**每一次** fsync/fdatasync（classic BPF 看不到路径），所以数据库的 fsync 也被拦——但只有匹配到的 `.downloading` fd 会被延后，数据库（SQLite 等，不在 `.downloading` 路径）永远走放行（真跑 fsync）、从不延后，「数据库走旁路」在这里是结构性的。消不掉的是那个可中断窗口：客体线程等我们回 SEND 时，一个没有 `SA_RESTART` 的信号会让这次被拦的 fsync 对客体返回 EINTR，而 SQLite 不重试 fsync → `SQLITE_IOERR_FSYNC`。内核把 USER_NOTIF 等待设成可中断、主线/本内核没有「不可中断／自动重启」的过滤器标志，BPF 又没法按路径把数据库的 fsync 从拦截里摘出去。只能把窗口压到最小（放行判定很便宜、单监督线程快）；`send_enoent` 计数就是实机上被信号打断/已消失的次数，即 EINTR 暴露度。要彻底消除，要么把过滤器收窄到只拦下载实际用的那个系统调用（前提是实机证明下载和 SQLite 用的是不同的 fsync／fdatasync，未验），要么走内核 `.ko`（根本不在用户态设陷阱）。
 - **发版默认值、以及登录态怎么用，由用户定**：现在编进去的默认名单就是明日方舟，所以 observe 对它默认就会装；要不要发版默认开 `active`、要不要默认就给明日方舟装过滤器，都还没定，登录态、反作弊、崩溃路径也都还没在实机验过。
 - **属性**：`modavd.fsync.defer`（包名名单 / `none`）、`modavd.fsync.paths`（路径规则）、`modavd.fsync.defer.mode`（`observe` / `active`）、`modavd.fsync.log=1`（逐条日志，默认每 60 s 一行计数）。都不持久，改完要新进程重新读。
 
-原生测试 `tests/fsync_defer_test.cc` 直接编译本模块，用真实文件和构造的 `seccomp_notif` 驱动它的内部（分类、延后判定、补付）；BPF 过滤器用一个解释器跑 `g_filter` 验判定（不 fork、不装真过滤器），验证 `fsync`/`fdatasync` 进通知、带魔数的 fsync 和别的调用不进、异 arch 放行。覆盖路径和包名匹配、classify 与 fd 复用重判、observe 从不延后、active 首次放行后续延后、异进程 / 换文件一律放行、补付 5 s 节流、改名后仍补得到、补完 / 从没延后过的槽空闲退掉、槽满返回 -1 不越界、ForgetAfterFork。不需要转译层、游戏或真实下载。构建通过不代表运行测试通过；编译后在测试实例执行：
+原生测试 `tests/fsync_defer_test.cc` 直接编译本模块，用真实文件和构造的 `seccomp_notif` 驱动它的内部（分类、延后判定、补付）；BPF 过滤器用一个解释器跑 `g_filter` 验判定（不 fork、不装真过滤器），验证 `fsync`/`fdatasync` 进通知、带魔数的 fsync 和别的调用不进、异 arch 放行。覆盖路径和包名匹配、classify 与 fd 复用重判、observe 从不延后、active 首次放行后续延后、异进程 / 换文件一律放行、补付 5 s 节流、改名后仍补得到、补完 / 从没延后过的槽空闲退掉、槽满返回 -1 不越界、ForgetAfterFork、退出必刷（`FlushAllDeferred` 忽略 5 s 节流把欠账立刻刷光、`FlushAndTeardown` 只在装过之后置关停标志并刷）。不需要转译层、游戏或真实下载。构建通过不代表运行测试通过；编译后在测试实例执行：
 
 ```powershell
 & '<NDK>\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe' --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror -fno-exceptions -fno-rtti -static-libstdc++ bridge\tests\fsync_defer_test.cc -llog -o '<输出>\fsync-defer-test'
@@ -111,7 +113,7 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 & '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/fsync-defer-test
 ```
 
-真正的下载提速和硬杀安全要在实机上验证：observe 一轮确认拦得到，再跑 active 下的下载 A/B 和下载中途硬杀，确认重下能修复、不留截短或 0 字节的「已完成」文件，名单外应用和官服《阴阳师》回归不变。另外要在实机核实 `NoNewPrivs` 会不会由 0 变 1、崩溃路径（`kill -SEGV` 等）在装了过滤器后是否还能几秒内产生 tombstone / Bugly 文件。
+实机已验（见 `results/2026-11-04-*`）：active 下载 A/B（observe 5.95 → active 40.05 MB/s，约 6.7×，延后约 194 万次、stuck=0、无卡死）；`NoNewPrivs` 确会 0→1（96-3）；对装了过滤器的进程 `kill -SEGV`／`-ABRT` 和没装一样约 0.8 s 退出、不挂住（96-3，明日方舟自带崩溃处理器接管，debuggerd→crash_dump 路径没走到，故仅限「对明日方舟无可见危害」）。仍待实机：退出必刷 + 停线程这轮改动（下载→解压→各种退出→重开自愈、硬杀中途重下修复），EINTR 真机复现，以及登录态下的反作弊 / 卡死、崩溃走到 debuggerd 的路径、名单外应用与官服《阴阳师》回归。
 
 ## 信号顺序
 

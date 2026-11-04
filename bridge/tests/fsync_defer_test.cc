@@ -14,8 +14,11 @@
 // changed; payback pays a dirty slot once per cap, is a no-op when paid recently, and (via
 // the handle dup'd at match time) still flushes a file after it is renamed out of
 // *.downloading; an idle fully-paid slot is retired; a full matched list never defers;
-// AccountFsync counts a foreign pid; ForgetAfterFork wipes the tables; and the BPF filter
-// program's verdicts (interpreted, no kernel) for fsync/fdatasync/magic/other/arch.
+// AccountFsync counts a foreign pid; ForgetAfterFork wipes the tables; exit-flush
+// (FlushAllDeferred / FlushAndTeardown) flushes every unpaid slot immediately -- ignoring the
+// scanner's kPaybackEveryNs cap -- and FlushAndTeardown sets g_shutdown and flushes only when
+// armed; and the BPF filter program's verdicts (interpreted, no kernel) for
+// fsync/fdatasync/magic/other/arch.
 #include "../companion/jni/fsync_defer.cc"
 
 #include <cstdio>
@@ -118,6 +121,8 @@ void SetUp(int mode) {
   g_c_deferred.store(0);
   g_c_payback.store(0);
   g_c_payback_err.store(0);
+  g_shutdown.store(false);
+  g_installed.store(false);
 }
 }  // namespace
 
@@ -307,6 +312,69 @@ int main() {
     CHECK(g_fds[fd].matched_idx.load() == -1);
     const struct seccomp_notif req = MakeReq(fd, me);
     CHECK(!ShouldDefer(&req));  // child: nothing classified -> never defers
+    close(fd);
+  }
+
+  // --- exit-flush (hardening 1): FlushAllDeferred flushes an unpaid slot NOW, ignoring both the
+  // kPaybackEveryNs cap and the "paid recently" guard that bounds the scanner -----------------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    CHECK(g_matched[idx].payback_fd.load() >= 0);  // a private handle was dup'd at match time
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);
+    g_matched[idx].paid_ns.store(now);          // "just paid": the scanner would skip (cap not elapsed)
+    CHECK(!PaybackSlotIfDue(idx, now));         // confirm the scanner would NOT flush it now
+    g_matched[idx].deferred_ns.store(now + 1);  // one unpaid fsync after that payment
+    FlushAllDeferred();                         // exit flush ignores the cap -> flushes it anyway
+    CHECK(g_c_payback.load() == 1);
+    CHECK(g_c_payback_err.load() == 0);
+    CHECK(g_matched[idx].paid_ns.load() >= now + 1);  // marked paid
+    FlushAllDeferred();                         // a clean slot (deferred <= paid) is left alone
+    CHECK(g_c_payback.load() == 1);             // nothing new flushed
+    close(fd);
+  }
+
+  // --- exit-flush with no captured handle: counts an error, flushes nothing ----------
+  SetUp(kActive);
+  {
+    const long now = NowNs();
+    g_matched[0].matched_ns.store(now);
+    g_matched[0].deferred_ns.store(now);
+    g_matched[0].paid_ns.store(0);
+    g_matched[0].payback_fd.store(-1);  // handle never captured -> nothing to flush
+    FlushAllDeferred();
+    CHECK(g_c_payback.load() == 0);
+    CHECK(g_c_payback_err.load() == 1);
+    g_matched[0].matched_ns.store(0);   // leave the slot clean (SetUp's tagged close expects no handle)
+    g_matched[0].deferred_ns.store(0);
+  }
+
+  // --- FlushAndTeardown (hardening 1 + 3): sets g_shutdown and flushes, but only when armed ----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);
+    g_matched[idx].paid_ns.store(0);
+    g_installed.store(false);
+    FlushAndTeardown();            // not armed -> no-op: no shutdown, no flush
+    CHECK(!g_shutdown.load());
+    CHECK(g_c_payback.load() == 0);
+    g_installed.store(true);
+    FlushAndTeardown();            // armed -> sets shutdown and flushes the unpaid slot
+    CHECK(g_shutdown.load());
+    CHECK(g_c_payback.load() == 1);
+    g_installed.store(false);      // reset the global for any later case
+    g_shutdown.store(false);
     close(fd);
   }
 
