@@ -992,9 +992,12 @@ def annotated_manifest(template, expected, build, series, upstream):
     text, n = re.subn(r"\d{4}-\d{2}-\d{2} 生成", datetime.date.today().isoformat() + " 生成", text)
     if n != 1:
         raise ValueError("Manifest header date not found")
+    # Unchanged series keep their published directory, even when the snapshot exports them under this build.
+    published = {(s["repo"], s["base"], s["head"]): s["dir"] for s in load(REPO / "patches/series.json")}
     for s in series:
+        directory = published.get((s["repo"], s["base"], s["head"]), s["dir"])
         text, n = re.subn(rf"(<!-- {re.escape(s['repo'])}：AOSP 基准 )[0-9a-f]{{40}}，本地分支 \S+ = 基准 \+ \d+ 个提交，HEAD [0-9a-f]{{40}} -->",
-                          lambda m: f"{m[1]}{s['base']}，补丁系列 patches/{s['dir']} = 基准 + {s['count']} 个提交，HEAD {s['head']} -->", text)
+                          lambda m: f"{m[1]}{s['base']}，补丁系列 patches/{directory} = 基准 + {s['count']} 个提交，HEAD {s['head']} -->", text)
         if n != 1:
             raise ValueError(f"Manifest comment for {s['repo']} not found")
     for p in expected.findall("project"):

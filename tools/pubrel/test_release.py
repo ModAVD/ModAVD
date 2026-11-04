@@ -7,10 +7,13 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tarfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
+import xml.etree.ElementTree as ET
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -487,6 +490,100 @@ class ReleaseChecks(unittest.TestCase):
         for bad in ["0.33.0", "v37.2.10-mas32", "v0.33", "v00.33.0"]:
             with self.assertRaises(ValueError):
                 checks.version_key(bad)
+
+    def annotated_series(self, series, recorded):
+        root = self.folder()
+        release.save(root / "patches/series.json", recorded)
+        template = '<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
+        for s in series:
+            template += (f"  <!-- {s['repo']}：AOSP 基准 {'0' * 40}，本地分支 old = 基准 + 1 个提交，HEAD {'1' * 40} -->\n"
+                         f'  <project path="{s["repo"]}" revision="{"1" * 40}"/>\n')
+        template += '</manifest>\n'
+        expected = ET.fromstring(template)
+        for p, s in zip(expected.findall("project"), series):
+            p.set("revision", s["head"])
+        original = json.dumps(series, sort_keys=True)
+        with mock.patch.object(release, "REPO", root):
+            text = release.annotated_manifest(template, expected, "mas36", series, "37.2.10")
+        self.assertEqual(json.dumps(series, sort_keys=True), original)
+        self.assertEqual(release.manifest_shape(ET.fromstring(text)), release.manifest_shape(expected))
+        return text
+
+    def test_annotated_manifest_reuses_recorded_directory(self):
+        s = {"repo": "external/example", "base": "a" * 40, "head": "b" * 40, "dir": "example/mas36", "count": 2}
+        recorded = [{**s, "head": "c" * 40, "dir": "example/mas37"}, {**s, "dir": "example/mas35"}]
+        text = self.annotated_series([s], recorded)
+        self.assertIn("补丁系列 patches/example/mas35 = 基准 + 2 个提交", text)
+        self.assertNotIn("patches/example/mas36", text)
+        self.assertNotIn("patches/example/mas37", text)
+
+    def test_annotated_manifest_uses_new_directory(self):
+        s = {"repo": "external/example", "base": "a" * 40, "head": "b" * 40, "dir": "example/mas36", "count": 3}
+        # Neither a different base nor a different repository identifies this series, even with the same HEAD.
+        recorded = [{**s, "base": "c" * 40, "dir": "example/mas35"},
+                    {**s, "repo": "external/other", "dir": "other/mas35"}]
+        text = self.annotated_series([s], recorded)
+        self.assertIn("补丁系列 patches/example/mas36 = 基准 + 3 个提交", text)
+
+    def test_annotated_manifest_mixed_directories_match_series_json(self):
+        series = [{"repo": f"external/{name}", "base": "a" * 40, "head": head * 40,
+                   "dir": name + "/mas36", "count": 1} for name, head in [("one", "b"), ("two", "c"), ("three", "d")]]
+        recorded = [{**s, "dir": directory} for s, directory in
+                    zip(series, ["one/mas36", "two/mas35", "three/module-version22"])]
+        text = self.annotated_series(series, recorded)
+        comments = dict(re.findall(r"<!-- (\S+)：AOSP 基准 [0-9a-f]{40}，补丁系列 patches/(\S+) =", text))
+        self.assertEqual(comments, {s["repo"]: s["dir"] for s in recorded})
+
+    def test_annotated_manifest_mas36(self):
+        root = self.folder()
+        published = release.REPO / "manifests/manifest-mas36.xml"
+        expected = ET.fromstring(published.read_bytes())
+        revisions = {p.get("path"): p.get("revision") for p in expected.findall("project")}
+        recorded = release.load(release.REPO / "patches/series.json")
+        # Reconstruct the committed build input. snapshot_data gives every series the current build's directory.
+        series = []
+        for s in release.load(HERE / "config/mas30.json")["series"]:
+            actual = next(r for r in recorded if (r["repo"], r["base"], r["head"]) ==
+                          (s["repo"], s["base"], revisions[s["repo"]]))
+            series.append({**actual, "dir": s["dir"].split("/")[0] + "/mas36"})
+        tracked = [published, release.REPO / "patches/series.json"]
+        tracked += sorted((release.REPO / "release").glob("0.36.0.*"))
+        patches = []
+        for s in series:
+            actual = next(r for r in recorded if (r["repo"], r["base"], r["head"]) == (s["repo"], s["base"], s["head"]))
+            files = sorted((release.REPO / "patches" / actual["dir"]).glob("*.patch"))
+            self.assertEqual(len(files), s["count"])
+            patches += files
+        tracked += patches
+        before = {str(p): release.sha(p) for p in tracked}
+        template = release.MANIFEST_MAS30.read_text(encoding="utf-8")
+        base = ET.fromstring(published.read_bytes())
+        for p in base.findall("project"):
+            for s in series:
+                if p.get("path") == s["repo"]:
+                    p.set("revision", s["base"])
+        manifests = [("manifest-mas36.xml", expected), ("manifest-aosp-base.xml", base)]
+        directories = {s["repo"]: s["dir"] for s in recorded if any(
+            (s["repo"], s["base"], s["head"]) == (r["repo"], r["base"], r["head"]) for r in series)}
+        self.assertEqual(directories, {"external/qemu": "qemu/mas36", "hardware/google/gfxstream": "gfxstream/mas35",
+                                       "external/crashpad": "crashpad/module-version22"})
+        for name, tree in manifests:
+            text = release.annotated_manifest(template, tree, "mas36", series, "37.2.10")
+            (root / name).write_text(text, encoding="utf-8")
+            comments = dict(re.findall(r"<!-- (\S+)：AOSP 基准 [0-9a-f]{40}，补丁系列 patches/(\S+) =", text))
+            self.assertEqual(comments, directories)
+            for directory in comments.values():
+                self.assertTrue((release.REPO / "patches" / directory).is_dir(), directory)
+            self.assertEqual(release.manifest_shape(ET.fromstring(text)), release.manifest_shape(tree))
+            if name == published.name:
+                normalize = lambda value: re.sub(r"\d{4}-\d{2}-\d{2}(?= 生成)|(?<=补丁系列 patches/)\S+", "", value)
+                self.assertEqual(normalize(text), normalize(published.read_text(encoding="utf-8")))
+        self.assertEqual({str(p): release.sha(p) for p in tracked}, before)
+        release.save(root / "comparison.json", {"directories": directories, "patches_unchanged": len(patches),
+                                               "published_files_unchanged": len(tracked) - len(patches),
+                                               "project_revisions_unchanged": len(revisions),
+                                               "published_manifest_sha256": release.sha(published),
+                                               "regenerated_sha256": {name: release.sha(root / name) for name, _ in manifests}})
 
     def test_patch_export_keeps_only_noreply_contributors(self):
         # A non-ASCII name makes format-patch fold the encoded From: header over several lines.
