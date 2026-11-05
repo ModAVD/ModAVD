@@ -1,0 +1,81 @@
+From 85c43b8d8c5c6c81aaab5ef105a01e7b58905802 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 4 Nov 2026 08:14:04 +0100
+Subject: [PATCH 85/95] MAS local: title the window with the instance name
+
+The window was titled "Android Emulator - <AVD name>:<console port>".
+Title it with the instance's name alone, as the manager shows it: the
+avd.ini.displayname of the AVD's config.ini, which the manager and
+AUTO-MAS write when they create or rename an instance. Without a display
+name, or with an empty or blank one, the AVD name stands in. The safe
+shutdown's suffix and the mouse-capture prefix are unchanged.
+
+The title then goes through the 128 bytes of skin_ui_update_title, so a
+longer name is cut there, between UTF-8 characters rather than in the
+middle of one.
+
+The manager finds the main window by its Qt window class and owner, not
+by its title (ModAVDManager f79ae5e), so it keeps showing and hiding the
+window.
+
+Change-Id: I7b40c1eec733cedad290ee68fd705d2e5c7287c5
+---
+ .../src/android/emulator-window.c             | 34 +++++++++++++++++--
+ 1 file changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c b/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
+index 00addea54..a745c35b3 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
++++ b/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
+@@ -37,6 +37,7 @@
+ #include "android/skin/winsys.h"
+ #include "android/ui-emu-agent.h"
+ #include "android/utils/debug.h"
++#include "android/utils/ini.h"
+ #include "android/utils/path.h"
+ #include "host-common/display_agent.h"
+ #include "host-common/hw-config-helper.h"
+@@ -70,13 +71,40 @@ void emulator_window_refresh(EmulatorWindow* emulator);
+ 
+ extern bool emulator_window_load_environment();
+ 
++// ModAVD titles the window with the instance's name alone: the name the
++// manager shows, which it keeps as avd.ini.displayname in the AVD's
++// config.ini. Without one, or with an empty one, the AVD name stands in. The
++// console port is left out. skin_ui_update_title copies the title into 128
++// bytes, so a long name is cut there, between UTF-8 characters.
+ static void write_window_name(char* buff,
+                               size_t buff_len,
+                               int base_port,
+                               const char* avd_name) {
+-    const char* product_name = qemulator->opts->fuchsia ? "Fuchsia" : "Android";
+-    snprintf(buff, buff_len, "%s Emulator - %s:%d", product_name, avd_name,
+-             base_port);
++    (void)base_port;
++    const AvdInfo* avd = getConsoleAgents()->settings->avdInfo();
++    CIniFile* config = avd ? avdInfo_getConfigIni(avd) : NULL;
++    char* display_name =
++            config ? iniFile_getString(config, "avd.ini.displayname", NULL)
++                   : NULL;
++    const char* name = avd_name ? avd_name : "";
++    if (display_name) {
++        const char* trimmed = display_name + strspn(display_name, " \t");
++        if (*trimmed) {
++            name = trimmed;
++        }
++    }
++    size_t len = strlen(name);
++    const size_t max_len = (buff_len < 128 ? buff_len : 128) - 1;
++    if (len > max_len) {
++        len = max_len;
++        // Back up to the first byte of a UTF-8 sequence.
++        while (len > 0 && ((unsigned char)name[len] & 0xC0) == 0x80) {
++            --len;
++        }
++    }
++    memcpy(buff, name, len);
++    buff[len] = '\0';
++    free(display_name);
+ }
+ 
+ static void emulator_window_light_brightness(void* opaque,

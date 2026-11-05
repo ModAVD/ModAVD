@@ -1,0 +1,597 @@
+From 9f46b5ebfb1ed31066bf550ea6c569c297eef7bf Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:56:05 +0100
+Subject: [PATCH 28/42] host: stop waiting on a dead guest process's fences and
+ semaphores
+
+A guest process that is killed while it waits in vkWaitForFences or
+vkWaitSemaphores with a long or infinite timeout leaves its render
+thread blocked in the host driver. FrameBuffer::cleanupProcGLObjects()
+waits until the process has no render thread left, and it runs on the
+renderer's only cleanup thread, so that one wait blocks the cleanup of
+every later process, and RendererImpl::stop() blocks joining it
+(ModAVD/ModAVD#40).
+
+Do what upstream gfxstream c1cecd29 does, without the process resource
+refactoring it builds on:
+
+- ProcessResources gets setGuestProcessDead() / isGuestProcessDead().
+  RendererImpl::cleanupProcGLObjects() sets it before queueing the
+  cleanup.
+- RenderThread::main() hands the process resources to
+  RenderThreadInfoVk. The cleanup task owns them until the process has
+  no render thread left, which is the same lifetime the seqno check in
+  VkDecoder already relies on. A cleanup task that the cleanup worker
+  drops because it is stopping (renderer shutdown) used to free them
+  while that process's render threads could still read them; it now
+  leaks them instead.
+- vkWaitForFences and vkWaitSemaphores wait in steps of at most 1 s and
+  return VK_TIMEOUT once the process is dead, with a warning. Finite
+  timeouts are charged with the time that passed, on steady_clock.
+  UINT64_MAX stays infinite instead of becoming UINT64_MAX minus the
+  time spent waiting for the fence to be submitted.
+
+The loop lives in vk_wait_utils.h with an injectable clock, so it is
+tested without a GPU. The wiring around it (the flag, the pointer in
+RenderThreadInfoVk) is not unit tested; a guest program that is killed
+in such a wait covers it.
+
+Test: VkWaitUtilsTest.* 12/12 (with the rest of Vulkan_synctest, 40/40);
+      each of 4 mutations of vk_wait_utils.h fails at least one case
+Test: a guest program killed while waiting with UINT64_MAX in
+      vkWaitForFences, in vkWaitSemaphores, or in vkWaitForFences while
+      a second thread polls vkGetFenceStatus: with this change and the
+      next, the process was cleaned up in 16/16 runs, the longest wait
+      for its render threads 1028 ms. Without them there was no cleanup,
+      and about 30 s later the emulator aborted on hanging threads.
+Test: Star Rail and Endfield force-stopped 10 times each while loading
+      and running: cleaned up as before (Endfield 9/10; the first stop
+      came before the game used the GPU), and the game started again
+      each time
+
+Refs ModAVD/ModAVD#40
+---
+ host/CMakeLists.txt                           |   1 +
+ .../gfxstream/host/process_resources.h        |  10 +
+ host/render_thread.cpp                        |   2 +
+ host/renderer_impl.cpp                        |  16 +-
+ host/vulkan/Android.bp                        |  29 +++
+ host/vulkan/BUILD.bazel                       |  15 ++
+ host/vulkan/render_thread_info_vk.h           |   3 +
+ host/vulkan/vk_decoder_global_state.cpp       |  37 +++-
+ host/vulkan/vk_wait_utils.h                   |  76 +++++++
+ host/vulkan/vk_wait_utils_tests.cpp           | 188 ++++++++++++++++++
+ 10 files changed, 368 insertions(+), 9 deletions(-)
+ create mode 100644 host/vulkan/vk_wait_utils.h
+ create mode 100644 host/vulkan/vk_wait_utils_tests.cpp
+
+diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
+index 63197994..7174ca8d 100644
+--- a/host/CMakeLists.txt
++++ b/host/CMakeLists.txt
+@@ -321,6 +321,7 @@ endfunction()
+         vulkan/vk_format_utils_unittest.cpp
+         vulkan/vk_qsri_timeline_unittest.cpp
+         vulkan/vk_utils_tests.cpp
++        vulkan/vk_wait_utils_tests.cpp
+         vulkan/vulkan_unittest.cpp
+     )
+     target_link_libraries(
+diff --git a/host/common/include/gfxstream/host/process_resources.h b/host/common/include/gfxstream/host/process_resources.h
+index 7964db01..c09a5837 100644
+--- a/host/common/include/gfxstream/host/process_resources.h
++++ b/host/common/include/gfxstream/host/process_resources.h
+@@ -35,9 +35,19 @@ class ProcessResources {
+     ~ProcessResources() = default;
+     std::atomic<uint32_t>* getSequenceNumberPtr() const { return &mSequenceNumber; }
+ 
++    // MAS (ModAVD#40), named as in upstream gfxstream c1cecd29: set when the guest process is
++    // gone, before its cleanup is queued, so its render threads stop waiting for it.
++    void setGuestProcessDead(bool dead = true) const {
++        mGuestProcessDead.store(dead, std::memory_order_relaxed);
++    }
++    bool isGuestProcessDead() const {
++        return mGuestProcessDead.load(std::memory_order_relaxed);
++    }
++
+    private:
+     ProcessResources() : mSequenceNumber(0) {}
+     mutable std::atomic<uint32_t> mSequenceNumber;
++    mutable std::atomic<bool> mGuestProcessDead{false};
+ };
+ 
+ }  // namespace host
+diff --git a/host/render_thread.cpp b/host/render_thread.cpp
+index f73e7942..7be5ed3a 100644
+--- a/host/render_thread.cpp
++++ b/host/render_thread.cpp
+@@ -471,6 +471,8 @@ intptr_t RenderThread::main() {
+             // Note: It's risky to limit Vulkan decoding to one thread,
+             // so we do it outside the limiter
+             if (tInfo->m_vkInfo) {
++                // For the fence and semaphore waits in VkDecoderGlobalState (ModAVD#40).
++                tInfo->m_vkInfo->m_processResources = processResources;
+                 VkDecoderContext context = {
+                     .processName = contextName,
+                     .gfxApiLogger = &gfxLogger,
+diff --git a/host/renderer_impl.cpp b/host/renderer_impl.cpp
+index 8c526167..70746d18 100644
+--- a/host/renderer_impl.cpp
++++ b/host/renderer_impl.cpp
+@@ -73,8 +73,8 @@ public:
+                 struct {
+                     WorkerProcessingResult operator()(CleanProcessResources resources) {
+                         FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
+-                        // resources.resource are destroyed automatically when going out of the
+-                        // scope.
++                        // The process has no render thread left to read them.
++                        delete resources.resource;
+                         return WorkerProcessingResult::Continue;
+                     }
+                     WorkerProcessingResult operator()(Exit) {
+@@ -93,7 +93,7 @@ public:
+     void cleanup(uint64_t processId, std::unique_ptr<ProcessResources> resource) {
+         mCleanupWorker.enqueue(CleanProcessResources{
+             .puid = processId,
+-            .resource = std::move(resource),
++            .resource = resource.release(),
+         });
+     }
+ 
+@@ -109,7 +109,10 @@ public:
+ private:
+     struct CleanProcessResources {
+         uint64_t puid;
+-        std::unique_ptr<ProcessResources> resource;
++        // Owned. MAS (ModAVD#40): render threads of the process read it until they exit, so
++        // only the processor deletes it, after cleanupProcGLObjects() has waited for them. A
++        // task that the stopping worker drops leaks it instead of freeing it under them.
++        ProcessResources* resource;
+     };
+     struct Exit {};
+     using Cmd = std::variant<CleanProcessResources, Exit>;
+@@ -568,6 +571,11 @@ void RendererImpl::onGuestGraphicsProcessCreate(uint64_t puid) {
+ void RendererImpl::cleanupProcGLObjects(uint64_t puid) {
+     std::unique_ptr<ProcessResources> resource =
+         FrameBuffer::getFB()->removeGraphicsProcessResources(puid);
++    // The cleanup waits until the process has no render thread left. Mark the process dead
++    // first, so a render thread blocked in a fence or semaphore wait gives up (ModAVD#40).
++    if (resource) {
++        resource->setGuestProcessDead();
++    }
+     mCleanupThread->cleanup(puid, std::move(resource));
+ }
+ 
+diff --git a/host/vulkan/Android.bp b/host/vulkan/Android.bp
+index 2daa4acc..a8b2a77a 100644
+--- a/host/vulkan/Android.bp
++++ b/host/vulkan/Android.bp
+@@ -257,6 +257,35 @@ cc_test_host {
+     ],
+ }
+ 
++// Run with `atest --host gfxstream_vkwaitutils_tests`
++cc_test_host {
++    name: "gfxstream_vkwaitutils_tests",
++    defaults: ["gfxstream_host_cc_defaults"],
++    srcs: [
++        "vk_wait_utils_tests.cpp",
++    ],
++    shared_libs: [
++        "libbase",
++        "liblog",
++    ],
++    header_libs: [
++        "libgfxstream_host_vulkan_cereal_common",
++    ],
++    static_libs: [
++        "libgfxstream_common_logging",
++        "libgfxstream_host_vulkan_server",
++        "libgmock",
++        "libgtest",
++        "libgfxstream_common_base",
++    ],
++    test_options: {
++        unit_test: true,
++    },
++    test_suites: [
++        "general-tests",
++    ],
++}
++
+ // Run with `atest --host gfxstream_vkguestqueueutils_tests`
+ cc_test_host {
+     name: "gfxstream_vkemulatedphysicaldevicequeue_tests",
+diff --git a/host/vulkan/BUILD.bazel b/host/vulkan/BUILD.bazel
+index 38dc7a42..2c8eb2f6 100644
+--- a/host/vulkan/BUILD.bazel
++++ b/host/vulkan/BUILD.bazel
+@@ -129,6 +129,7 @@ cc_library(
+         "vk_snapshot_handles.h",
+         "vk_utils.h",
+         "vk_vvl_configuration.h",
++        "vk_wait_utils.h",
+         "vulkan_boxed_handles.h",
+         "vulkan_dispatch.h",
+         "vulkan_handle_mapping.h",
+@@ -333,6 +334,20 @@ cc_test(
+     ],
+ )
+ 
++cc_test(
++    name = "gfxstream_vk_wait_utils_tests",
++    srcs = [
++        "vk_wait_utils_tests.cpp",
++    ],
++    copts = GFXSTREAM_HOST_COPTS,
++    deps = [
++        ":gfxstream_vulkan_server",
++        "//third_party/vulkan:gfxstream_vulkan_headers",
++        "@com_google_googletest//:gtest",
++        "@com_google_googletest//:gtest_main",
++    ],
++)
++
+ cc_test(
+     name = "gfxstream_vulkan_tests",
+     srcs = [
+diff --git a/host/vulkan/render_thread_info_vk.h b/host/vulkan/render_thread_info_vk.h
+index ab3f9c39..d40d613a 100644
+--- a/host/vulkan/render_thread_info_vk.h
++++ b/host/vulkan/render_thread_info_vk.h
+@@ -40,6 +40,9 @@ struct RenderThreadInfoVk {
+     bool onLoad(gfxstream::Stream* stream);
+ 
+     uint32_t ctx_id = 0;
++    // MAS (ModAVD#40): the resources of the guest process this thread decodes for, or null.
++    // Set by RenderThread::main(); the process cleanup keeps them alive until this thread exits.
++    const ProcessResources* m_processResources = nullptr;
+     VkDecoder m_vkDec;
+ };
+ 
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index fa085e8d..40ef78f1 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -69,6 +69,7 @@
+ #include "vk_emulated_physical_device_queue.h"
+ #include "vk_format_utils.h"
+ #include "vk_utils.h"
++#include "vk_wait_utils.h"
+ #include "vulkan_boxed_handles.h"
+ #include "vulkan_dispatch.h"
+ #include "vulkan_stream.h"
+@@ -4317,7 +4318,9 @@ class VkDecoderGlobalState::Impl {
+         auto device = unbox_VkDevice(boxed_device);
+         auto deviceDispatch = dispatch_VkDevice(boxed_device);
+ 
+-        return deviceDispatch->vkWaitSemaphores(device, pWaitInfo, timeout);
++        return waitUnlessGuestProcessDead("vkWaitSemaphores", timeout, [&](uint64_t stepTimeoutNs) {
++            return deviceDispatch->vkWaitSemaphores(device, pWaitInfo, stepTimeoutNs);
++        });
+     }
+ 
+     VkResult onSemaphoreSignalledOnSharedQueue(VulkanDispatch* deviceDispatch,
+@@ -9921,7 +9924,7 @@ class VkDecoderGlobalState::Impl {
+             return VK_SUCCESS;
+         }
+ 
+-        const auto startTime = std::chrono::system_clock::now();
++        const auto startTime = std::chrono::steady_clock::now();
+         for (uint32_t i = 0; i < fenceCount; i++) {
+             VkFence fence = pFences[i];
+             {
+@@ -9979,10 +9982,34 @@ class VkDecoderGlobalState::Impl {
+             }
+         }
+ 
+-        const auto endTime = std::chrono::system_clock::now();
++        const auto endTime = std::chrono::steady_clock::now();
+         const uint64_t timePassed = std::chrono::nanoseconds(endTime - startTime).count();
+-        const uint64_t timeoutLeft = (timeout > timePassed) ? timeout - timePassed : 0;
+-        return vk->vkWaitForFences(unboxed_device, fenceCount, pFences, waitAll, timeoutLeft);
++        const uint64_t timeoutLeft = RemainingTimeoutNs(timeout, timePassed);
++        return waitUnlessGuestProcessDead(
++            "vkWaitForFences", timeoutLeft, [&](uint64_t stepTimeoutNs) {
++                return vk->vkWaitForFences(unboxed_device, fenceCount, pFences, waitAll,
++                                           stepTimeoutNs);
++            });
++    }
++
++    // MAS (ModAVD#40): a guest process killed during a long fence or semaphore wait would leave
++    // its render thread blocked in the driver, and the process cleanup, which waits for that
++    // thread, would block every later cleanup and the renderer's shutdown behind it. Wait in
++    // steps and give up once the process is gone, like upstream c1cecd29.
++    template <typename WaitFn>
++    VkResult waitUnlessGuestProcessDead(const char* what, uint64_t timeoutNs, WaitFn&& waitFn) {
++        const ProcessResources* processResources = nullptr;
++        if (auto* renderThreadInfo = RenderThreadInfoVk::get()) {
++            processResources = renderThreadInfo->m_processResources;
++        }
++        auto isProcessDead = [processResources] {
++            return processResources && processResources->isGuestProcessDead();
++        };
++        const VkResult result = WaitWithProcessDeathCheck(timeoutNs, isProcessDead, waitFn);
++        if (result == VK_TIMEOUT && isProcessDead()) {
++            GFXSTREAM_WARNING("MAS: %s gave up waiting: the guest process is gone", what);
++        }
++        return result;
+     }
+ 
+     VkResult waitForFence(VkFence fence, uint64_t timeout) {
+diff --git a/host/vulkan/vk_wait_utils.h b/host/vulkan/vk_wait_utils.h
+new file mode 100644
+index 00000000..31c5a89d
+--- /dev/null
++++ b/host/vulkan/vk_wait_utils.h
+@@ -0,0 +1,76 @@
++// Copyright 2026 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include <vulkan/vulkan.h>
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++
++namespace gfxstream {
++namespace host {
++namespace vk {
++
++// How often a long fence or semaphore wait checks whether its guest process is still alive.
++inline constexpr uint64_t kProcessDeathCheckIntervalNs = 1000ULL * 1000ULL * 1000ULL;  // 1 s
++
++// The part of |timeoutNs| left after |elapsedNs|. UINT64_MAX means no deadline and stays so.
++inline uint64_t RemainingTimeoutNs(uint64_t timeoutNs, uint64_t elapsedNs) {
++    if (timeoutNs == UINT64_MAX) {
++        return UINT64_MAX;
++    }
++    return timeoutNs > elapsedNs ? timeoutNs - elapsedNs : 0;
++}
++
++// MAS (ModAVD#40), the loop of upstream gfxstream c1cecd29 without its process resource
++// refactoring: waits with |waitFn(stepTimeoutNs)| in steps of at most
++// kProcessDeathCheckIntervalNs and returns VK_TIMEOUT once |isProcessDead()| is true, so a
++// render thread of a killed guest process does not stay blocked in the driver forever.
++// UINT64_MAX waits without a deadline; any other timeout is charged with the time that actually
++// passed. Tests replace |Clock|.
++template <typename Clock = std::chrono::steady_clock, typename IsProcessDeadFn, typename WaitFn>
++VkResult WaitWithProcessDeathCheck(uint64_t timeoutNs, IsProcessDeadFn&& isProcessDead,
++                                   WaitFn&& waitFn) {
++    uint64_t remainingTimeoutNs = timeoutNs;
++    auto lastTime = Clock::now();
++    while (true) {
++        if (isProcessDead()) {
++            return VK_TIMEOUT;
++        }
++        const uint64_t stepTimeoutNs = std::min(remainingTimeoutNs, kProcessDeathCheckIntervalNs);
++        const VkResult result = waitFn(stepTimeoutNs);
++        if (result != VK_TIMEOUT) {
++            return result;
++        }
++        if (stepTimeoutNs == remainingTimeoutNs) {
++            return VK_TIMEOUT;
++        }
++        if (timeoutNs != UINT64_MAX) {
++            const auto now = Clock::now();
++            const uint64_t elapsedNs = static_cast<uint64_t>(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(now - lastTime).count());
++            lastTime = now;
++            remainingTimeoutNs = RemainingTimeoutNs(remainingTimeoutNs, elapsedNs);
++            if (remainingTimeoutNs == 0) {
++                return VK_TIMEOUT;
++            }
++        }
++    }
++}
++
++}  // namespace vk
++}  // namespace host
++}  // namespace gfxstream
+diff --git a/host/vulkan/vk_wait_utils_tests.cpp b/host/vulkan/vk_wait_utils_tests.cpp
+new file mode 100644
+index 00000000..2e861611
+--- /dev/null
++++ b/host/vulkan/vk_wait_utils_tests.cpp
+@@ -0,0 +1,188 @@
++// Copyright 2026 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "vk_wait_utils.h"
++
++#include <chrono>
++#include <cstdint>
++#include <functional>
++#include <vector>
++
++#include <gmock/gmock.h>
++#include <gtest/gtest.h>
++
++namespace gfxstream {
++namespace host {
++namespace vk {
++namespace {
++
++using ::testing::ElementsAre;
++using ::testing::IsEmpty;
++
++constexpr uint64_t kMsNs = 1000ULL * 1000ULL;
++constexpr uint64_t kSecondNs = 1000ULL * kMsNs;
++
++// A clock that only moves when a fake wait says so.
++struct FakeClock {
++    using duration = std::chrono::nanoseconds;
++    using rep = duration::rep;
++    using period = duration::period;
++    using time_point = std::chrono::time_point<FakeClock>;
++    static constexpr bool is_steady = true;
++
++    static time_point now() { return time_point(duration(sNowNs)); }
++
++    static inline int64_t sNowNs = 0;
++};
++
++// Records the step timeouts it is called with. Each call advances FakeClock by
++// |advanceNs(stepTimeoutNs)| and returns |result(callIndex)|. Gives up with
++// VK_ERROR_DEVICE_LOST after kMaxCalls so a broken loop fails instead of hanging.
++class FakeWait {
++   public:
++    static constexpr size_t kMaxCalls = 100;
++
++    template <typename AdvanceFn, typename ResultFn>
++    FakeWait(AdvanceFn advanceNs, ResultFn result) : mAdvanceNs(advanceNs), mResult(result) {}
++
++    VkResult operator()(uint64_t stepTimeoutNs) {
++        mSteps.push_back(stepTimeoutNs);
++        if (mSteps.size() > kMaxCalls) {
++            return VK_ERROR_DEVICE_LOST;
++        }
++        FakeClock::sNowNs += static_cast<int64_t>(mAdvanceNs(stepTimeoutNs));
++        return mResult(mSteps.size() - 1);
++    }
++
++    const std::vector<uint64_t>& steps() const { return mSteps; }
++
++   private:
++    std::function<uint64_t(uint64_t)> mAdvanceNs;
++    std::function<VkResult(size_t)> mResult;
++    std::vector<uint64_t> mSteps;
++};
++
++// A driver that waits out the whole step and never signals.
++FakeWait NeverSignaled() {
++    return FakeWait([](uint64_t stepTimeoutNs) { return stepTimeoutNs; },
++                    [](size_t) { return VK_TIMEOUT; });
++}
++
++template <typename IsProcessDeadFn>
++VkResult Wait(uint64_t timeoutNs, IsProcessDeadFn isProcessDead, FakeWait& wait) {
++    return WaitWithProcessDeathCheck<FakeClock>(
++        timeoutNs, isProcessDead, [&wait](uint64_t stepTimeoutNs) { return wait(stepTimeoutNs); });
++}
++
++auto Alive() {
++    return [] { return false; };
++}
++
++class VkWaitUtilsTest : public ::testing::Test {
++   protected:
++    void SetUp() override { FakeClock::sNowNs = 0; }
++};
++
++TEST_F(VkWaitUtilsTest, ReturnsTheDriverResultOnceSignaled) {
++    FakeWait wait([](uint64_t) { return 5 * kMsNs; },
++                  [](size_t) { return VK_SUCCESS; });
++    EXPECT_EQ(VK_SUCCESS, Wait(UINT64_MAX, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, PassesErrorsThrough) {
++    FakeWait wait([](uint64_t) { return 0; },
++                  [](size_t) { return VK_ERROR_DEVICE_LOST; });
++    EXPECT_EQ(VK_ERROR_DEVICE_LOST, Wait(3 * kSecondNs, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, ZeroTimeoutPollsOnce) {
++    FakeWait wait = NeverSignaled();
++    EXPECT_EQ(VK_TIMEOUT, Wait(0, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(0u));
++}
++
++TEST_F(VkWaitUtilsTest, TimeoutUnderOneStepWaitsOnce) {
++    FakeWait wait = NeverSignaled();
++    EXPECT_EQ(VK_TIMEOUT, Wait(300 * kMsNs, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(300 * kMsNs));
++}
++
++TEST_F(VkWaitUtilsTest, LongTimeoutIsSplitIntoSteps) {
++    FakeWait wait = NeverSignaled();
++    EXPECT_EQ(VK_TIMEOUT, Wait(2500 * kMsNs, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs, kSecondNs, 500 * kMsNs));
++    EXPECT_EQ(static_cast<int64_t>(2500 * kMsNs), FakeClock::sNowNs);
++}
++
++TEST_F(VkWaitUtilsTest, ChargesOnlyTheTimeThatPassed) {
++    // A driver that returns VK_TIMEOUT after half of each step.
++    FakeWait wait([](uint64_t stepTimeoutNs) { return stepTimeoutNs / 2; },
++                  [](size_t) { return VK_TIMEOUT; });
++    EXPECT_EQ(VK_TIMEOUT, Wait(2500 * kMsNs, Alive(), wait));
++    // 2.5 s left -> 2.0 -> 1.5 -> 1.0, which is the last step.
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs, kSecondNs, kSecondNs, kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, SignalAfterSomeStepsIsReturned) {
++    FakeWait wait([](uint64_t stepTimeoutNs) { return stepTimeoutNs; },
++                  [](size_t call) { return call < 2 ? VK_TIMEOUT : VK_SUCCESS; });
++    EXPECT_EQ(VK_SUCCESS, Wait(10 * kSecondNs, Alive(), wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs, kSecondNs, kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, InfiniteWaitKeepsWaitingWhileTheProcessLives) {
++    FakeWait wait([](uint64_t stepTimeoutNs) { return stepTimeoutNs; },
++                  [](size_t call) { return call < 30 ? VK_TIMEOUT : VK_SUCCESS; });
++    EXPECT_EQ(VK_SUCCESS, Wait(UINT64_MAX, Alive(), wait));
++    EXPECT_EQ(31u, wait.steps().size());
++    for (uint64_t step : wait.steps()) {
++        EXPECT_EQ(kSecondNs, step);
++    }
++}
++
++TEST_F(VkWaitUtilsTest, InfiniteWaitStopsWhenTheProcessDies) {
++    FakeWait wait = NeverSignaled();
++    // The process is killed while the third step is waiting.
++    auto isProcessDead = [&wait] { return wait.steps().size() >= 3; };
++    EXPECT_EQ(VK_TIMEOUT, Wait(UINT64_MAX, isProcessDead, wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs, kSecondNs, kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, FiniteWaitStopsWhenTheProcessDies) {
++    FakeWait wait = NeverSignaled();
++    auto isProcessDead = [&wait] { return wait.steps().size() >= 2; };
++    EXPECT_EQ(VK_TIMEOUT, Wait(60 * kSecondNs, isProcessDead, wait));
++    EXPECT_THAT(wait.steps(), ElementsAre(kSecondNs, kSecondNs));
++}
++
++TEST_F(VkWaitUtilsTest, DeadProcessDoesNotWaitAtAll) {
++    FakeWait wait = NeverSignaled();
++    EXPECT_EQ(VK_TIMEOUT, Wait(UINT64_MAX, [] { return true; }, wait));
++    EXPECT_THAT(wait.steps(), IsEmpty());
++}
++
++TEST_F(VkWaitUtilsTest, RemainingTimeout) {
++    EXPECT_EQ(7u, RemainingTimeoutNs(10, 3));
++    EXPECT_EQ(0u, RemainingTimeoutNs(10, 10));
++    EXPECT_EQ(0u, RemainingTimeoutNs(10, 20));
++    EXPECT_EQ(UINT64_MAX, RemainingTimeoutNs(UINT64_MAX, 0));
++    EXPECT_EQ(UINT64_MAX, RemainingTimeoutNs(UINT64_MAX, 5 * kSecondNs));
++}
++
++}  // namespace
++}  // namespace vk
++}  // namespace host
++}  // namespace gfxstream

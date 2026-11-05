@@ -1,0 +1,77 @@
+From c5eeb87b36eea01517ef1d14f9942ebd3c007c67 Mon Sep 17 00:00:00 2001
+From: utzcoz <utzcoz@outlook.com>
+Date: Thu, 24 Sep 2026 22:30:44 +0800
+Subject: [PATCH 34/42] vulkan: regenerate the decoder for the device buffer
+ query
+
+Regenerated with mesa's generate-gfxstream-vulkan.sh at caf81bd201a, keeping
+what mesa 4b40fa7ace8 changes: vkGetDeviceBufferMemoryRequirements and its KHR
+alias now go through global state, so the handler that gives the guest its own
+memory types is reached. The generator's other output since the decoder was
+last regenerated is left for a regeneration of its own.
+
+(cherry picked from commit c23e789441d018d5aa26303b21c595fe77df1c07)
+
+Refs ModAVD/ModAVD#37
+---
+ host/vulkan/vk_decoder.cpp | 16 ++++++----------
+ 1 file changed, 6 insertions(+), 10 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder.cpp b/host/vulkan/vk_decoder.cpp
+index 8a67a21d..7f25eea8 100644
+--- a/host/vulkan/vk_decoder.cpp
++++ b/host/vulkan/vk_decoder.cpp
+@@ -11794,14 +11794,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                 VkDevice device;
+                 const VkDeviceBufferMemoryRequirements* pInfo;
+                 VkMemoryRequirements2* pMemoryRequirements;
+-                // Begin non wrapped dispatchable handle unboxing for device;
++                // Begin global wrapped dispatchable handle unboxing for device;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
+-                auto unboxed_device = unbox_VkDevice(device);
+                 auto vk = dispatch_VkDevice(device);
+-                // End manual dispatchable handle unboxing for device;
+                 vkReadStream->alloc((void**)&pInfo, sizeof(const VkDeviceBufferMemoryRequirements));
+                 reservedunmarshal_VkDeviceBufferMemoryRequirements(
+                     vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
+@@ -11827,8 +11825,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)pMemoryRequirements);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkGetDeviceBufferMemoryRequirements(unboxed_device, pInfo,
+-                                                            pMemoryRequirements);
++                    m_state->on_vkGetDeviceBufferMemoryRequirements(
++                        &m_pool, snapshotApiCallHandle, device, pInfo, pMemoryRequirements);
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (pMemoryRequirements) {
+@@ -17717,14 +17715,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                 VkDevice device;
+                 const VkDeviceBufferMemoryRequirements* pInfo;
+                 VkMemoryRequirements2* pMemoryRequirements;
+-                // Begin non wrapped dispatchable handle unboxing for device;
++                // Begin global wrapped dispatchable handle unboxing for device;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
+-                auto unboxed_device = unbox_VkDevice(device);
+                 auto vk = dispatch_VkDevice(device);
+-                // End manual dispatchable handle unboxing for device;
+                 vkReadStream->alloc((void**)&pInfo, sizeof(const VkDeviceBufferMemoryRequirements));
+                 reservedunmarshal_VkDeviceBufferMemoryRequirements(
+                     vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
+@@ -17751,8 +17747,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                         (unsigned long long)pMemoryRequirements);
+                 }
+                 if (CC_LIKELY(vk)) {
+-                    vk->vkGetDeviceBufferMemoryRequirementsKHR(unboxed_device, pInfo,
+-                                                               pMemoryRequirements);
++                    m_state->on_vkGetDeviceBufferMemoryRequirementsKHR(
++                        &m_pool, snapshotApiCallHandle, device, pInfo, pMemoryRequirements);
+                 }
+                 vkStream->unsetHandleMapping();
+                 if (pMemoryRequirements) {

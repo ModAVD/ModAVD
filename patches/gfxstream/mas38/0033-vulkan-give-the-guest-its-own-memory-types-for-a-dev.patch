@@ -1,0 +1,111 @@
+From 5177937f8d80d232fa8704c20e27209d5a805222 Mon Sep 17 00:00:00 2001
+From: utzcoz <utzcoz@outlook.com>
+Date: Tue, 22 Sep 2026 01:47:00 +0800
+Subject: [PATCH 33/42] vulkan: give the guest its own memory types for a
+ device buffer query
+
+vkGetDeviceBufferMemoryRequirements is the one requirements query the decoder
+still hands to the driver directly, so with an emulated memory type its answer
+names host types, the way the device image query's did.
+
+Add the global state handler that translates it. The decoder reaches it once
+the guest's generator routes the query through global state, which is a mesa
+change; until the decoder is regenerated from that, it is not called.
+
+(cherry picked from commit a5ad56879ebaa9ce2602e8382518961774f2bdee)
+
+Refs ModAVD/ModAVD#37
+---
+ host/vulkan/vk_decoder_global_state.cpp | 49 +++++++++++++++++++++++++
+ host/vulkan/vk_decoder_global_state.h   | 11 ++++++
+ 2 files changed, 60 insertions(+)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 105fe97d..ac750a17 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -2948,6 +2948,41 @@ class VkDecoderGlobalState::Impl {
+             &pMemoryRequirements->memoryRequirements);
+     }
+ 
++    void on_vkGetDeviceBufferMemoryRequirements(gfxstream::base::BumpPool* pool,
++                                                VkSnapshotApiCallHandle apiCallHandle,
++                                                VkDevice boxed_device,
++                                                const VkDeviceBufferMemoryRequirements* pInfo,
++                                                VkMemoryRequirements2* pMemoryRequirements) {
++        auto device = unbox_VkDevice(boxed_device);
++        auto vk = dispatch_VkDevice(boxed_device);
++
++        if (vk->vkGetDeviceBufferMemoryRequirements) {
++            vk->vkGetDeviceBufferMemoryRequirements(device, pInfo, pMemoryRequirements);
++        } else if (vk->vkGetDeviceBufferMemoryRequirementsKHR) {
++            vk->vkGetDeviceBufferMemoryRequirementsKHR(device, pInfo, pMemoryRequirements);
++        } else {
++            GFXSTREAM_FATAL("%s: function implementation cannot be found!", __func__);
++        }
++
++        std::lock_guard<std::mutex> lock(mMutex);
++
++        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
++        if (!deviceInfo) {
++            GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
++            return;
++        }
++
++        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
++        if (!physicalDeviceInfo) {
++            GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
++                            deviceInfo->physicalDevice);
++            return;
++        }
++
++        physicalDeviceInfo->memoryPropertiesHelper->transformToGuestMemoryRequirements(
++            &pMemoryRequirements->memoryRequirements);
++    }
++
+     void destroyDeviceWithExclusiveInfo(VkDevice device, DeviceInfo& deviceInfo,
+                                         std::unordered_map<VkFence, FenceInfo>& fenceInfos,
+                                         std::unordered_map<VkQueue, QueueInfo>& queueInfos) {
+@@ -11894,6 +11929,20 @@ void VkDecoderGlobalState::on_vkGetDeviceImageMemoryRequirementsKHR(
+                                                  pMemoryRequirements);
+ }
+ 
++void VkDecoderGlobalState::on_vkGetDeviceBufferMemoryRequirements(
++    gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
++    const VkDeviceBufferMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
++    mImpl->on_vkGetDeviceBufferMemoryRequirements(pool, apiCallHandle, device, pInfo,
++                                                  pMemoryRequirements);
++}
++
++void VkDecoderGlobalState::on_vkGetDeviceBufferMemoryRequirementsKHR(
++    gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
++    const VkDeviceBufferMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
++    mImpl->on_vkGetDeviceBufferMemoryRequirements(pool, apiCallHandle, device, pInfo,
++                                                  pMemoryRequirements);
++}
++
+ void VkDecoderGlobalState::on_vkDestroyDevice(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallHandle apiCallHandle,
+                                               VkDevice device, const VkAllocationCallbacks*) {
+diff --git a/host/vulkan/vk_decoder_global_state.h b/host/vulkan/vk_decoder_global_state.h
+index 204e2e51..a05a4d27 100644
+--- a/host/vulkan/vk_decoder_global_state.h
++++ b/host/vulkan/vk_decoder_global_state.h
+@@ -245,6 +245,17 @@ class VkDecoderGlobalState {
+                                                   const VkDeviceImageMemoryRequirements* pInfo,
+                                                   VkMemoryRequirements2* pMemoryRequirements);
+ 
++    void on_vkGetDeviceBufferMemoryRequirements(gfxstream::base::BumpPool* pool,
++                                                VkSnapshotApiCallHandle apiCallHandle,
++                                                VkDevice device,
++                                                const VkDeviceBufferMemoryRequirements* pInfo,
++                                                VkMemoryRequirements2* pMemoryRequirements);
++    void on_vkGetDeviceBufferMemoryRequirementsKHR(gfxstream::base::BumpPool* pool,
++                                                   VkSnapshotApiCallHandle apiCallHandle,
++                                                   VkDevice device,
++                                                   const VkDeviceBufferMemoryRequirements* pInfo,
++                                                   VkMemoryRequirements2* pMemoryRequirements);
++
+     void on_vkDestroyDevice(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+                             VkDevice device, const VkAllocationCallbacks* pAllocator);
+ 

@@ -1,0 +1,171 @@
+From a4a1f90c7ea9cf5a4c37a1124709b2c94d067944 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:17:30 +0100
+Subject: [PATCH 81/95] ui: do not read the deleted tool window when Windows
+ ends the session
+
+When Windows logs off, restarts or shuts down, Qt answers WM_ENDSESSION
+by emitting aboutToQuit while QEMU is still running. slot_clearInstance
+deletes the tool window first and then asks QEMU to quit through
+slot_requestClose, which reads the tool window: closeButtonClicked()
+with the full toolbar, shouldClose() with the lean one. Qt then quits,
+which in Qt 6 closes every top-level window that still has a native
+window, hidden ones included, and the close, focus and move handlers of
+the emulator window and its container read the tool window again. Each
+of these reads a member through the null pointer, so the emulator would
+crash at the end of a Windows session. This comes from reading the
+code; sending WM_ENDSESSION to an unchanged build is to confirm it.
+
+Skip the tool window in those places once it is gone, and do not quit
+again from the close event while Qt is already quitting. QEMU gets its
+quit event, and the wait in slot_clearInstance gives it time to stop
+the VM and close its disks before Windows ends the process; the kill
+guard that slot_requestClose starts still bounds it.
+
+Upstream has the same path. Apart from the crash, nothing changes for
+ANDROID_EMU_FULL_TOOLBAR=1.
+
+Change-Id: I6edd20df20942db684c472f8d1dc677dc7e33afd
+---
+ .../android/skin/qt/emulator-container.cpp    | 12 ++++++--
+ .../android/skin/qt/emulator-qt-window.cpp    | 30 ++++++++++++++-----
+ .../src/android/skin/qt/emulator-qt-window.h  |  2 ++
+ 3 files changed, 34 insertions(+), 10 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 6eef3a0e2..3aa1eb81b 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -339,8 +339,10 @@ void EmulatorContainer::changeEvent(QEvent* event) {
+ void EmulatorContainer::closeEvent(QCloseEvent* event) {
+     // make sure the toolWindow's close button is the only exit point
+     // from qt: we could get closeEvent directly from host windowing
+-    // framework.
++    // framework. Once Qt quits, the tool window may be gone already; see
++    // EmulatorQtWindow::slot_clearInstance.
+     if (mEmulatorWindow->isMainThreadRunning() &&
++        mEmulatorWindow->toolWindow() &&
+         !mEmulatorWindow->toolWindow()->closeButtonClicked()) {
+         mEmulatorWindow->toolWindow()->on_close_button_clicked();
+         event->ignore();
+@@ -367,7 +369,9 @@ void EmulatorContainer::closeEvent(QCloseEvent* event) {
+ }
+ 
+ void EmulatorContainer::focusInEvent(QFocusEvent* event) {
+-    mEmulatorWindow->toolWindow()->raise();
++    if (mEmulatorWindow->toolWindow()) {
++        mEmulatorWindow->toolWindow()->raise();
++    }
+     if (mModalOverlay) {
+         mModalOverlay->raise();
+     }
+@@ -411,7 +415,9 @@ void EmulatorContainer::keyReleaseEvent(QKeyEvent* event) {
+ void EmulatorContainer::moveEvent(QMoveEvent* event) {
+     QScrollArea::moveEvent(event);
+     mEmulatorWindow->simulateWindowMoved(event->pos());
+-    mEmulatorWindow->toolWindow()->dockMainWindow();
++    if (mEmulatorWindow->toolWindow()) {
++        mEmulatorWindow->toolWindow()->dockMainWindow();
++    }
+     adjustModalOverlayGeometry();
+     adjustVirtualSceneDialogGeometry();
+     adjustMessagesOverlayGeometry();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 107ea3cbf..8d5769ea8 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1206,8 +1206,9 @@ void EmulatorQtWindow::slot_gpuWarningMessageAccepted() {
+ }
+ 
+ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+-    // make sure to use the close button on tool window
+-    if (!mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
++    // make sure to use the close button on tool window. Once Qt quits, the
++    // tool window may be gone already; see slot_clearInstance.
++    if (mToolWindow && !mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
+         !mToolWindow->closeButtonClicked()) {
+         mToolWindow->on_close_button_clicked();
+         event->ignore();
+@@ -1233,7 +1234,7 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+     }
+ 
+     // make sure to use the close button on tool window
+-    if (!mToolWindow->shouldClose()) {
++    if (mToolWindow && !mToolWindow->shouldClose()) {
+         event->ignore();
+         return;
+     }
+@@ -1307,12 +1308,13 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+         mOverlay.hide();
+         hide();
+         event->accept();
+-        if (mHiddenForSafeShutdown) {
++        if (mHiddenForSafeShutdown && !mClearedForQuit) {
+             // The windows were hidden when the safe shutdown started, so this
+             // close is not the last visible window closing and Qt would not
+             // leave its event loop: the process would end only by the kill
+             // guard, without the normal teardown. Quit here, as the hidden
+-            // window mode does in EmulatorContainer::closeEvent.
++            // window mode does in EmulatorContainer::closeEvent. Not when Qt
++            // is quitting already and closing the windows itself.
+             qApp->quit();
+         }
+     }
+@@ -2309,6 +2311,10 @@ void EmulatorQtWindow::startThread(StartFunction f, int argc, char** argv) {
+ }
+ 
+ void EmulatorQtWindow::slot_clearInstance() {
++    // Qt is quitting. When Windows ends the session, it then closes the
++    // windows itself, after the tool window below is gone: the close events
++    // must not read the tool window or quit again.
++    mClearedForQuit = true;
+ #ifndef __APPLE__
+     if (mToolWindow) {
+         delete mToolWindow;
+@@ -2325,6 +2331,10 @@ void EmulatorQtWindow::slot_clearInstance() {
+     // hang on exit.
+     System::get()->cleanupWaitingPids();
+     if (mMainLoopThread && mMainLoopThread->isRunning()) {
++        // Windows ending the session gets here from WM_ENDSESSION with QEMU
++        // still running. The wait gives QEMU time to stop the VM and close its
++        // disks before Windows ends the process; the kill guard that
++        // slot_requestClose starts bounds it.
+         requestClose();
+         mMainLoopThread->wait();
+     }
+@@ -2564,14 +2574,20 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
+ }
+ 
+ void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
++    // When Qt quits while QEMU still runs, as it does when Windows ends the
++    // session, slot_clearInstance has already deleted the tool window: there
++    // is nothing left to ask, so only stop QEMU.
++    //
+     // The lean toolbar keeps console and main-loop exits immediate; only its
+     // own close paths start the safe shutdown.
+-    if (!mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
++    if (mToolWindow && !mToolWindow->isLeanToolbar() && isMainThreadRunning() &&
+         !mToolWindow->closeButtonClicked()) {
+         mToolWindow->on_close_button_clicked();
+     }
+     QSemaphoreReleaser semReleaser(semaphore);
+-    mToolWindow->shouldClose();
++    if (mToolWindow) {
++        mToolWindow->shouldClose();
++    }
+     if (isMainThreadRunning()) {
+         if (!getConsoleAgents()->settings->android_cmdLineOptions()->grpc_ui) {
+             // TODO: This should be a backend operation, and moved out of Qt codebase.
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 4805a5f5a..f277c9da0 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -714,6 +714,8 @@ private:
+     // Some events may arrive after closing the main window (e.g. async screen
+     // redraw requests); we want to ignore those when exiting.
+     bool mClosed = false;
++    // slot_clearInstance has run: Qt is quitting and the tool window is gone.
++    bool mClearedForQuit = false;
+ 
+     EventCapturer mEventCapturer;
+     std::shared_ptr<UIEventRecorder<android::base::CircularBuffer>>

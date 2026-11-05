@@ -1,0 +1,46 @@
+From 29c7a7e4e7213fa0983c88ce48da28014e839f25 Mon Sep 17 00:00:00 2001
+From: Jason Macnak <natsu@google.com>
+Date: Sat, 10 Oct 2026 07:56:34 -0700
+Subject: [PATCH 39/42] gfxstream: Filter device memory report feature struct
+
+... in vkCreateDevice(). VK_EXT_device_memory_report is emulated
+in the guest. These structs should be filtered before arriving at
+the host driver to avoid VK_ERROR_FEATURE_NOT_PRESENT.
+
+Bug: b/572774872
+Test: dEQP-VK.memory.device_memory_report.*
+Flag: EXEMPT BUGFIX
+Change-Id: If3dff33137b7375711677f8f3e9b4b8793b9fd4f
+(cherry picked from commit bf398af4ba9754a6ae0a26c54a1f244feac1d80b)
+
+Refs ModAVD/ModAVD#41
+---
+ host/vulkan/cereal/common/vk_struct_id.h | 2 ++
+ host/vulkan/vk_decoder_global_state.cpp  | 1 +
+ 2 files changed, 3 insertions(+)
+
+diff --git a/host/vulkan/cereal/common/vk_struct_id.h b/host/vulkan/cereal/common/vk_struct_id.h
+index c8e9841e..42af6463 100644
+--- a/host/vulkan/cereal/common/vk_struct_id.h
++++ b/host/vulkan/cereal/common/vk_struct_id.h
+@@ -139,6 +139,8 @@ REGISTER_VK_STRUCT_ID(VkImportMemoryHostPointerInfoEXT,
+                       VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
+ REGISTER_VK_STRUCT_ID(VkDeviceDeviceMemoryReportCreateInfoEXT,
+                       VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT);
++REGISTER_VK_STRUCT_ID(VkPhysicalDeviceDeviceMemoryReportFeaturesEXT,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT);
+ 
+ #ifdef VK_USE_PLATFORM_METAL_EXT
+ REGISTER_VK_STRUCT_ID(VkImportMetalTextureInfoEXT, VK_STRUCTURE_TYPE_IMPORT_METAL_TEXTURE_INFO_EXT);
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 9f745966..f905acae 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -2524,6 +2524,7 @@ class VkDecoderGlobalState::Impl {
+ 
+         // Filter device memory report as callbacks can not be passed between guest and host.
+         vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
++        vk_struct_chain_filter<VkPhysicalDeviceDeviceMemoryReportFeaturesEXT>(&createInfoFiltered);
+ 
+         // Filter device groups as they are effectively disabled.
+         vk_struct_chain_filter<VkDeviceGroupDeviceCreateInfo>(&createInfoFiltered);

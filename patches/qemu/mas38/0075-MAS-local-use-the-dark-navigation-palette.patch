@@ -1,0 +1,180 @@
+From c5b762bd4334451f63272b66fa62629f38034722 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 17:06:11 +0100
+Subject: [PATCH 75/95] MAS local: use the dark navigation palette
+
+Apply the fixed #20212D MuMu-style palette to the title bar, navigation column, and container, with light controls and DWM colors. Keep the third-review shutdown and zoom corrections in the same build.
+
+Change-Id: I9c4e2a7b0d6f1a3c5e8b2d4f7a9c0e1b3d5f6a8
+---
+ .../android/skin/qt/emulator-container.cpp    |  2 +-
+ .../android/skin/qt/emulator-qt-window.cpp    | 34 ++++++++-----------
+ .../src/android/skin/qt/tool-window.cpp       | 20 +++++------
+ .../android/skin/qt/windows-native-window.cpp |  6 ++--
+ 4 files changed, 28 insertions(+), 34 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index c6668f706..6eef3a0e2 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -86,7 +86,7 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+                             Qt::WindowCloseButtonHint)
+                          : Qt::WindowFlags()));
+     if (lean) {
+-        setStyleSheet(QStringLiteral("EmulatorContainer { background: #E8E8E8; }"));
++        setStyleSheet(QStringLiteral("EmulatorContainer { background: #20212D; }"));
+     }
+ #endif
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 159c1ba36..f40b29b2d 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1197,6 +1197,9 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+     }
+ 
+     if (!isMainThreadRunning()) {
++        if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
++            modal->close();
++        }
+         mSafeShutdownTimeout.stop();
+         if (mSafeShutdownState == SafeShutdownState::StoppingGuest ||
+             mSafeShutdownState == SafeShutdownState::Syncing) {
+@@ -1206,13 +1209,6 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+     }
+ 
+     // make sure to use the close button on tool window
+-    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked() &&
+-        !ToolWindow::inWindowNav()) {
+-        mToolWindow->on_close_button_clicked();
+-        event->ignore();
+-        return;
+-    }
+-
+     if (!mToolWindow->shouldClose()) {
+         event->ignore();
+         return;
+@@ -1442,13 +1438,13 @@ void EmulatorQtWindow::updateWindowTitle() {
+         QString title = QString("[Mouse captured, press %1 to release] %2")
+             .arg(releaseMouseShortcutName())
+             .arg(mBaseWindowTitle);
+-        if (safeShutdownInProgress()) {
++        if (mSafeShutdownState != SafeShutdownState::Idle) {
+             title += QString::fromUtf8("（正在关机…）");
+         }
+         mContainer.setWindowTitle(title);
+     } else {
+         mContainer.setWindowTitle(mBaseWindowTitle +
+-                                  (safeShutdownInProgress()
++                                  (mSafeShutdownState != SafeShutdownState::Idle
+                                            ? QString::fromUtf8("（正在关机…）")
+                                            : QString()));
+     }
+@@ -2534,10 +2530,6 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
+ }
+ 
+ void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
+-    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked() &&
+-        !ToolWindow::inWindowNav()) {
+-        mToolWindow->on_close_button_clicked();
+-    }
+     QSemaphoreReleaser semReleaser(semaphore);
+     mToolWindow->shouldClose();
+     if (isMainThreadRunning()) {
+@@ -4180,9 +4172,10 @@ void EmulatorQtWindow::fixScale() {
+ }
+ 
+ void EmulatorQtWindow::zoomIn() {
++    const QSize area = ToolWindow::inWindowNav() ? mContainer.viewportSize()
++                                                 : mContainer.size();
+     zoomIn(QPoint(width() / 2, height() / 2),
+-           QPoint(mContainer.viewportSize().width() / 2,
+-                  mContainer.viewportSize().height() / 2));
++           QPoint(area.width() / 2, area.height() / 2));
+ }
+ 
+ void EmulatorQtWindow::zoomIn(const QPoint& focus,
+@@ -4206,9 +4199,10 @@ void EmulatorQtWindow::zoomIn(const QPoint& focus,
+ }
+ 
+ void EmulatorQtWindow::zoomOut() {
++    const QSize area = ToolWindow::inWindowNav() ? mContainer.viewportSize()
++                                                  : mContainer.size();
+     zoomOut(QPoint(width() / 2, height() / 2),
+-            QPoint(mContainer.viewportSize().width() / 2,
+-                   mContainer.viewportSize().height() / 2));
++            QPoint(area.width() / 2, area.height() / 2));
+ }
+ 
+ void EmulatorQtWindow::zoomOut(const QPoint& focus,
+@@ -4227,9 +4221,9 @@ void EmulatorQtWindow::zoomTo(const QPoint& focus, const QSize& rectSize) {
+     if (!mBackingSurface)
+         return;
+ 
+-    saveZoomPoints(focus,
+-                   QPoint(mContainer.viewportSize().width() / 2,
+-                          mContainer.viewportSize().height() / 2));
++    const QSize area = ToolWindow::inWindowNav() ? mContainer.viewportSize()
++                                                  : mContainer.size();
++    saveZoomPoints(focus, QPoint(area.width() / 2, area.height() / 2));
+ 
+     // The below scale = x creates a skin equivalent to calling "window
+     // scale x" through the emulator console. At scale = 1, the device
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 791d3001b..a034a265c 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -969,11 +969,11 @@ void ToolWindow::createWindowNavColumn() {
+     mWindowNavColumn = new QWidget(mEmulatorWindow->containerWindow());
+     mWindowNavColumn->setObjectName(QStringLiteral("windowNavColumn"));
+     mWindowNavColumn->setStyleSheet(QStringLiteral(
+-            "#windowNavColumn { background: #E8E8E8; }"
+-            "#windowNavColumn QPushButton { background: #E8E8E8; color: #141414; border: 0; }"
+-            "#windowNavColumn QPushButton:hover { background: #D9D9D9; }"
+-            "#windowNavColumn QPushButton:pressed { background: #CCCCCC; }"
+-            "#windowNavColumn QPushButton:disabled { color: #A0A0A0; background: #E8E8E8; }"));
++            "#windowNavColumn { background: #20212D; }"
++            "#windowNavColumn QPushButton { background: #20212D; color: #E8E8EC; border: 0; }"
++            "#windowNavColumn QPushButton:hover { background: #303142; }"
++            "#windowNavColumn QPushButton:pressed { background: #3B3D52; }"
++            "#windowNavColumn QPushButton:disabled { color: #777985; background: #20212D; }"));
+     mWindowNavColumn->setFocusPolicy(Qt::NoFocus);
+     auto* layout = new QVBoxLayout(mWindowNavColumn);
+     layout->setContentsMargins(10, 0, 10, 0);
+@@ -1796,11 +1796,11 @@ void ToolWindow::updateTheme(const QString& styleSheet) {
+     setStyleSheet(styleSheet);
+     if (mWindowNavColumn) {
+         mWindowNavColumn->setStyleSheet(QStringLiteral(
+-                "#windowNavColumn { background: #E8E8E8; }"
+-                "#windowNavColumn QPushButton { background: #E8E8E8; color: #141414; border: 0; }"
+-                "#windowNavColumn QPushButton:hover { background: #D9D9D9; }"
+-                "#windowNavColumn QPushButton:pressed { background: #CCCCCC; }"
+-                "#windowNavColumn QPushButton:disabled { color: #A0A0A0; background: #E8E8E8; }"));
++                "#windowNavColumn { background: #20212D; }"
++                "#windowNavColumn QPushButton { background: #20212D; color: #E8E8EC; border: 0; }"
++                "#windowNavColumn QPushButton:hover { background: #303142; }"
++                "#windowNavColumn QPushButton:pressed { background: #3B3D52; }"
++                "#windowNavColumn QPushButton:disabled { color: #777985; background: #20212D; }"));
+         remaskButtons();
+     }
+ }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+index ff3e110c9..1c4b965be 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+@@ -39,12 +39,12 @@ void setDarkTitleBar(WId wid) {
+         FreeLibrary(dwm);
+         return;
+     }
+-    const BOOL dark = FALSE;
++    const BOOL dark = TRUE;
+     if (FAILED(setAttr(reinterpret_cast<HWND>(wid), 20, &dark, sizeof(dark)))) {
+         setAttr(reinterpret_cast<HWND>(wid), 19, &dark, sizeof(dark));
+     }
+-    const DWORD caption = 0x00e8e8e8;
+-    const DWORD text = 0x00000000;
++    const DWORD caption = 0x002d2120;
++    const DWORD text = 0x00ece8e8;
+     setAttr(reinterpret_cast<HWND>(wid), 35, &caption, sizeof(caption));
+     setAttr(reinterpret_cast<HWND>(wid), 36, &text, sizeof(text));
+     FreeLibrary(dwm);

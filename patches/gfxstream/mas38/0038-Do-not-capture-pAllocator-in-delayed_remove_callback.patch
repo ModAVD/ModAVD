@@ -1,0 +1,40 @@
+From ea07b97c9e8ccdf0a098ad2c55e58b3c4417571b Mon Sep 17 00:00:00 2001
+From: Serdar Kocdemir <kocdemir@google.com>
+Date: Fri, 16 Oct 2026 14:34:19 +0000
+Subject: [PATCH 38/42] Do not capture pAllocator in delayed_remove_callback
+
+Pointers allocated from vkReadStream's BumpPool are only valid for the
+duration of the current opcode decode and are invalidated by
+vkReadStream->clearPool() before delayed removal callbacks execute.
+Omit pAllocator from the delayed_remove_callback capture list in
+OP_vkDestroyPipelineLayout and pass nullptr instead.
+
+Bug: 557286535
+Test: ./objs/Vulkan_unittests
+Change-Id: Ifbb6b374cf5fc9d9770f092068659f3394aa50b3
+(cherry picked from commit 1a3cffce2dc62562e92f0c87df23cbe0b859e38e)
+
+Refs ModAVD/ModAVD#41
+---
+ host/vulkan/vk_decoder.cpp | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder.cpp b/host/vulkan/vk_decoder.cpp
+index 7f25eea8..2e124f9d 100644
+--- a/host/vulkan/vk_decoder.cpp
++++ b/host/vulkan/vk_decoder.cpp
+@@ -5902,12 +5902,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                                    (unsigned long long)pipelineLayout,
+                                    (unsigned long long)pAllocator);
+                 }
+-                std::function<void()> delayed_remove_callback = [vk, device, pipelineLayout,
+-                                                                 pAllocator]() {
++                std::function<void()> delayed_remove_callback = [vk, device, pipelineLayout]() {
+                     auto m_state = VkDecoderGlobalState::get();
+                     if (CC_LIKELY(vk)) {
+                         m_state->on_vkDestroyPipelineLayout(nullptr, kInvalidSnapshotApiCallHandle,
+-                                                            device, pipelineLayout, pAllocator);
++                                                            device, pipelineLayout, nullptr);
+                     }
+                 };
+                 vkStream->unsetHandleMapping();

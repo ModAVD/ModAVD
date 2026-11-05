@@ -1,0 +1,33 @@
+From 9a3b0316a86b8702009b71476c9da91c4a33442a Mon Sep 17 00:00:00 2001
+From: Serdar Kocdemir <kocdemir@google.com>
+Date: Mon, 21 Sep 2026 17:04:48 +0100
+Subject: [PATCH 37/42] Add null check for gl context bindings
+
+.. to avoid crashes. Root cause of the binding error
+is to be resolved later.
+
+Bug: 564359820
+Test: CI
+Change-Id: I11b0992302d3786da840ba2c3351f54798314ac5
+(cherry picked from commit a23e275454189d13df441968f1bd9274c0b925d9)
+
+Refs ModAVD/ModAVD#41
+---
+ host/gl/glestranslator/egl/egl_context.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/host/gl/glestranslator/egl/egl_context.cpp b/host/gl/glestranslator/egl/egl_context.cpp
+index f1a13c76..e1cca7e7 100644
+--- a/host/gl/glestranslator/egl/egl_context.cpp
++++ b/host/gl/glestranslator/egl/egl_context.cpp
+@@ -160,8 +160,8 @@ EglContext::~EglContext()
+     // restore the previous context
+     //
+     if (rebindCtx) {
+-        m_dpy->nativeType()->makeCurrent(rebindRead->native(),
+-                                         rebindDraw->native(),
++        m_dpy->nativeType()->makeCurrent(rebindRead.get() ? rebindRead->native() : nullptr,
++                                         rebindDraw.get() ? rebindDraw->native() : nullptr,
+                                          rebindCtx->nativeType());
+     } else {
+         m_dpy->nativeType()->makeCurrent(nullptr, nullptr, nullptr);
