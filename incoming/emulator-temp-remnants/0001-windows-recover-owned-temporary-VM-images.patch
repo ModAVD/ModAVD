@@ -1,4 +1,4 @@
-From 619f55b4a1b03a423a3d9acf507580acb9d5fc31 Mon Sep 17 00:00:00 2001
+From a4dbfb3e7fcb81ec195f637b0a85c4cdc3ad8b3a Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 13:11:40 +0800
 Subject: [PATCH] windows: pin and recover temporary images allocated by the
@@ -11,12 +11,12 @@ Write the private INI in place and reserve both cache files before QEMU opens th
  android-qemu2-glue/CMakeLists.txt             |   5 +
  android-qemu2-glue/drive-share.cpp            |  63 ++-
  android-qemu2-glue/main.cpp                   |  34 +-
- android-qemu2-glue/windows-temp-images.cpp    | 460 ++++++++++++++++++
+ android-qemu2-glue/windows-temp-images.cpp    | 463 ++++++++++++++++++
  android-qemu2-glue/windows-temp-images.h      |  16 +
  .../android/base/files/IniFile.h              |   2 +
  android/emu/files/include/android/utils/ini.h |   1 +
  android/emu/files/src/android/utils/ini.cpp   |   4 +
- 8 files changed, 567 insertions(+), 18 deletions(-)
+ 8 files changed, 570 insertions(+), 18 deletions(-)
  create mode 100644 android-qemu2-glue/windows-temp-images.cpp
  create mode 100644 android-qemu2-glue/windows-temp-images.h
 
@@ -286,10 +286,10 @@ index 646d0a09..c8cbbfc7 100644
  
 diff --git a/android-qemu2-glue/windows-temp-images.cpp b/android-qemu2-glue/windows-temp-images.cpp
 new file mode 100644
-index 00000000..3cc1ecd8
+index 00000000..f678e6ac
 --- /dev/null
 +++ b/android-qemu2-glue/windows-temp-images.cpp
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,463 @@
 +// Copyright 2026 Ji Mao Cai
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "windows-temp-images.h"
@@ -481,8 +481,11 @@ index 00000000..3cc1ecd8
 +    Directory dir;
 +    // Resolve junctions once. Subsequent path-based QEMU opens must go back to
 +    // this directory even if the caller's TEMP or AVD alias is retargeted.
++    // Child-file renames (including first userdata conversion) need shared
++    // write access to the directory. Individual image pins prevent replacement.
 +    dir.pin = open(fs::u8path(path), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-+                   FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
++                   FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING,
++                   FILE_FLAG_BACKUP_SEMANTICS);
 +    if (dir.pin) {
 +        auto dos = finalPath(dir.pin.get(), VOLUME_NAME_DOS).native();
 +        if (dos.rfind(LR"(\\?\UNC\)", 0) == 0) {

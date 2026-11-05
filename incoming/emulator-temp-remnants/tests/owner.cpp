@@ -19,6 +19,12 @@ int wmain(int argc, wchar_t** argv) {
     start(fs::path(argv[1]).u8string(), fs::path(argv[2]).u8string());
     if (argc == 4 && std::wstring(argv[3]) == L"recover") return 0;
     if (argc != 5) return 2;
+    if (std::wstring(argv[4]) == L"pin-only") {
+        std::cout << "ready" << std::endl;
+        std::string command;
+        std::getline(std::cin, command);
+        return 0;
+    }
     auto stem = fs::path(argv[3]).u8string();
     auto cache = create(stem, Kind::CachePair);
     if (std::wstring(argv[4]) == L"collision") return cache.empty() ? 0 : 3;

@@ -41,8 +41,8 @@ class OwnerTest(unittest.TestCase):
     def recover(self, avd):
         subprocess.run([self.exe, avd, self.temp, "recover"], check=True, timeout=15)
 
-    def start(self, avd, tag, temp=None):
-        p = subprocess.Popen([self.exe, avd, temp or self.temp, tag, "hold"],
+    def start(self, avd, tag, temp=None, mode="hold"):
+        p = subprocess.Popen([self.exe, avd, temp or self.temp, tag, mode],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         def close():
             if p.poll() is None:
@@ -130,6 +130,57 @@ class OwnerTest(unittest.TestCase):
                 p.wait(timeout=15)
                 p.stdin.close()
                 p.stdout.close()
+
+    def test_directory_pins_allow_unrelated_renames(self):
+        p = self.start(self.a, "directory", mode="pin-only")
+        move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong]
+        move.restype = ctypes.c_int
+        for directory in (self.a, self.temp):
+            with self.subTest(directory=directory.name):
+                # Same flags and names as main.cpp::convertExt4ToQcow2.
+                destination = directory / "userdata-qemu.img"
+                source = directory / "userdata-qemu.img.tmp.qcow2"
+                destination.write_bytes(b"old raw")
+                source.write_bytes(b"new qcow2")
+                ok = move(str(source), str(destination), 0x1 | 0x8)
+                self.assertTrue(ok, "MoveFileExW error " + str(ctypes.get_last_error()))
+                self.assertEqual(destination.read_bytes(), b"new qcow2")
+                self.assertFalse(source.exists())
+                renamed = directory / "renamed-userdata.img"
+                self.assertTrue(move(str(destination), str(renamed), 0),
+                                "MoveFileExW error " + str(ctypes.get_last_error()))
+                self.assertEqual(renamed.read_bytes(), b"new qcow2")
+        self.stop(p, crash=False)
+
+    @unittest.skipUnless(os.environ.get("MODAVD_QEMU_IMG"), "set MODAVD_QEMU_IMG for SDK conversion")
+    def test_pinned_directory_allows_userdata_conversion(self):
+        p = self.start(self.a, "conversion", mode="pin-only")
+        sdk = os.environ["MODAVD_QEMU_IMG"]
+        move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong]
+        move.restype = ctypes.c_int
+        raw = self.a / "userdata-qemu.img"
+        converted = self.a / "userdata-qemu.img.tmp.qcow2"
+        subprocess.run([sdk, "create", "-q", "-f", "raw", raw.name, "1M"],
+                       cwd=self.a, check=True, timeout=30)
+        subprocess.run([sdk, "convert", "-T", "none", "-O", "qcow2", raw.name, converted.name],
+                       cwd=self.a, check=True, timeout=30)
+        self.assertTrue(move(str(converted), str(raw), 0x1 | 0x8),
+                        "MoveFileExW error " + str(ctypes.get_last_error()))
+        info = json.loads(subprocess.check_output([sdk, "info", "--output=json", raw.name], cwd=self.a))
+        self.assertEqual(info["format"], "qcow2")
+        self.assertEqual(info["virtual-size"], 1024 * 1024)
+        self.assertFalse(converted.exists())
+        self.stop(p, crash=False)
+
+    def test_directory_pin_blocks_directory_rename(self):
+        p = self.start(self.a, "pinned", mode="pin-only")
+        for directory in (self.a, self.temp):
+            with self.subTest(directory=directory.name):
+                with self.assertRaises(OSError):
+                    directory.rename(directory.with_name("moved"))
+        self.stop(p, crash=False)
 
     def test_live_file_cannot_be_replaced(self):
         p = self.start(self.a, "pin")
