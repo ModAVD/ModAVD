@@ -730,6 +730,14 @@ def patch_header(header, keep):
     return re.sub(rb"\n{3,}$", b"\n\n", b"\n".join(lines))
 
 
+def upstream_pick(repo, commit):
+    """Someone else's commit taken with `git cherry-pick -x`: its message names the upstream commit, and its author
+    is not whoever committed it here. The maintainer's own cherry-picks (author = committer) are not."""
+    message = git(repo, "log", "-1", "--format=%B", commit)
+    author_email, committer_email = git(repo, "log", "-1", "--format=%ae%n%ce", commit).split("\n")
+    return bool(checks.UPSTREAM_PICK.search(message)) and author_email.strip().lower() != committer_email.strip().lower()
+
+
 def export_patches(args):
     out = Path(args.output)
     data = load(out / "snapshot.json")
@@ -749,12 +757,16 @@ def export_patches(args):
             raise ValueError("Nonlinear or empty patch series")
         authors = []
         for f, commit in zip(files, originals):
-            # Outside contributors keep their GitHub noreply authorship; any other identity in the local
-            # branches (other addresses, worker accounts) is published as IDENTITY.
+            # Outside contributors keep their GitHub noreply authorship, and upstream authors keep theirs on a
+            # commit cherry-picked from upstream; any other identity in the local branches (other addresses,
+            # worker accounts, the maintainer's own cherry-picks) is published as IDENTITY.
             original = git(repo, "log", "-1", "--format=%an <%ae>", commit)
-            keep = bool(checks.NOREPLY_AUTHOR.fullmatch(original))
+            upstream = upstream_pick(repo, commit)
+            keep = bool(checks.NOREPLY_AUTHOR.fullmatch(original)) or upstream
             if keep and not checks.am_keeps_name(original):
                 raise ValueError(f"{commit}: git am would drop the author name; amend it to 3-60 bytes without @")
+            if upstream and not checks.author_allowed(original, git(repo, "log", "-1", "--format=%B", commit)):
+                raise ValueError(f"{commit}: cherry-picked upstream author {original!r} cannot be published as is")
             authors.append(original if keep else IDENTITY)
             payload = f.read_bytes()
             separator = re.search(rb"(?m)^---\r?$", payload)
@@ -858,9 +870,9 @@ def replay(args):
         commits = git(work, "rev-list", "--reverse", s["base"] + "..HEAD").splitlines()
         trees = [git(work, "rev-parse", c + "^{tree}") for c in commits]
         authors = git(work, "log", "--reverse", "--format=%an <%ae>", s["base"] + "..HEAD").splitlines()
-        messages = git(work, "log", "--format=%B", s["base"] + "..HEAD")
-        if (trees != s["trees"] or authors != s["authors"] or not all(checks.author_allowed(a) for a in authors)
-                or re.search(r"(?i)co-authored-by:", messages)):
+        # Each author is checked against its own message: an upstream author only on an upstream cherry-pick.
+        log = git(work, "log", "--format=%an <%ae>%x00%B%x01", s["base"] + "..HEAD")
+        if trees != s["trees"] or authors != s["authors"] or not checks.commits_allowed(log):
             raise ValueError(f"Replayed trees/authors/trailers differ: {s['dir']}")
         summaries.append({"series": s["dir"], "commits": len(commits), "tree_mismatches": 0, "authors": sorted(set(authors))})
         print(f"Replayed {s['dir']}: {len(commits)} commits, every tree equal")

@@ -19,13 +19,31 @@ MAX_ANNOUNCEMENT_CHARS = 4000
 MAX_MACHINE_CHARS = 8000
 MANIFEST = "modavd-manifest.json"
 # Patch authors: the maintainer's public identity, or an outside contributor's GitHub noreply address, which
-# CONTRIBUTING asks for and the export keeps. Any other address could be a private one.
+# CONTRIBUTING asks for and the export keeps. Any other address could be a private one, except the upstream author
+# of a commit cherry-picked from upstream: they wrote it, so the export keeps them (see upstream_pick in
+# tools/pubrel/release_tools.py for which local commits count), and its message names the upstream commit.
 MAINTAINER = "qiyinxi <qiyinxi@foxmail.com>"
 NOREPLY_AUTHOR = re.compile(r"[^<>\r\n]+ <(?:[0-9]+\+)?[A-Za-z0-9][A-Za-z0-9-]{0,38}@users\.noreply\.github\.com>")
+# The line `git cherry-pick -x` appends.
+UPSTREAM_PICK = re.compile(r"(?m)^\(cherry picked from commit [0-9a-f]{40}\)\r?$")
+PLAIN_AUTHOR = re.compile(r"[^<>@\r\n]+ <[^<>@\s]+@[^<>@\s]+\.[^<>@\s]+>")
 
 
-def author_allowed(author):
-    return author == MAINTAINER or bool(NOREPLY_AUTHOR.fullmatch(author))
+def author_allowed(author, message=None):
+    """With |message| (the commit's), an upstream author of a cherry-pick is allowed too."""
+    if author == MAINTAINER or NOREPLY_AUTHOR.fullmatch(author):
+        return True
+    return (message is not None and bool(UPSTREAM_PICK.search(message)) and bool(PLAIN_AUTHOR.fullmatch(author))
+            and am_keeps_name(author))
+
+
+def commits_allowed(log):
+    """`git log --format=%an <%ae>%x00%B%x01` output: every commit's author allowed for its own message, and no
+    Co-authored-by anywhere."""
+    entries = [e.lstrip("\r\n") for e in log.split("\x01")]
+    pairs = [e.split("\x00", 1) for e in entries if e.strip()]
+    return (all(len(p) == 2 and author_allowed(p[0], p[1]) for p in pairs)
+            and not any(re.search(r"(?i)co-authored-by:", p[-1]) for p in pairs))
 
 
 def am_keeps_name(author):
@@ -271,9 +289,7 @@ def replay(root, work):
         tree = git(repo, "rev-parse", "HEAD^{tree}")
         if count != s["count"] or tree != s["tree"]:
             raise ValueError(f"Replayed count/tree differs: {directory}")
-        authors = set(git(repo, "log", "--format=%an <%ae>", s["base"] + "..HEAD").splitlines())
-        messages = git(repo, "log", "--format=%B", s["base"] + "..HEAD")
-        if not all(author_allowed(a) for a in authors) or re.search(r"(?i)co-authored-by:", messages):
+        if not commits_allowed(git(repo, "log", "--format=%an <%ae>%x00%B%x01", s["base"] + "..HEAD")):
             raise ValueError("Patch authors/trailers differ")
         summary.append({"series": directory, "commits": count, "tree": tree, "depth": 1})
         print(f"Clean AOSP shallow replay: {directory}: {count} patches; tree {tree}", flush=True)

@@ -668,6 +668,72 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.export_patches(SimpleNamespace(output=str(root / "out2"), emu_src=str(root)))
 
+    def test_patch_export_keeps_upstream_cherry_pick_authors(self):
+        upstream = "Upstream Dev <dev@example.org>"
+        pick = "(cherry picked from commit " + "a" * 40 + ")"
+        self.assertTrue(checks.author_allowed(upstream, f"upstream fix\n\nChange-Id: I1\n{pick}\n"))
+        for author, message in [(upstream, None), (upstream, "manual port\n"),
+                                (upstream, "x\n\n(cherry picked from commit abc)\n"), (upstream, f"x\n\nsee {pick}\n"),
+                                ("Upstream Dev <dev@localhost>", f"x\n\n{pick}\n"), ("U <dev@example.org>", f"x\n\n{pick}\n"),
+                                ("<dev@example.org>", f"x\n\n{pick}\n"), ("A <b@c.d> <e@f.g>", f"x\n\n{pick}\n")]:
+            self.assertFalse(checks.author_allowed(author, message), (author, message))
+        entry = lambda author, message: f"{author}\x00{message}\x01\n"
+        self.assertTrue(checks.commits_allowed(entry(upstream, f"fix\n\n{pick}\n") + entry(checks.MAINTAINER, "local\n")))
+        self.assertFalse(checks.commits_allowed(entry(upstream, "fix\n") + entry(checks.MAINTAINER, f"local\n\n{pick}\n")))
+        self.assertFalse(checks.commits_allowed(entry(checks.MAINTAINER, "local\n\nCo-authored-by: S <s@example.com>\n")))
+        root = self.folder()
+        repo = root / "src"
+        repo.mkdir()
+        git = lambda *a: release.git(repo, *a)
+        git("init", "-q")
+        git("config", "user.name", "Local Worker")
+        git("config", "user.email", "worker@localhost")
+        commits = [("base", None),
+                   (f"upstream fix\n\nChange-Id: I1\n{pick}", upstream),           # someone else's, picked: kept
+                   (f"own change taken from another branch\n\n{pick}", None),     # the maintainer's own pick: IDENTITY
+                   ("upstream fix ported by hand", upstream)]                      # no pick line: IDENTITY
+        for n, (message, author) in enumerate(commits):
+            (repo / "f.txt").write_text(f"{n}\n", encoding="utf-8")
+            git("add", "f.txt")
+            git("commit", "-q", "-m", message, *(["--author", author] if author else []))
+            if n == 0:
+                base = git("rev-parse", "HEAD")
+        out = root / "out"
+        release.save(out / "snapshot.json", {"build": "mas38", "series": [
+            {"repo": "src", "dir": "test/one", "base": base, "head": git("rev-parse", "HEAD"), "upstream": "platform/test"}]})
+        args = SimpleNamespace(output=str(out), emu_src=str(root))
+        release.export_patches(args)
+        release.replay(args)
+        self.assertEqual(release.load(out / "logs/patch-series.json")[0]["authors"],
+                         [upstream, checks.MAINTAINER, checks.MAINTAINER])
+        self.assertEqual(release.load(out / "logs/patch-replay.json")[0]["authors"], sorted([checks.MAINTAINER, upstream]))
+        picked, own, ported = [p.read_bytes() for p in sorted((out / "patches/test/one").glob("*.patch"))]
+        self.assertIn(b"\nFrom: " + upstream.encode() + b"\n", picked)
+        for data in (own, ported):
+            self.assertIn(b"\nFrom: " + checks.MAINTAINER.encode() + b"\n", data)
+            self.assertNotIn(b"localhost", data.split(b"\n\n", 1)[0])
+        self.assertNotIn(b"dev@example.org", ported)
+        # The replay checks each author against its own message: the hand port under the upstream author fails,
+        # even when the recorded author list agrees.
+        log = release.load(out / "logs/patch-series.json")
+        log[0]["authors"][2] = upstream
+        release.save(out / "logs/patch-series.json", log)
+        ported_path = sorted((out / "patches/test/one").glob("*.patch"))[2]
+        ported_path.write_bytes(ported.replace(b"\nFrom: " + checks.MAINTAINER.encode() + b"\n", b"\nFrom: " + upstream.encode() + b"\n"))
+        # Move the first replay aside: git leaves its objects read-only, which rmtree cannot delete on Windows.
+        (out / "work/replay").rename(out / "work/replay-first")
+        with self.assertRaises(ValueError):
+            release.replay(args)
+        # An upstream author git am would mangle, or one with a local address, stops the export.
+        for bad in ["dev@example.org <dev@example.org>", "Upstream Dev <dev@localhost>"]:
+            git("commit", "-q", "--amend", "--no-edit", "--author", bad)
+            git("commit", "-q", "--amend", "-m", f"upstream fix ported by hand\n\n{pick}")
+            dest = root / ("out-" + hashlib.sha256(bad.encode()).hexdigest()[:8])
+            release.save(dest / "snapshot.json", {"build": "mas38", "series": [
+                {"repo": "src", "dir": "test/one", "base": base, "head": git("rev-parse", "HEAD"), "upstream": "platform/test"}]})
+            with self.assertRaises(ValueError):
+                release.export_patches(SimpleNamespace(output=str(dest), emu_src=str(root)))
+
     CONTRIBUTOR = "A Contributor <12345+example-user@users.noreply.github.com>"
 
     def commit_patch(self, repo, name, content, message, author):
