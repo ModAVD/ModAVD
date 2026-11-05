@@ -1,79 +1,25 @@
 [
   {
     "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
-    "dir": "qemu/mas37",
-    "head": "3419edeb1ee3f69c4a12c4215aba032d3bee4c57",
+    "dir": "qemu/mas38",
+    "head": "caab5653c46bdf480a5eb1dac15816bd00014711",
     "repo": "external/qemu",
     "upstream": "platform/external/qemu",
-    "count": 80,
-    "tree": "7a669c8b6f6c4cab7a0fdb5413977e8dd55a32cc"
+    "count": 95,
+    "tree": "3add52e94eee2430ea3baf89b44b29dbd1752028"
   },
   {
     "base": "04d0287b04f72d908c621a919fa2ea5c563b1a66",
-    "dir": "gfxstream/mas37",
-    "head": "2afcb7b95a3011a3858ce0b813b215e0be21c1be",
+    "dir": "gfxstream/mas38",
+    "head": "eb1565574a7ab64457ae0f6794ad0cb6a8b76726",
     "repo": "hardware/google/gfxstream",
     "upstream": "platform/hardware/google/gfxstream",
-    "count": 25,
-    "tree": "7990b5f325b1818c4db54f8a474414f8cecef5b1"
-  },
-  {
-    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
-    "dir": "qemu/mas36",
-    "head": "a46fc099df1403d982c601f2f53329e8332a2f6a",
-    "repo": "external/qemu",
-    "upstream": "platform/external/qemu",
-    "count": 65,
-    "tree": "5483e1bf05ebb3cd7549aed2adcde998bf1c4703"
-  },
-  {
-    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
-    "dir": "qemu/mas35",
-    "head": "a1e36334f096ce5268a7df2b750f1a4a09b83c52",
-    "repo": "external/qemu",
-    "upstream": "platform/external/qemu",
-    "count": 60,
-    "tree": "08d6404e25008bb19caadf4185af10cbad91bc50"
-  },
-  {
-    "base": "04d0287b04f72d908c621a919fa2ea5c563b1a66",
-    "dir": "gfxstream/mas35",
-    "head": "28437bb6c4b3fdef705d1919813467af465a718d",
-    "repo": "hardware/google/gfxstream",
-    "upstream": "platform/hardware/google/gfxstream",
-    "count": 23,
-    "tree": "51288846bdcb9054d899ffc8458d6744d6206e32"
-  },
-  {
-    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
-    "dir": "qemu/mas32",
-    "head": "bc694d86d778732785a75364479fc03fad0250bc",
-    "repo": "external/qemu",
-    "upstream": "platform/external/qemu",
-    "count": 57,
-    "tree": "14505793ebc210a4894f2993ed1566f6476b2761"
-  },
-  {
-    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
-    "dir": "qemu/fixq30",
-    "head": "5aedc70819651ef386cef810afa6c2be3c028467",
-    "repo": "external/qemu",
-    "upstream": "platform/external/qemu",
-    "count": 55,
-    "tree": "b02675308b3373b734ca980a1492e0efe24c4970"
-  },
-  {
-    "base": "04d0287b04f72d908c621a919fa2ea5c563b1a66",
-    "dir": "gfxstream/fixq28",
-    "head": "d027890c4799a8537ce1e981fec784a99a269ade",
-    "repo": "hardware/google/gfxstream",
-    "upstream": "platform/hardware/google/gfxstream",
-    "count": 22,
-    "tree": "b8c3158178d65ac36139eb29944df3045fe3d608"
+    "count": 42,
+    "tree": "33c4220ef1da2f4772788c6af4d37deb9f34c850"
   },
   {
     "base": "dd7db6790d73210abaef36a04f2a2bd52cf22b89",
-    "dir": "crashpad/module-version22",
+    "dir": "crashpad/mas38",
     "head": "377d2d398368c38d43f4ecbca084c89a68c10530",
     "repo": "external/crashpad",
     "upstream": "platform/external/crashpad",

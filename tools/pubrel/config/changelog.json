@@ -1,5 +1,33 @@
 [
   {
+    "version": "v0.38.0",
+    "build": 38,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "可以只让实例里指定的应用走代理，其余照常直连：命令行 modavd proxy，或管理器实例卡片菜单的「按应用走代理…」；暂不支持要账号密码的代理。（[#81](https://github.com/ModAVD/ModAVD/issues/81)）",
+        "可以整理数据盘：关机后用 modavd disk <编号> compact 或管理器的「整理磁盘」，丢掉安卓里已删除的内容、缩小文件；新盘校验通过才换上，失败保留原盘。（[#2](https://github.com/ModAVD/ModAVD/issues/2)、[#95](https://github.com/ModAVD/ModAVD/issues/95)）"
+      ],
+      "变更": [
+        "模拟器重新编译（mas-37 到 mas-38），同步了上游 gfxstream 的一批改动。",
+        "窗口标题改成实例名；精简窗口自己画标题栏，右边是 ◁ ○ − ×（返回、桌面、最小化、关机），画面右侧那一列去掉了，也不再有最大化。（[#58](https://github.com/ModAVD/ModAVD/issues/58)、[#59](https://github.com/ModAVD/ModAVD/issues/59)）",
+        "write-combined 内存仍默认按 cached 分配，改用上游 gfxstream 的写法，行为不变。（[#37](https://github.com/ModAVD/ModAVD/issues/37)）",
+        "包里的管理器和命令行升到 0.4.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases)；新建实例默认 1080p；正在新建的实例 stop 默认提示忙（[#103](https://github.com/ModAVD/ModAVD/issues/103)）；exFAT / FAT32 上的根目录不能自动换包，请手动下载整包。"
+      ],
+      "修复": [
+        "点 × 改走安卓自己的正常关机（先 sync 再关机），前台应用会先收到关机通知；暂停中的实例先恢复再关。（[#60](https://github.com/ModAVD/ModAVD/issues/60)）",
+        "图形：游戏进程退出后按进程回收 EGL 资源（[#38](https://github.com/ModAVD/ModAVD/issues/38)）；ASTC / ETC2 压缩纹理能正确解压，没有原生 ASTC 的显卡上不再花屏或全黑（[#39](https://github.com/ModAVD/ModAVD/issues/39)）；游戏进程被杀后渲染线程不再一直等它，不会因此卡死整台模拟器（[#40](https://github.com/ModAVD/ModAVD/issues/40)）。",
+        "FAT32 / exFAT 上首次建数据盘按实际需要的空间检查，不再固定要上限的 1.2 倍。（[#3](https://github.com/ModAVD/ModAVD/issues/3)）",
+        "游戏里的视频解码更稳。（[#43](https://github.com/ModAVD/ModAVD/issues/43)）",
+        "整个根目录搬走以后，装过执行桥的实例也能开机了；老实例先在原位置用新版开关机一次再搬。（[#99](https://github.com/ModAVD/ModAVD/issues/99)）"
+      ],
+      "说明": [
+        "点 × 以后模拟器进程还会在后台跑一会儿（通常几秒到十几秒，最长约半分钟），请不要结束它。",
+        "FAT32 / exFAT 上首次建盘只在 NTFS 上实测过，有问题请到 [#3](https://github.com/ModAVD/ModAVD/issues/3) 反馈。"
+      ]
+    }
+  },
+  {
     "version": "v0.37.1",
     "build": 37,
     "min_automas": "5.7.0",

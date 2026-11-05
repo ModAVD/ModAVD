@@ -1,0 +1,267 @@
+From bace51c2016c8387e3a897ebf6f68cb0c489485e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 12:48:07 +0100
+Subject: [PATCH 70/95] MAS local: make lean toolbar a safe single window
+
+Use the guest power control property for lean-toolbar shutdown, keep the bounded sync and forced-exit fallback, and let completed main-loop closes pass through without a second confirmation. Embed the lean navigation controls in the framed emulator window so the native title bar owns minimize and close.
+
+Change-Id: I9f4e2a7c6b8d0f1e3a5c7b9d2e4f6a8c0b1d3e5f
+---
+ .../android/skin/qt/emulator-container.cpp    |  7 ++-
+ .../src/android/skin/qt/emulator-container.h  |  2 +
+ .../android/skin/qt/emulator-qt-window.cpp    | 27 ++++++---
+ .../src/android/skin/qt/tool-window.cpp       | 56 +++++++++++++------
+ .../src/android/skin/qt/tool-window.h         |  6 +-
+ 5 files changed, 72 insertions(+), 26 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 740c6cd80..06678581f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -17,6 +17,7 @@
+ #include <qnamespace.h>   // for WindowMinimized
+ #include <qwindowdefs.h>  // for WId
+ #include <QFlags>         // for QFlags
++#include <QByteArray>      // for qgetenv
+ #include <QFrame>         // for QFrame
+ #include <QMoveEvent>     // for QMoveEvent
+ #include <QObject>        // for QObject
+@@ -76,7 +77,11 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+ #ifdef __APPLE__
+     setWindowFlags(Qt::WindowTitleHint | Qt::Window);
+ #else
+-    setWindowFlags(Qt::WindowTitleHint | Qt::Window | Qt::CustomizeWindowHint);
++    const bool lean = qgetenv("ANDROID_EMU_FULL_TOOLBAR") != "1";
++    setWindowFlags(Qt::WindowTitleHint | Qt::Window | Qt::CustomizeWindowHint |
++                   (lean ? (Qt::WindowMinimizeButtonHint |
++                            Qt::WindowCloseButtonHint)
++                         : Qt::WindowFlags()));
+ #endif
+ 
+ #ifdef __APPLE__
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index 26ccf3ba5..78ad98d60 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -69,6 +69,8 @@ public:
+     void stopResizeTimer();
+     QSize viewportSize() const;
+ 
++    void setLeanToolbarWidth(int width) { setViewportMargins(0, 0, width, 0); }
++
+     void prepareForRotation() { mRotating = true; }
+ 
+     Ui::OverlayMessageCenter& messageCenter();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 005320734..f6a87dc79 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1195,12 +1195,22 @@ void EmulatorQtWindow::slot_gpuWarningMessageAccepted() {
+ }
+ 
+ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+-    if (mToolWindow && mToolWindow->safeShutdownInProgress()) {
++    if (mToolWindow && isMainThreadRunning() &&
++        mToolWindow->safeShutdownInProgress()) {
+         mToolWindow->on_close_button_clicked();
+         event->ignore();
+         return;
+     }
+ 
++    if (!isMainThreadRunning()) {
++        if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
++            modal->done(QMessageBox::No);
++        }
++        mSafeShutdownTimeout.stop();
++        mSafeShutdownGraceTimer.stop();
++        mSafeShutdownState = SafeShutdownState::Idle;
++    }
++
+     // make sure to use the close button on tool window
+     if (isMainThreadRunning() && !mToolWindow->closeButtonClicked()) {
+         mToolWindow->on_close_button_clicked();
+@@ -1730,6 +1740,12 @@ void EmulatorQtWindow::maskWindowFrame() {
+ 
+     flags &= ~FRAME_WINDOW_FLAGS_MASK;
+     flags |= (haveFrame ? FRAMED_WINDOW_FLAGS : FRAMELESS_WINDOW_FLAGS);
++#ifdef _WIN32
++    if (mToolWindow && mToolWindow->isLeanToolbar() && haveFrame) {
++        flags |= Qt::WindowMinimizeButtonHint | Qt::WindowCloseButtonHint;
++        flags &= ~Qt::WindowMaximizeButtonHint;
++    }
++#endif
+ 
+     mContainer.setWindowFlags(flags);
+ 
+@@ -4513,7 +4529,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ 
+     auto command = adb->runAdbCommand(
+-            {"shell", "stop"},
++            {"shell", "su", "0", "setprop", "sys.powerctl", "shutdown"},
+             [this](const android::emulation::OptionalAdbCommandResult& result) {
+                 const bool success = result && result->exit_code == 0;
+                 QMetaObject::invokeMethod(
+@@ -4530,10 +4546,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+                                 return;
+                             }
+ 
+-                            mSafeShutdownState = SafeShutdownState::GuestStopped;
+-                            mSafeShutdownTimeout.stop();
+-                            queueQuitEvent();
+-                            mSafeShutdownGraceTimer.start();
++                            LOG(INFO) << "Guest shutdown command accepted; waiting for Android to power off";
+                         },
+                         Qt::QueuedConnection);
+             },
+@@ -4593,7 +4606,7 @@ void EmulatorQtWindow::forceCloseNow() {
+     mSafeShutdownTimeout.stop();
+     mSafeShutdownGraceTimer.stop();
+     queueQuitEvent();
+-    System::get()->waitAndKillSelf();
++    System::get()->waitAndKillSelf(3);
+ }
+ 
+ void EmulatorQtWindow::runAdbShellPowerDownAndQuit() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index e0354f087..3fc68e8ab 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -49,6 +49,7 @@
+ #include <QPoint>
+ #include <QPushButton>
+ #include <QRect>
++#include <QScrollArea>
+ #include <QScreen>
+ #include <QSettings>
+ #include <QSignalBlocker>
+@@ -273,7 +274,13 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+ #else
+     Qt::WindowFlags flag = Qt::Tool;
+ #endif
+-    setWindowFlags(flag | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
++    if (leanToolbar()) {
++        setWindowFlags(Qt::Widget | Qt::FramelessWindowHint |
++                       Qt::NoDropShadowWindowHint);
++    } else {
++        setWindowFlags(flag | Qt::FramelessWindowHint |
++                       Qt::NoDropShadowWindowHint);
++    }
+     mToolsUi->setupUi(this);
+ 
+     const AvdInfo* avdInfo = getConsoleAgents()->settings->avdInfo();
+@@ -660,7 +667,6 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         // Hide everything else; all_apps_button remains the home button for
+         // AVDs that use AllAppsForHomeTray.
+         const QPushButton* keep[] = {
+-                mToolsUi->close_button,    mToolsUi->minimize_button,
+                 mToolsUi->back_button,     mToolsUi->home_button,
+                 mToolsUi->all_apps_button,
+         };
+@@ -704,6 +710,8 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         mToolsUi->back_button->setToolTip(QString::fromUtf8("返回"));
+         mToolsUi->home_button->setToolTip(QString::fromUtf8("主页"));
+         mToolsUi->all_apps_button->setToolTip(QString::fromUtf8("主页"));
++        mToolsUi->close_button->hide();
++        mToolsUi->minimize_button->hide();
+     }
+ 
+     sToolWindow = this;
+@@ -1621,12 +1629,16 @@ void ToolWindow::closeExtendedWindow() {
+ 
+ void ToolWindow::dockMainWindow() {
+     if (leanToolbar()) {
+-        const int toolbarHeight = std::max(
+-                1, parentWidget()->height() -
+-                           mEmulatorWindow->getTopTransparency() -
+-                           mEmulatorWindow->getBottomTransparency());
+-        if (height() != toolbarHeight) {
+-            setFixedHeight(toolbarHeight);
++        const int toolbarWidth = std::max(1, sizeHint().width());
++        auto* area = qobject_cast<QScrollArea*>(parentWidget());
++        if (area) {
++            if (auto* container = qobject_cast<EmulatorContainer*>(area)) {
++                container->setLeanToolbarWidth(toolbarWidth);
++            }
++            setGeometry(area->width() - toolbarWidth, 0, toolbarWidth,
++                        area->height());
++            raise();
++            return;
+         }
+     }
+ 
+@@ -1652,6 +1664,18 @@ void ToolWindow::dockMainWindow() {
+             [&] { mVirtualSceneControlWindow.get()->dockMainWindow(offset); });
+ }
+ 
++bool ToolWindow::isLeanToolbar() const {
++    return leanToolbar();
++}
++
++int ToolWindow::leanToolbarWidth() const {
++    return leanToolbar() ? std::max(1, sizeHint().width()) : 0;
++}
++
++bool ToolWindow::safeShutdownInProgress() const {
++    return mEmulatorWindow && mEmulatorWindow->safeShutdownInProgress();
++}
++
+ void ToolWindow::raiseMainWindow() {
+     mEmulatorWindow->raise();
+     mEmulatorWindow->activateWindow();
+@@ -1901,11 +1925,13 @@ bool ToolWindow::shouldClose() {
+ }
+ 
+ void ToolWindow::on_close_button_clicked() {
+-    if (leanToolbar() && mSafeShutdownInProgress) {
+-        const auto answer = QMessageBox::question(
+-                this, QString::fromUtf8("正在关机"),
+-                QString::fromUtf8("强制关闭？最近几秒写入的数据可能丢失"),
+-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
++    if (leanToolbar() && mEmulatorWindow->safeShutdownInProgress()) {
++        QMessageBox box(QMessageBox::Question, QString::fromUtf8("正在关机"),
++                        QString::fromUtf8("强制关闭？最近几秒写入的数据可能丢失"),
++                        QMessageBox::Yes | QMessageBox::No, this);
++        box.button(QMessageBox::Yes)->setText(QString::fromUtf8("是"));
++        box.button(QMessageBox::No)->setText(QString::fromUtf8("否"));
++        const auto answer = box.exec();
+         if (answer == QMessageBox::Yes) {
+             mEmulatorWindow->forceCloseNow();
+         }
+@@ -1922,11 +1948,9 @@ void ToolWindow::on_close_button_clicked() {
+             return;
+         }
+ 
+-        mSafeShutdownInProgress = true;
+         for (QPushButton* button : findChildren<QPushButton*>()) {
+-            button->setEnabled(button == mToolsUi->close_button);
++            button->setEnabled(false);
+         }
+-        mToolsUi->close_button->setToolTip(QString::fromUtf8("正在关机…"));
+         mEmulatorWindow->startSafeShutdown();
+         return;
+     }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index 599bddb33..d8daf24c8 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -141,7 +141,10 @@ public:
+     bool shouldClose();
+ 
+     bool closeButtonClicked() const { return mCloseClicked; }
+-    bool safeShutdownInProgress() const { return mSafeShutdownInProgress; }
++    bool safeShutdownInProgress() const;
++
++    bool isLeanToolbar() const;
++    int leanToolbarWidth() const;
+ 
+     bool clipboardSharingSupported() const { return mClipboardSupported; }
+     void forwardKeyToEmulator(uint32_t keycode, bool down);
+@@ -239,7 +242,6 @@ private:
+     qreal mBackingStoreRebuiltDpr = 0;
+ 
+     bool mIsExiting = false;
+-    bool mSafeShutdownInProgress = false;
+     bool mAskedWhetherToSaveSnapshot = false;
+     bool mShouldClose = false;
+     bool mAllowExtWindow = false;

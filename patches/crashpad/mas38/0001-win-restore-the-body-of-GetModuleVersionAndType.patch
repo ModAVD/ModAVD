@@ -1,0 +1,66 @@
+From 377d2d398368c38d43f4ecbca084c89a68c10530 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 6 Oct 2026 01:37:23 +0200
+Subject: [PATCH] win: restore the body of GetModuleVersionAndType()
+
+The body of GetModuleVersionAndType() was commented out with
+"TODO(b/410075886): Solve unresolved symbols linking error", but the
+function still returns true, so callers read an uninitialized
+VS_FIXEDFILEINFO. SystemSnapshotWin::Initialize() passes its
+dwFileFlags to GetStringForFileFlags(), whose
+DCHECK_EQ(file_flags & VS_FF_INFOINFERRED, 0u) fires whenever the stack
+garbage has bit 4 set. That happens while the handler is writing a
+dump, after it has suspended the crashing client, so the handler dies,
+no report is written and the client stays suspended forever. On Windows
+this shows up as an emulator that freezes on a crash instead of
+exiting, some of the time. The emulator's CMake build compiles Crashpad
+without NDEBUG, so these DCHECKs are on in the shipped
+crashpad_handler.exe.
+
+The symbols the body needs (GetFileVersionInfoSizeW,
+GetFileVersionInfoW, VerQueryValueW) come from version.lib, which both
+build files already link for util: CMake through version::version and
+Bazel through -defaultlib:version.lib. Restore the body as it is in
+upstream Crashpad and in the main and emu-dev branches of this project.
+
+Tested on Windows 11 with the emulator's CMake build (clang-cl, DCHECKs
+on):
+- crashpad_snapshot_test with
+  --gtest_filter=SystemSnapshotWin*:PEImageReader* passes, except
+  PEImageReader.DebugDirectory, which fails before and after this
+  change because its test module DLL is not built by the emulator's
+  build (LoadLibrary error 126). With the body still commented out
+  (and the stub changed to return false, so that the DCHECK cannot
+  fire), OSVersionFull and both VSFixedFileInfo_* tests fail as well.
+- The emulator's console "crash" command wrote a minidump and the
+  emulator exited in 5 out of 5 tries; the minidump now carries the
+  full OS version string.
+
+Assisted-by: Claude Code:Claude-Opus-5.5
+Change-Id: I9d8bca4df9900036bd5ab0bff66db637c57066cf
+---
+ util/win/module_version.cc | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/util/win/module_version.cc b/util/win/module_version.cc
+index 619c32b..e062366 100644
+--- a/util/win/module_version.cc
++++ b/util/win/module_version.cc
+@@ -25,8 +25,7 @@ namespace crashpad {
+ 
+ bool GetModuleVersionAndType(const base::FilePath& path,
+                              VS_FIXEDFILEINFO* vs_fixedfileinfo) {
+-  // TODO(b/410075886): Solve unresolved symbols linking error and uncomment this.
+-  /*DWORD size = GetFileVersionInfoSize(path.value().c_str(), nullptr);
++  DWORD size = GetFileVersionInfoSize(path.value().c_str(), nullptr);
+   if (!size) {
+     PLOG_IF(WARNING, GetLastError() != ERROR_RESOURCE_TYPE_NOT_FOUND)
+         << "GetFileVersionInfoSize: " << base::WideToUTF8(path.value());
+@@ -54,7 +53,6 @@ bool GetModuleVersionAndType(const base::FilePath& path,
+ 
+   *vs_fixedfileinfo = *fixed_file_info;
+   vs_fixedfileinfo->dwFileFlags &= vs_fixedfileinfo->dwFileFlagsMask;
+-*/
+   return true;
+ }
+ 

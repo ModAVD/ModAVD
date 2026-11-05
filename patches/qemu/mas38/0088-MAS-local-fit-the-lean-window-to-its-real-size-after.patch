@@ -1,0 +1,164 @@
+From 5f3868da2af466946f716e33e8ce7ff05be5e3ab Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 4 Nov 2026 23:11:04 +0100
+Subject: [PATCH 88/95] MAS local: fit the lean window to its real size after a
+ resize
+
+When a resize by an edge or a corner ended, the guest screen was fitted
+to the container's size(). Qt passes native geometry changes on to the
+widget asynchronously, so when the last move and the button release are
+handled together, size() is still an older size and the window jumps
+back to it. The fit now uses the native window size the drag left.
+
+The drag also follows only mouse moves with the left button down.
+Windows sends moves at the real cursor whenever the window changes under
+it; during a real drag that is the drag itself, but with the button up
+(input sent by a tool or a test) they are not part of the drag.
+
+Refs ModAVD/ModAVD#58
+Refs ModAVD/ModAVD#59
+
+Change-Id: I8adb65ee8b0634b844d772db1e4d1577a23e156f
+---
+ .../src/android/skin/qt/emulator-container.cpp       | 12 +++++++++---
+ .../src/android/skin/qt/windows-lean-frame.cpp       | 12 +++++++++---
+ .../src/android/skin/qt/windows-lean-frame.h         |  6 ++++--
+ .../include/android/lean-window-frame.h              |  6 ++++++
+ .../aemu-ui-window/src/android/lean-window-frame.cpp |  5 +++++
+ .../test/android/lean-window-frame_unittest.cpp      |  9 +++++++++
+ 6 files changed, 42 insertions(+), 8 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index d69c08856..1730008d1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -145,11 +145,17 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+ #ifdef _WIN32
+         mLeanFrame = std::make_unique<WindowsLeanFrame>(
+                 [this] { return leanFrameGeometry(this, mEmulatorWindow); },
+-                [this] {
++                [this](int width, int height) {
+                     // The window was resized by hand: fit the guest screen to
+-                    // it, as after the system's resizing.
++                    // it, as after the system's resizing. From the native
++                    // size: Qt may not have passed the last geometry change
++                    // on to the widget yet, and size() would be older.
+                     stopResizeTimer();
+-                    mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
++                    const double dpr = devicePixelRatioF();
++                    const QSize window(static_cast<int>(std::lround(width / dpr)),
++                                       static_cast<int>(std::lround(height / dpr)));
++                    mEmulatorWindow->doResize(window -
++                                              ToolWindow::windowChrome());
+                 });
+ #endif
+     } else {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+index 82d13e084..ed0eb8a1f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -92,7 +92,7 @@ void pruneSystemMenu(HWND hwnd) {
+ }  // namespace
+ 
+ WindowsLeanFrame::WindowsLeanFrame(std::function<Geometry()> geometry,
+-                                   std::function<void()> resizeDone)
++                                   std::function<void(int, int)> resizeDone)
+     : mGeometry(std::move(geometry)), mResizeDone(std::move(resizeDone)) {}
+ 
+ // static
+@@ -248,6 +248,11 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             if (mMode == Mode::None) {
+                 return false;
+             }
++            if (msg->message == WM_MOUSEMOVE &&
++                !lw::movesDrag(static_cast<unsigned>(msg->wParam))) {
++                *result = 0;
++                return true;
++            }
+             POINT cursor = {GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+             ClientToScreen(hwnd, &cursor);
+             track(hwnd, cursor.x, cursor.y);
+@@ -324,7 +329,8 @@ void WindowsLeanFrame::stopTracking(void* handle, bool releaseCapture) {
+     if (releaseCapture && GetCapture() == hwndOf(handle)) {
+         ReleaseCapture();
+     }
+-    if (resized && mResizeDone) {
+-        mResizeDone();
++    RECT window;
++    if (resized && mResizeDone && GetWindowRect(hwndOf(handle), &window)) {
++        mResizeDone(window.right - window.left, window.bottom - window.top);
+     }
+ }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+index 4676ae5c0..b2d658f95 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+@@ -43,8 +43,10 @@ public:
+         int minGuestHeight = 1;
+     };
+ 
++    // |resizeDone| gets the window's size in device pixels when a resize by
++    // an edge or a corner ends.
+     WindowsLeanFrame(std::function<Geometry()> geometry,
+-                     std::function<void()> resizeDone);
++                     std::function<void(int width, int height)> resizeDone);
+ 
+     // Gives the native window |wid| its frame: the caption style without the
+     // resizable frame and the maximize box, the frame extended into the
+@@ -71,7 +73,7 @@ private:
+     void stopTracking(void* hwnd, bool releaseCapture);
+ 
+     std::function<Geometry()> mGeometry;
+-    std::function<void()> mResizeDone;
++    std::function<void(int width, int height)> mResizeDone;
+     Mode mMode = Mode::None;
+     android::lean_window::Hit mHit = android::lean_window::Hit::Nowhere;
+     android::lean_window::Rect mStartRect = {0, 0, 0, 0};
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index ba250ce99..57400cc7b 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -128,5 +128,11 @@ std::vector<int> systemMenuItemsToDelete(const std::vector<unsigned>& ids);
+ // system's move and size loops and with them Snap.
+ bool refusesSysCommand(unsigned wparam);
+ 
++// Whether a mouse move with the key state |keys| (the WM_MOUSEMOVE wParam)
++// belongs to a drag of the title bar or an edge: only while the left button is
++// down. Windows also sends moves at the real cursor when the window changes
++// under it; with the button up they are not part of the drag.
++bool movesDrag(unsigned keys);
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index 12cf9b04d..3783114c6 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -166,5 +166,10 @@ bool refusesSysCommand(unsigned wparam) {
+     return command == kScMaximize || command == kScMove || command == kScSize;
+ }
+ 
++bool movesDrag(unsigned keys) {
++    constexpr unsigned kLeftButton = 0x0001;  // MK_LBUTTON
++    return (keys & kLeftButton) != 0;
++}
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index 83190b784..9e3bb02dc 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -293,3 +293,12 @@ TEST(LeanWindowFrame, RefusedSysCommands) {
+         EXPECT_FALSE(lw::refusesSysCommand(command)) << std::hex << command;
+     }
+ }
++
++TEST(LeanWindowFrame, OnlyMovesWithTheLeftButtonDrag) {
++    EXPECT_TRUE(lw::movesDrag(0x0001));           // MK_LBUTTON
++    EXPECT_TRUE(lw::movesDrag(0x0001 | 0x0004));  // with MK_SHIFT
++    EXPECT_TRUE(lw::movesDrag(0x0001 | 0x0002));  // with MK_RBUTTON
++    EXPECT_FALSE(lw::movesDrag(0));
++    EXPECT_FALSE(lw::movesDrag(0x0002));  // MK_RBUTTON alone
++    EXPECT_FALSE(lw::movesDrag(0x0004 | 0x0008 | 0x0010));  // shift, control, middle
++}

@@ -1,0 +1,46 @@
+From 15afb15b34e01c8c7a3a03a01b1d698e3a83b4a5 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:56:20 +0100
+Subject: [PATCH 29/42] host: let a dead guest process's decoders leave the
+ seqno wait
+
+The previous change gets a render thread out of a fence or semaphore
+wait once its process is dead. A render thread of a multi-threaded
+process can also be spinning in VkDecoder for the next sequence number,
+which a killed thread of the same process will never submit; only
+mDecodersShouldStop ends that spin, and it is set for snapshots and
+renderer shutdown only.
+
+Leave the spin when the process is dead, as upstream gfxstream 42a6636b
+does. Unlike 42a6636b, RenderThread::main() keeps looping instead of
+breaking out: without upstream bc2cb494 ("Replace ASG channel with
+stateful members") the address space graphics context hands the render
+thread its wakeups through a 4-entry channel and sends Exit into it with
+a blocking send() on teardown. A render thread that stopped reading it
+could leave that send(), and the guest's close of the ASG fd, blocked
+for good. Looping, the thread reads the rest of what the process sent,
+skips its Vulkan commands at the seqno check, and exits on Exit as
+before.
+
+vk_decoder.cpp is generated; regenerating it drops this change until
+the generator has it too.
+
+Refs ModAVD/ModAVD#40
+---
+ host/vulkan/vk_decoder.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/host/vulkan/vk_decoder.cpp b/host/vulkan/vk_decoder.cpp
+index c1516256..8a67a21d 100644
+--- a/host/vulkan/vk_decoder.cpp
++++ b/host/vulkan/vk_decoder.cpp
+@@ -163,7 +163,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+             if (seqnoPtr && !m_forSnapshotLoad) {
+                 {
+                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
+-                        if (shouldExit.load(std::memory_order_relaxed)) {
++                        if (shouldExit.load(std::memory_order_relaxed) ||
++                            (processResources && processResources->isGuestProcessDead())) {
+                             GFXSTREAM_WARNING(
+                                 "Process=%s is exitting. Skip processing seqno=%d on thread=0x%x.",
+                                 processName ? processName : "null", seqno,

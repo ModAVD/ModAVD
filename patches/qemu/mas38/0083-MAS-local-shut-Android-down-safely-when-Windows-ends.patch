@@ -1,0 +1,481 @@
+From be58f1e6bdc3405ea3ac7db86cbf2ba346bc0263 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:27:08 +0100
+Subject: [PATCH 83/95] MAS local: shut Android down safely when Windows ends
+ the session
+
+Logging off, restarting or shutting down Windows stopped a windowed
+instance as if the power were cut: Qt agrees to WM_QUERYENDSESSION at
+once and quits on WM_ENDSESSION, with no guest sync and no Android
+shutdown.
+
+With the lean toolbar and a window (Windows only), handle both messages
+in the native event filter before Qt does:
+
+- WM_QUERYENDSESSION starts the same safe shutdown as the close button,
+  with the windows left up, and refuses with a reason set through
+  ShutdownBlockReasonCreate. Windows lists the emulator with that reason
+  until the process has quit, and then goes on. A critical session end
+  cannot be refused; it only starts the shutdown.
+- WM_ENDSESSION with the session ending (shut down anyway, critical, or
+  forced without asking) starts the shutdown if it has not started, or
+  syncs once more if no sync is running (the first one may have failed,
+  and Android may have written more since). It waits up to 3 s for the
+  sync and then lets Qt quit, which stops QEMU.
+- WM_ENDSESSION with the session going on hides the windows: Android is
+  already powering off, and the instance carries on as after a close.
+
+The process asks to be shut down before programs at the default level,
+so that the private adb server is still there while the emulator
+refuses and waits. The lean close path moves into
+ToolWindow::beginLeanSafeShutdown, shared by both; it also closes the
+extended controls, whose snapshot actions would race the shutdown while
+the windows stay up. A repeated close during a shutdown with the
+windows up hides them. Once a safe shutdown has ended, the window quits
+Qt whether or not it was hidden.
+
+The full toolbar (ANDROID_EMU_FULL_TOOLBAR=1) and the hidden-window mode
+keep the upstream behaviour; headless instances are a separate change.
+Still to be checked on a real logoff and restart: that Windows goes on
+by itself once the refusing process has quit, how long it waits in
+WM_ENDSESSION, and whether the reason shows once the windows are hidden.
+
+Change-Id: Ieba067ca942d170fef76780465120cc1aa506a89
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 178 +++++++++++++++++-
+ .../src/android/skin/qt/emulator-qt-window.h  |   8 +
+ .../skin/qt/native-event-filter-factory.cpp   |  19 +-
+ .../src/android/skin/qt/tool-window.cpp       |  62 +++---
+ .../src/android/skin/qt/tool-window.h         |   4 +
+ 5 files changed, 242 insertions(+), 29 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 95c6258a6..7a968eaf1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -130,7 +130,10 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <chrono>
+ #include <cmath>
++#include <condition_variable>
++#include <mutex>
+ #include <string>
+ #include <string_view>
+ #include <unordered_map>
+@@ -172,6 +175,48 @@ static Lock& safeShutdownLock() {
+ }
+ static EmulatorQtWindow* sSafeShutdownWindow = nullptr;
+ 
++// The safe shutdown's guest sync commands that have not completed. When
++// Windows ends the session, the UI thread waits a few seconds for them
++// (EmulatorQtWindow::endSession); their callbacks run on the AdbInterface
++// looper, so the wait does not hold them up.
++struct SafeShutdownSyncs {
++    std::mutex mutex;
++    std::condition_variable done;
++    int inFlight = 0;
++};
++
++static SafeShutdownSyncs& safeShutdownSyncs() {
++    // Never destroyed: an adb callback may still finish a sync while the
++    // process exits.
++    static auto* syncs = new SafeShutdownSyncs;
++    return *syncs;
++}
++
++static bool safeShutdownSyncInFlight() {
++    std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
++    return safeShutdownSyncs().inFlight > 0;
++}
++
++static void safeShutdownSyncStarted() {
++    std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
++    ++safeShutdownSyncs().inFlight;
++}
++
++static void safeShutdownSyncFinished() {
++    {
++        std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
++        --safeShutdownSyncs().inFlight;
++    }
++    safeShutdownSyncs().done.notify_all();
++}
++
++// Returns whether no sync is left in flight.
++static bool waitForSafeShutdownSyncs(std::chrono::milliseconds timeout) {
++    std::unique_lock<std::mutex> lock(safeShutdownSyncs().mutex);
++    return safeShutdownSyncs().done.wait_for(
++            lock, timeout, [] { return safeShutdownSyncs().inFlight == 0; });
++}
++
+ namespace {
+ 
+ #define QT_TO_LINUX_KEY(x, y) {Qt::Key_##x, LINUX_KEY_##y}
+@@ -760,6 +805,13 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+                     : true;
+     if (ToolWindow::inWindowNav()) {
+         mFrameAlways = true;
++#ifdef _WIN32
++        // When Windows ends the session, be asked before programs at the
++        // default level (0x280): the safe shutdown refuses and waits for
++        // Android, and the private adb server it goes through keeps running
++        // until then.
++        SetProcessShutdownParameters(0x300, 0);
++#endif
+     }
+     mPreviouslyFramed = mFrameAlways;
+ 
+@@ -1223,8 +1275,10 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+         return;
+     }
+ 
+-    if (!isMainThreadRunning() &&
+-        mSafeShutdownState != SafeShutdownState::Idle) {
++    const bool safeShutdownEnded =
++            !isMainThreadRunning() &&
++            mSafeShutdownState != SafeShutdownState::Idle;
++    if (safeShutdownEnded) {
+         if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+             modal->close();
+         }
+@@ -1309,13 +1363,15 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+         mOverlay.hide();
+         hide();
+         event->accept();
+-        if (mHiddenForSafeShutdown && !mClearedForQuit) {
++        if ((mHiddenForSafeShutdown || safeShutdownEnded) && !mClearedForQuit) {
+             // The windows were hidden when the safe shutdown started, so this
+             // close is not the last visible window closing and Qt would not
+             // leave its event loop: the process would end only by the kill
+             // guard, without the normal teardown. Quit here, as the hidden
+-            // window mode does in EmulatorContainer::closeEvent. Not when Qt
+-            // is quitting already and closing the windows itself.
++            // window mode does in EmulatorContainer::closeEvent. The windows
++            // stay up when Windows ends the session; quit then too rather
++            // than count on Qt seeing them close. Not when Qt is quitting
++            // already and closing the windows itself.
+             qApp->quit();
+         }
+     }
+@@ -4669,9 +4725,11 @@ void EmulatorQtWindow::startSafeShutdown() {
+     // close is then on disk even if the process is killed while Android powers
+     // off (Task Manager, Windows ending the session), and it no longer hangs
+     // on the fallback sync after the timeout, when adbd may be gone.
++    safeShutdownSyncStarted();
+     auto command = adb->runAdbCommand(
+             {"wait-for-device", "shell", "sync"},
+             [this](const android::emulation::OptionalAdbCommandResult& result) {
++                safeShutdownSyncFinished();
+                 const bool success = result && result->exit_code == 0;
+                 AutoLock lock(safeShutdownLock());
+                 if (sSafeShutdownWindow != this) {
+@@ -4695,6 +4753,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+             },
+             5000);
+     if (!command) {
++        safeShutdownSyncFinished();
+         dwarning("Safe toolbar shutdown guest sync could not start; asking Android to power off anyway");
+         requestGuestPowerOff();
+     }
+@@ -4751,9 +4810,11 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+     }
+ 
+     registerWithAdbServer();
++    safeShutdownSyncStarted();
+     auto command = adb->runAdbCommand(
+             {"wait-for-device", "shell", "sync"},
+             [this](const android::emulation::OptionalAdbCommandResult& result) {
++                safeShutdownSyncFinished();
+                 const bool success = result && result->exit_code == 0;
+                 AutoLock lock(safeShutdownLock());
+                 if (sSafeShutdownWindow != this) {
+@@ -4778,6 +4839,7 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+             // sync with a lot of dirty data time to finish.
+             5000);
+     if (!command) {
++        safeShutdownSyncFinished();
+         dwarning("Safe toolbar shutdown guest sync could not start; forcing exit");
+         forceCloseNow();
+     }
+@@ -4816,6 +4878,112 @@ void EmulatorQtWindow::forceCloseNow() {
+     System::get()->waitAndKillSelf(10);
+ }
+ 
++// Windows logging off, restarting or shutting down sends WM_QUERYENDSESSION
++// to every top-level window and ends the process after WM_ENDSESSION. Qt
++// agrees at once and quits, which stops the guest as if the power were cut.
++// With the lean toolbar and a window, the native event filter hands both
++// messages here instead, once per top-level window (Qt's hidden ones too).
++//
++// Returns whether to refuse WM_QUERYENDSESSION. The safe shutdown starts with
++// the windows left up, and Windows lists the emulator with the reason below
++// until the process has quit; then it goes on by itself. A critical session
++// end cannot be refused: it only starts the shutdown, and endSession() waits
++// for the sync.
++bool EmulatorQtWindow::queryEndSession(bool critical) {
++    if (!ToolWindow::inWindowNav() || !mToolWindow || !isMainThreadRunning()) {
++        return false;
++    }
++    if (!safeShutdownInProgress()) {
++        dinfo("Safe toolbar shutdown: Windows is ending the session%s",
++              critical ? " (critical)" : "");
++        mToolWindow->beginLeanSafeShutdown(false);
++    }
++    if (critical) {
++        return false;
++    }
++#ifdef _WIN32
++    if (!mSessionEndBlocked) {
++        mSessionEndBlocked = true;
++        const QString reason =
++                QString::fromUtf8("正在关闭安卓，关完会自动继续");
++        if (!ShutdownBlockReasonCreate(
++                    reinterpret_cast<HWND>(mContainer.winId()),
++                    reinterpret_cast<LPCWSTR>(reason.utf16()))) {
++            dwarning("Safe toolbar shutdown: ShutdownBlockReasonCreate failed (%lu)",
++                     GetLastError());
++        }
++    }
++#endif
++    return true;
++}
++
++// WM_ENDSESSION. When the session goes on after all (the user cancelled, or
++// another program refused), Android is already powering off and cannot be
++// called back: carry on as after a close, with the windows gone. When it
++// ends, Windows ends the process soon after this returns (the user chose to
++// shut down anyway, the end is critical, or it was forced without asking).
++// Make sure the guest is syncing and give the sync a few seconds; Qt then
++// quits, and QEMU stops the VM and closes its disks (slot_clearInstance).
++void EmulatorQtWindow::endSession(bool ending) {
++    if (!ToolWindow::inWindowNav() || !mToolWindow) {
++        return;
++    }
++#ifdef _WIN32
++    if (mSessionEndBlocked) {
++        mSessionEndBlocked = false;
++        ShutdownBlockReasonDestroy(reinterpret_cast<HWND>(mContainer.winId()));
++    }
++#endif
++    if (!ending) {
++        // Each top-level window gets the message; act on the first.
++        if (safeShutdownInProgress() && !mHiddenForSafeShutdown) {
++            dinfo("Safe toolbar shutdown: Windows is not ending the session after all");
++            hideForSafeShutdown();
++        }
++        return;
++    }
++
++    if (isMainThreadRunning()) {
++        if (!safeShutdownInProgress()) {
++            dinfo("Safe toolbar shutdown: Windows is ending the session without asking");
++            mToolWindow->beginLeanSafeShutdown(false);
++        } else if (mSafeShutdownState == SafeShutdownState::StoppingGuest &&
++                   !safeShutdownSyncInFlight()) {
++            // The first sync has finished, or failed, and Android may have
++            // written more since: sync once more before the process goes.
++            startSessionEndSync();
++        }
++    }
++    if (waitForSafeShutdownSyncs(std::chrono::seconds(3))) {
++        dinfo("Safe toolbar shutdown: Windows is ending the session; quitting");
++    } else {
++        dwarning("Safe toolbar shutdown: the guest sync has not finished as Windows ends the session");
++    }
++}
++
++// Without wait-for-device: late in Android's shutdown adbd may be gone, and
++// then this fails at once rather than use up the wait in endSession().
++void EmulatorQtWindow::startSessionEndSync() {
++    auto* adb = *mAdbInterface;
++    if (!adb) {
++        return;
++    }
++    dinfo("Safe toolbar shutdown: syncing the guest once more as Windows ends the session");
++    safeShutdownSyncStarted();
++    auto command = adb->runAdbCommand(
++            {"shell", "sync"},
++            [](const android::emulation::OptionalAdbCommandResult& result) {
++                safeShutdownSyncFinished();
++                if (!result || result->exit_code != 0) {
++                    dwarning("Safe toolbar shutdown: the last guest sync failed");
++                }
++            },
++            3000);
++    if (!command) {
++        safeShutdownSyncFinished();
++    }
++}
++
+ void EmulatorQtWindow::runAdbShellPowerDownAndQuit() {
+     // we need to run it only once, so don't ever reset this
+     if (mStartedAdbStopProcess) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index c0e005105..f9dac7853 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -243,6 +243,10 @@ public:
+     void hideForSafeShutdown();
+     void forceCloseNow();
+     bool safeShutdownInProgress() const;
++    // Windows ending the session: WM_QUERYENDSESSION (returns whether to
++    // refuse it) and WM_ENDSESSION (|ending| is its wParam).
++    bool queryEndSession(bool critical);
++    void endSession(bool ending);
+     EmulatorContainer* containerWindow();
+     QSize guestAreaSize() const;
+     bool isInZoomMode() const;
+@@ -565,6 +569,7 @@ private:
+     void runAdbShellPowerDownAndQuit();
+     void requestGuestPowerOff();
+     void startSafeShutdownSync();
++    void startSessionEndSync();
+     void setVisibleExtent(QBitmap bitMap);
+     Qt::CursorShape getCursorShape(bool mouseGrabbed);
+ 
+@@ -761,6 +766,9 @@ private:
+     SafeShutdownState mSafeShutdownState = SafeShutdownState::Idle;
+     QTimer mSafeShutdownTimeout;
+     bool mHiddenForSafeShutdown = false;
++#ifdef _WIN32
++    bool mSessionEndBlocked = false;
++#endif
+ 
+     bool mSkinRemoved{false};
+     bool mFrameAlways;  // true = no floating emulator
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/native-event-filter-factory.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/native-event-filter-factory.cpp
+index 5dd5fa474..f8193ccf2 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/native-event-filter-factory.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/native-event-filter-factory.cpp
+@@ -134,10 +134,25 @@ class NativeEventFilter : public QAbstractNativeEventFilter {
+ public:
+     bool nativeEventFilter(const QByteArray& eventType,
+                            void* message,
+-                           qintptr*) override {
++                           qintptr* result) override {
+         if (eventType.compare("windows_generic_MSG") == 0) {
+             MSG* ev = static_cast<MSG*>(message);
+-            if (ev->message == WM_KEYDOWN || ev->message == WM_SYSKEYDOWN) {
++            if (ev->message == WM_QUERYENDSESSION) {
++                // Windows is logging off, restarting or shutting down; see
++                // EmulatorQtWindow::queryEndSession().
++                EmulatorQtWindow* window = EmulatorQtWindow::getInstance();
++                if (window && window->queryEndSession(
++                                      (ev->lParam & ENDSESSION_CRITICAL) != 0)) {
++                    *result = FALSE;
++                    return true;
++                }
++            } else if (ev->message == WM_ENDSESSION) {
++                // Qt's own handling then quits.
++                EmulatorQtWindow* window = EmulatorQtWindow::getInstance();
++                if (window) {
++                    window->endSession(ev->wParam != FALSE);
++                }
++            } else if (ev->message == WM_KEYDOWN || ev->message == WM_SYSKEYDOWN) {
+                 // Since being upgraded to 5.12.1, the prebuilt QT library
+                 // cannot handle numpad keys when number lock is on. To
+                 // workaround, we map numpad keys to its corresponding alpha
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 97ada3768..7d01fe7c5 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -2046,35 +2046,20 @@ bool ToolWindow::shouldClose() {
+ 
+ void ToolWindow::on_close_button_clicked() {
+     if (leanToolbar() && mEmulatorWindow->safeShutdownInProgress()) {
+-        // The windows are already gone and the shutdown is bounded; a
+-        // repeated close request has nothing to ask about.
++        // The shutdown is already under way and bounded; a repeated close
++        // request has nothing to ask about. It only takes the windows away if
++        // they are still up, as when Windows is ending the session.
++        mEmulatorWindow->hideForSafeShutdown();
+         return;
+     }
+ 
+-    mIsExiting = true;
+-    mCloseClicked = true;
+     if (leanToolbar()) {
+-        // Android powers off behind the hidden windows. A quick-boot snapshot
+-        // of a guest that is shutting down is of no use, so neither ask nor
+-        // save one (the same as a shift-click on the full toolbar's close).
+-        mAskedWhetherToSaveSnapshot = true;
+-        mShouldClose = true;
+-        getConsoleAgents()->settings->avdParams()->flags |=
+-                AVDINFO_NO_SNAPSHOT_SAVE_ON_EXIT;
+-
+-        for (QPushButton* button : findChildren<QPushButton*>()) {
+-            button->setEnabled(false);
+-        }
+-        if (mWindowNavColumn) {
+-            for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
+-                button->setEnabled(false);
+-            }
+-        }
+-        mEmulatorWindow->startSafeShutdown();
+-        mEmulatorWindow->hideForSafeShutdown();
++        beginLeanSafeShutdown(true);
+         return;
+     }
+ 
++    mIsExiting = true;
++    mCloseClicked = true;
+     setEnabled(false);
+     if (QGuiApplication::queryKeyboardModifiers().testFlag(Qt::ShiftModifier)) {
+         // The user shift-clicked on the X
+@@ -2099,6 +2084,39 @@ void ToolWindow::on_close_button_clicked() {
+     }
+ }
+ 
++void ToolWindow::beginLeanSafeShutdown(bool hideWindows) {
++    if (mEmulatorWindow->safeShutdownInProgress()) {
++        return;
++    }
++
++    mIsExiting = true;
++    mCloseClicked = true;
++    // Android powers off while the emulator waits: behind the hidden windows
++    // after a close, in sight when Windows ends the session. A quick-boot
++    // snapshot of a guest that is shutting down is of no use, so neither ask
++    // nor save one (the same as a shift-click on the full toolbar's close).
++    mAskedWhetherToSaveSnapshot = true;
++    mShouldClose = true;
++    getConsoleAgents()->settings->avdParams()->flags |=
++            AVDINFO_NO_SNAPSHOT_SAVE_ON_EXIT;
++
++    for (QPushButton* button : findChildren<QPushButton*>()) {
++        button->setEnabled(false);
++    }
++    if (mWindowNavColumn) {
++        for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
++            button->setEnabled(false);
++        }
++    }
++    // Snapshot saves and loads from the extended controls would race the
++    // shutdown when the windows stay up.
++    closeExtendedWindow();
++    mEmulatorWindow->startSafeShutdown();
++    if (hideWindows) {
++        mEmulatorWindow->hideForSafeShutdown();
++    }
++}
++
+ void ToolWindow::on_home_button_pressed() {
+     mEmulatorWindow->raise();
+     handleUICommand(QtUICommand::HOME, true);
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index 0d068a37d..8d5f0faba 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -144,6 +144,10 @@ public:
+ 
+     bool closeButtonClicked() const { return mCloseClicked; }
+     bool safeShutdownInProgress() const;
++    // The lean toolbar's close: Android powers off and the emulator quits
++    // once it has. The windows go away at once unless |hideWindows| is false,
++    // as when Windows ends the session.
++    void beginLeanSafeShutdown(bool hideWindows);
+ 
+     bool isLeanToolbar() const;
+     int leanToolbarWidth() const;

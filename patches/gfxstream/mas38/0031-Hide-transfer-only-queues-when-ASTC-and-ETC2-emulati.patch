@@ -1,0 +1,326 @@
+From 2a1c64bac4d95e93b601221a5b4dacfc3d6285d4 Mon Sep 17 00:00:00 2001
+From: Jason Macnak <natsu@google.com>
+Date: Thu, 8 Oct 2026 11:32:17 -0700
+Subject: [PATCH 31/42] Hide transfer only queues when ASTC and ETC2 emulation
+ enabled
+
+Gfxstream supports ASTC emulation by inspecting `vkCmdPipelineBarrier()`
+calls and inserting extra commands into the provided command buffers to
+dispatch compute shaders. Gfxstream, however, does not control which
+queues these command buffers are submitted to so we must hide
+transfer-only queues to ensure compute shader work is not scheduled on
+transfer-only queues.
+
+Bug: b/571544769
+Test: dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image_transfer_queue.all_formats.color.2d_to_1d.etc2_r8g8b8_unorm_block.r16g16b16a16_unorm#optimal_optimal
+Low-Coverage-Reason: full dEQP not running in CI yet so no coverage
+Change-Id: I581cfc597f5b869f0c7f9e9107e3f118bb03369c
+(cherry picked from commit bf62e4b7b4ab2449fba448a38a733ea5396be533)
+[MAS: resolved against the local ANDROID_EMU_VK_ASTC_BC3 change in
+ initFeatures(), and kept logging the ASTC and ETC2 emulation settings
+ there, now read from the members setFeatures() fills in. The emulator
+ has to set VulkanAstcEmulation and VulkanEtc2Emulation, or both
+ emulations are off (ModAVD/ModAVD#39).]
+
+Refs ModAVD/ModAVD#39
+---
+ .../include/gfxstream/host/features.h         | 10 ++
+ host/frame_buffer.cpp                         |  2 -
+ host/virtio_gpu_gfxstream_renderer.cpp        |  4 +
+ ...utePipelineRestoration_integrationtest.cpp |  3 +-
+ host/vulkan/testing/VulkanTestHelper.cpp      |  5 +-
+ host/vulkan/testing/VulkanTestHelper.h        |  1 -
+ host/vulkan/vk_common_operations.cpp          | 14 ++-
+ host/vulkan/vk_common_operations.h            |  2 -
+ .../vk_emulated_physical_device_queue.cpp     | 13 +++
+ ...k_emulated_physical_device_queue_tests.cpp | 95 +++++++++++++++++++
+ 10 files changed, 134 insertions(+), 15 deletions(-)
+
+diff --git a/host/features/include/gfxstream/host/features.h b/host/features/include/gfxstream/host/features.h
+index b54911f0..cdfa4e41 100644
+--- a/host/features/include/gfxstream/host/features.h
++++ b/host/features/include/gfxstream/host/features.h
+@@ -458,6 +458,16 @@ struct FeatureSet {
+         "If enabled, enables protected memory emulation for the guest.",
+         &map,
+     };
++    BoolFeatureInfo VulkanAstcEmulation = {
++        "VulkanAstcEmulation",
++        "If enabled, enables ASTC texture compression emulation for the guest.",
++        &map,
++    };
++    BoolFeatureInfo VulkanEtc2Emulation = {
++        "VulkanEtc2Emulation",
++        "If enabled, enables ETC2 texture compression emulation for the guest.",
++        &map,
++    };
+     VulkanVersionFeatureInfo GuestVulkanMaxApiVersion = {
+         "GuestVulkanMaxApiVersion",
+         "Represents the maximum vulkan api version that should be reported to the guest and is"
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 235ff200..eae51be9 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -1345,8 +1345,6 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
+         .useVulkanComposition = impl->m_useVulkanComposition,
+         .useVulkanNativeSwapchain = impl->m_features.VulkanNativeSwapchain.enabled(),
+         .guestRenderDoc = std::move(renderDocMultipleVkInstances),
+-        .astcLdrEmulationMode = AstcEmulationMode::Gpu,
+-        .enableEtc2Emulation = true,
+         .enableYcbcrEmulation = false,
+         .guestVulkanOnly = impl->m_features.GuestVulkanOnly.enabled(),
+         .useDedicatedAllocations = false,  // Set later.
+diff --git a/host/virtio_gpu_gfxstream_renderer.cpp b/host/virtio_gpu_gfxstream_renderer.cpp
+index 65a1e9a4..cae18f26 100644
+--- a/host/virtio_gpu_gfxstream_renderer.cpp
++++ b/host/virtio_gpu_gfxstream_renderer.cpp
+@@ -110,6 +110,10 @@ ParseGfxstreamFeatures(const int rendererFlags,
+         rendererFlags & STREAM_RENDERER_FLAGS_USE_VK_BIT);
+     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+         &features, VulkanBatchedDescriptorSetUpdate, true);
++    GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
++        &features, VulkanAstcEmulation, true);
++    GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
++        &features, VulkanEtc2Emulation, true);
+     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+         &features, VulkanIgnoredHandles, true);
+     GFXSTREAM_SET_BOOL_FEATURE_ON_CONDITION(
+diff --git a/host/vulkan/emulated_textures/testing/ComputePipelineRestoration_integrationtest.cpp b/host/vulkan/emulated_textures/testing/ComputePipelineRestoration_integrationtest.cpp
+index 78af6094..35b02634 100644
+--- a/host/vulkan/emulated_textures/testing/ComputePipelineRestoration_integrationtest.cpp
++++ b/host/vulkan/emulated_textures/testing/ComputePipelineRestoration_integrationtest.cpp
+@@ -46,8 +46,7 @@ class ComputePipelineRestorationTest : public ::testing::Test {
+         vkTest = std::make_unique<VulkanTestHelper>();
+         vkTest->failOnValidationErrors(false);
+         vkTest->initialize(
+-            {.astcLdrEmulationMode = AstcEmulationMode::Gpu,
+-             .appInfo = VkApplicationInfo{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
++            {.appInfo = VkApplicationInfo{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                                           .pApplicationName = "pipeline_restoration_test",
+                                           .pEngineName = "pipeline_restoration_test",
+                                           .apiVersion = VK_API_VERSION_1_1},
+diff --git a/host/vulkan/testing/VulkanTestHelper.cpp b/host/vulkan/testing/VulkanTestHelper.cpp
+index 63457e81..8a3affbf 100644
+--- a/host/vulkan/testing/VulkanTestHelper.cpp
++++ b/host/vulkan/testing/VulkanTestHelper.cpp
+@@ -41,6 +41,7 @@ gfxstream::host::FeatureSet getGfxstreamFeatures() {
+     gfxstream::host::FeatureSet features;
+     // Enable so that we can have VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+     features.GlDirectMem.setEnabled(true);
++    features.VulkanAstcEmulation.setEnabled(true);
+     return features;
+ }
+ 
+@@ -92,9 +93,7 @@ VulkanTestHelper::~VulkanTestHelper() {
+ }
+ 
+ void VulkanTestHelper::initialize(const InitializationOptions& options) {
+-    mVkEmu->initFeatures(VkEmulation::Features{
+-        .astcLdrEmulationMode = options.astcLdrEmulationMode,
+-    });
++    mVkEmu->initFeatures(VkEmulation::Features{});
+ 
+     // Check that the validation layer is present
+     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
+diff --git a/host/vulkan/testing/VulkanTestHelper.h b/host/vulkan/testing/VulkanTestHelper.h
+index 38b218c0..b9219529 100644
+--- a/host/vulkan/testing/VulkanTestHelper.h
++++ b/host/vulkan/testing/VulkanTestHelper.h
+@@ -48,7 +48,6 @@ class VulkanTestHelper {
+ 
+     // Optional parameters for the `initialize()` function
+     struct InitializationOptions {
+-        AstcEmulationMode astcLdrEmulationMode;
+         std::optional<VkApplicationInfo> appInfo;
+         VkPhysicalDeviceFeatures deviceFeatures;
+         std::vector<std::string> enabledExtensions;  // enabled extensions for vkCreateInstance
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 7546b58e..b3199638 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -1731,10 +1731,12 @@ void VkEmulation::initFeatures(Features features) {
+         GFXSTREAM_INFO("    useVulkanNativeSwapchain: %s",
+                        features.useVulkanNativeSwapchain ? "true" : "false");
+         GFXSTREAM_INFO("    enable guestRenderDoc: %s", features.guestRenderDoc ? "true" : "false");
++        // MAS: these two now come from the VulkanAstcEmulation and VulkanEtc2Emulation features,
++        // applied in setFeatures(), which runs first. Keep logging them: when the emulator does
++        // not set those features, the emulation is silently off (ModAVD#39).
+         GFXSTREAM_INFO("    ASTC LDR emulation mode: %s",
+-                       string_AstcEmulationMode(features.astcLdrEmulationMode));
+-        GFXSTREAM_INFO("    enable ETC2 emulation: %s",
+-                       features.enableEtc2Emulation ? "true" : "false");
++                       string_AstcEmulationMode(mAstcLdrEmulationMode));
++        GFXSTREAM_INFO("    enable ETC2 emulation: %s", mEnableEtc2Emulation ? "true" : "false");
+         GFXSTREAM_INFO("    enable Ycbcr emulation: %s",
+                        features.enableYcbcrEmulation ? "true" : "false");
+         GFXSTREAM_INFO("    guestVulkanOnly: %s", features.guestVulkanOnly ? "true" : "false");
+@@ -1752,7 +1754,6 @@ void VkEmulation::initFeatures(Features features) {
+     mUseDeferredCommands = features.deferredCommands;
+     mUseCreateResourcesWithRequirements = features.createResourceWithRequirements;
+     mGuestRenderDoc = std::move(features.guestRenderDoc);
+-    mAstcLdrEmulationMode = features.astcLdrEmulationMode;
+     // MAS (Endfield, 10-16), off by default: ANDROID_EMU_VK_ASTC_BC3=1 makes the GPU ASTC
+     // emulation transcode into BC3 instead of RGBA8, a quarter of the decompressed texture memory
+     // (the emulated image keeps the raw ASTC blocks next to it either way).
+@@ -1760,7 +1761,6 @@ void VkEmulation::initFeatures(Features features) {
+         GpuDecompressionPipelineManager::setAstcDecoder(AstcDecoder::NewBc3);
+         GFXSTREAM_INFO("MAS: GPU ASTC emulation decodes to BC3 (ANDROID_EMU_VK_ASTC_BC3)");
+     }
+-    mEnableEtc2Emulation = features.enableEtc2Emulation;
+     mEnableYcbcrEmulation = features.enableYcbcrEmulation;
+     mGuestVulkanOnly = features.guestVulkanOnly;
+     mUseDedicatedAllocations = features.useDedicatedAllocations;
+@@ -1936,6 +1936,10 @@ const gfxstream::host::FeatureSet& VkEmulation::getFeatures() const { return mFe
+ 
+ void VkEmulation::setFeatures(const gfxstream::host::FeatureSet& features) {
+     mFeatures = features;
++    mAstcLdrEmulationMode = mFeatures.VulkanAstcEmulation.enabled()
++                                ? AstcEmulationMode::Gpu
++                                : AstcEmulationMode::Disabled;
++    mEnableEtc2Emulation = mFeatures.VulkanEtc2Emulation.enabled();
+ 
+     // Some features may require changes based on other features, system and drivers
+ 
+diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
+index 35539b5c..d7419d32 100644
+--- a/host/vulkan/vk_common_operations.h
++++ b/host/vulkan/vk_common_operations.h
+@@ -107,8 +107,6 @@ class VkEmulation {
+         bool useVulkanComposition = false;
+         bool useVulkanNativeSwapchain = false;
+         std::unique_ptr<gfxstream::host::RenderDocWithMultipleVkInstances> guestRenderDoc = nullptr;
+-        AstcEmulationMode astcLdrEmulationMode = AstcEmulationMode::Disabled;
+-        bool enableEtc2Emulation = false;
+         bool enableYcbcrEmulation = false;
+         bool guestVulkanOnly = false;
+         bool useDedicatedAllocations = false;
+diff --git a/host/vulkan/vk_emulated_physical_device_queue.cpp b/host/vulkan/vk_emulated_physical_device_queue.cpp
+index 3a2305f8..2fce8a00 100644
+--- a/host/vulkan/vk_emulated_physical_device_queue.cpp
++++ b/host/vulkan/vk_emulated_physical_device_queue.cpp
+@@ -51,6 +51,19 @@ EmulatedPhysicalDeviceQueueProperties::EmulatedPhysicalDeviceQueueProperties(
+             }
+         }
+     }
++
++    // Gfxstream supports ASTC and ETC2 emulation by inspecting `vkCmdPipelineBarrier()`
++    // calls and inserting extra commands into the provided command buffers to dispatch
++    // compute shaders. Gfxstream, however, does not control which queues these command
++    // buffers are submitted to so we must hide transfer-only queues to ensure compute
++    // shader work is not scheduled on transfer-only queues.
++    if (features.VulkanAstcEmulation.enabled() || features.VulkanEtc2Emulation.enabled()) {
++        for (VkQueueFamilyProperties& qfp : mQueueFamilyProperties) {
++            if (!(qfp.queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
++                qfp.queueFlags &= ~VK_QUEUE_TRANSFER_BIT;
++            }
++        }
++    }
+ }
+ 
+ }  // namespace vk
+diff --git a/host/vulkan/vk_emulated_physical_device_queue_tests.cpp b/host/vulkan/vk_emulated_physical_device_queue_tests.cpp
+index e654980b..f77e8149 100644
+--- a/host/vulkan/vk_emulated_physical_device_queue_tests.cpp
++++ b/host/vulkan/vk_emulated_physical_device_queue_tests.cpp
+@@ -152,6 +152,101 @@ TEST(VkGuestQueueUtilsTest, VulkanProtectedVirtualQueue) {
+     EXPECT_THAT(actualQueueProperties[0], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[0]));
+ }
+ 
++// Gfxstream supports ETC2 emulation by inspecting `vkCmdPipelineBarrier()` calls
++// and inserting extra commands into the provided command buffers to dispatch
++// compute shaders. Gfxstream, however, does not control which queues these command
++// buffers are submitted to so we must hide transfer-only queues to ensure compute
++// shader work is not scheduled on transfer-only queues.
++TEST(VkGuestQueueUtilsTest, VulkanEtc2EmulationHidesTransferOnlyQueue) {
++    const std::vector<VkQueueFamilyProperties> hostQueueFamilyProperties = {
++        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 16,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT,
++         .queueCount = 2,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 8,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}}};
++
++    const std::vector<VkQueueFamilyProperties> expectedQueueFamilyProperties = {
++        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 16,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        // NOTE: VK_QUEUE_TRANSFER_BIT is removed here:
++        {.queueFlags = VK_QUEUE_SPARSE_BINDING_BIT,
++         .queueCount = 2,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 8,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}}};
++
++    gfxstream::host::FeatureSet features;
++    features.Vulkan.setEnabled(true);
++    features.VulkanEtc2Emulation.setEnabled(true);
++
++    EmulatedPhysicalDeviceQueueProperties helper(hostQueueFamilyProperties, features);
++
++    const auto actualQueueProperties = helper.getQueueFamilyProperties();
++    EXPECT_THAT(actualQueueProperties.size(), 3);
++    EXPECT_THAT(actualQueueProperties[0], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[0]));
++    EXPECT_THAT(actualQueueProperties[1], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[1]));
++    EXPECT_THAT(actualQueueProperties[2], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[2]));
++}
++
++// Gfxstream supports ASTC emulation by inspecting `vkCmdPipelineBarrier()` calls
++// and inserting extra commands into the provided command buffers to dispatch
++// compute shaders. Gfxstream, however, does not control which queues these command
++// buffers are submitted to so we must hide transfer-only queues to ensure compute
++// shader work is not scheduled on transfer-only queues.
++TEST(VkGuestQueueUtilsTest, VulkanAstcEmulationHidesTransferOnlyQueue) {
++    const std::vector<VkQueueFamilyProperties> hostQueueFamilyProperties = {
++        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 16,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_TRANSFER_BIT | VK_QUEUE_SPARSE_BINDING_BIT,
++         .queueCount = 2,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 8,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}}};
++
++    const std::vector<VkQueueFamilyProperties> expectedQueueFamilyProperties = {
++        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 16,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        // NOTE: VK_QUEUE_TRANSFER_BIT is removed here:
++        {.queueFlags = VK_QUEUE_SPARSE_BINDING_BIT,
++         .queueCount = 2,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}},
++        {.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
++         .queueCount = 8,
++         .timestampValidBits = 64,
++         .minImageTransferGranularity = {1, 1, 1}}};
++
++    gfxstream::host::FeatureSet features;
++    features.Vulkan.setEnabled(true);
++    features.VulkanAstcEmulation.setEnabled(true);
++
++    EmulatedPhysicalDeviceQueueProperties helper(hostQueueFamilyProperties, features);
++
++    const auto actualQueueProperties = helper.getQueueFamilyProperties();
++    EXPECT_THAT(actualQueueProperties.size(), 3);
++    EXPECT_THAT(actualQueueProperties[0], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[0]));
++    EXPECT_THAT(actualQueueProperties[1], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[1]));
++    EXPECT_THAT(actualQueueProperties[2], EqsVkQueueFamilyProperties(expectedQueueFamilyProperties[2]));
++}
+ 
+ }  // namespace
+ }  // namespace vk

@@ -1,0 +1,52 @@
+From e2fe88fd30cb60131e168a225d34e9e74528f72d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 15:33:12 +0100
+Subject: [PATCH 73/95] MAS local: finish lean navigation polish
+
+Route All Apps through its own navigation handlers and keep the container black during resize. The final review build includes the corrected margin placement and watchdog behavior.
+
+Change-Id: I7b3d5f9a1c6e8b0d2f4a7c9e3b5d1f6a8c0e2b4d
+---
+ .../src/android/skin/qt/emulator-container.cpp     |  3 +++
+ .../aemu-ui-qt/src/android/skin/qt/tool-window.cpp | 14 ++++++++++----
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 6ba9f193e..aac55b0fa 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -85,6 +85,9 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+                             Qt::WindowMinimizeButtonHint |
+                             Qt::WindowCloseButtonHint)
+                          : Qt::WindowFlags()));
++    if (lean) {
++        setStyleSheet(QStringLiteral("EmulatorContainer { background: #000000; }"));
++    }
+ #endif
+ 
+ #ifdef __APPLE__
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 54ff07c54..cc37b46c9 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -999,10 +999,16 @@ void ToolWindow::createWindowNavColumn() {
+     };
+     addButton(mToolsUi->back_button, &ToolWindow::on_back_button_pressed,
+               &ToolWindow::on_back_button_released);
+-    addButton(mToolsUi->home_button->isHidden() ? mToolsUi->all_apps_button
+-                                                 : mToolsUi->home_button,
+-              &ToolWindow::on_home_button_pressed,
+-              &ToolWindow::on_home_button_released);
++    QPushButton* homeSource = mToolsUi->home_button->isHidden()
++                                      ? mToolsUi->all_apps_button
++                                      : mToolsUi->home_button;
++    if (homeSource == mToolsUi->all_apps_button) {
++        addButton(homeSource, &ToolWindow::on_all_apps_button_pressed,
++                  &ToolWindow::on_all_apps_button_released);
++    } else {
++        addButton(homeSource, &ToolWindow::on_home_button_pressed,
++                  &ToolWindow::on_home_button_released);
++    }
+     mWindowNavColumn->show();
+     positionWindowNavColumn();
+ }
