@@ -111,14 +111,30 @@ try {
     if ($params[0] -ne '-avd' -or $params[1] -ne 'mas_0' -or
         "$PortBase,$($PortBase+1)" -notin $params) { throw 'Unexpected recorded Manager arguments' }
     $pending = @()
-    foreach ($mode in 'ro-normal','ro-crash','cache-normal','cache-crash','default-normal') {
+    foreach ($mode in 'ro-normal','ro-crash','cache-normal','cache-crash','config-cache-normal','default-normal') {
         $before = @(Snapshot "$mode-before")
         $ro = $mode.StartsWith('ro')
         $cache = $mode.StartsWith('cache')
-        $extra = if ($ro) {'-read-only'} elseif ($cache) {'-no-cache'}
-        $run = Run $emulator (@($extra | Where-Object {$_}) + @('-verbose') + $params) $mode -Background
+        $configCache = $mode -eq 'config-cache-normal'
+        $temporaryCache = $cache -or $configCache
+        $configPath = "$avd\mas_0.avd\config.ini"
+        $savedConfig = [IO.File]::ReadAllBytes($configPath)
+        $run = $null
         $guest = $null
         try {
+            if ($configCache) {
+                # Manager launch arguments are unchanged. A retained non-default
+                # config also leaves main.cpp without a permanent cache path.
+                $configText = [Text.Encoding]::UTF8.GetString($savedConfig)
+                if ($configText -notmatch '(?m)^disk\.cachePartition=yes\r?$') {
+                    throw 'Expected the default cache configuration'
+                }
+                $configText = $configText -replace '(?m)^disk\.cachePartition=yes\r?$', 'disk.cachePartition=no'
+                [IO.File]::WriteAllText($configPath, $configText, [Text.UTF8Encoding]::new($false))
+            }
+            Copy-Item -LiteralPath $configPath -Destination "$Lab\$mode-config.ini"
+            $extra = if ($ro) {'-read-only'} elseif ($cache) {'-no-cache'}
+            $run = Run $emulator (@($extra | Where-Object {$_}) + @('-verbose') + $params) $mode -Background
             $until = [datetime]::UtcNow.AddMinutes(3)
             while ($true) {
                 if ($run.p.HasExited -or [datetime]::UtcNow -gt $until) { throw "$mode boot failed" }
@@ -128,9 +144,12 @@ try {
             }
             $guest = Find-Guest $run.p
             if (!$guest) { throw 'Could not verify disposable child' }
+            if ($configCache) {
+                Copy-Item -LiteralPath "$avd\mas_0.avd\hardware-qemu.ini" -Destination "$Lab\$mode-hardware.ini"
+            }
             $during = @(Snapshot "$mode-live")
             $new = @($during | Where-Object { $_ -notin $before })
-            $count = if ($ro) {4} elseif ($cache) {2} else {0}
+            $count = if ($ro) {4} elseif ($temporaryCache) {2} else {0}
             if ($new.Count -ne $count) { throw "$mode created $($new.Count), expected $count" }
             if ($Patched -and @($pending | Where-Object {$_ -in $during}).Count) { throw 'Recovery missed a file' }
             if ($mode.EndsWith('crash')) {
@@ -142,13 +161,13 @@ try {
             Finish $run
             $after = @(Snapshot "$mode-after")
             $pending = @($new | Where-Object { $_ -in $after })
-            $expected = if ($mode.EndsWith('crash')) {$count} elseif ($cache -and !$Patched) {1} else {0}
+            $expected = if ($mode.EndsWith('crash')) {$count} elseif ($temporaryCache -and !$Patched) {1} else {0}
             if ($pending.Count -ne $expected) { throw "$mode left $($pending.Count), expected $expected" }
-            if ($cache -and !$Patched -and $expected -eq 1 -and !$pending[0].EndsWith('.qcow2')) {
+            if ($temporaryCache -and !$Patched -and $expected -eq 1 -and !$pending[0].EndsWith('.qcow2')) {
                 throw 'Unexpected cache remnant'
             }
         } finally {
-            if (!$run.p.HasExited) {
+            if ($run -and !$run.p.HasExited) {
                 # Graceful cleanup of the privately addressed VM on any failed assertion.
                 try { Device @('shell','sync') 'finally-sync'; Device @('emu','kill') 'finally-stop' } catch {}
                 if (!$run.p.WaitForExit(15000)) {
@@ -159,6 +178,7 @@ try {
                 Finish $run
             }
             if ($guest) { $guest.Dispose() }
+            if ($configCache) { [IO.File]::WriteAllBytes($configPath, $savedConfig) }
         }
     }
 } finally {
