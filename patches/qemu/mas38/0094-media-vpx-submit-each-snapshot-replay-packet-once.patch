@@ -1,0 +1,21 @@
+From cf504fc4139b98cb8df0cef1f00f17383bd40715 Mon Sep 17 00:00:00 2001
+From: jinghero <44921326+jinghero@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 13:08:19 +0800
+Subject: [PATCH 94/95] media/vpx: submit each snapshot replay packet once
+
+---
+ .../emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp   | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+index c983f621d..693611cc1 100644
+--- a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+@@ -396,7 +396,6 @@ void MediaVpxDecoderGeneric::oneShotDecode(const uint8_t* data,
+     }
+ 
+     decode_internal(data, len, pts);
+-    mVideoHelper->decode(data, len, pts);
+     while (true) {
+         MediaSnapshotState::FrameInfo frame;
+         bool success = mVideoHelper->receiveFrame(&frame);

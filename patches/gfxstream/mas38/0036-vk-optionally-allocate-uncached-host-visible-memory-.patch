@@ -1,0 +1,519 @@
+From d271da3d6fc78188e0c006ee780c84832c6a0e1b Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:25:20 +0100
+Subject: [PATCH 36/42] vk: optionally allocate uncached host visible memory as
+ cached
+
+Port of google/gfxstream e2ddfc73 (google/gfxstream#209,
+ModAVD/ModAVD#37) in place of the local ANDROID_EMU_VK_WC_AS_CACHED
+change, which picked a cached type per allocation in
+on_vkAllocateMemory():
+
+- Add the VulkanAllocateUncachedHostVisibleAsCached feature, off by
+  default; the emulator decides whether it is on.
+- With it, a guest memory type whose host memory type is host visible
+  but neither cached nor device local maps to a HOST_VISIBLE |
+  HOST_COHERENT | HOST_CACHED type on the same heap, unless host
+  visible memory is exported or imported (ExternalBlob, SystemBlob,
+  VulkanAllocateHostVisibleAsUdmabuf, VulkanAllocateHostMemory).
+- transformToGuestMemoryRequirements() goes through the guest memory
+  types, so a resource that allows the original host type but not the
+  replacement no longer sees that guest type. It skips the AHB type, as
+  before.
+- Imported ColorBuffer and Buffer memory keeps its memory type
+  (upstream ececb7a2, the previous change).
+
+FindReplacementCachedHostMemoryTypeIndex() and the unit tests are the
+same as upstream. This tree keeps mGuestToHostMemoryTypeIndexMap where
+upstream has a list of guest memory types, so the map is what changes.
+
+Local diagnostics: one line for the first allocation from each guest
+memory type that moves, and a rate-limited line when a resource loses a
+guest memory type to the replacement.
+
+Test: VkGuestMemoryUtilsTest.* 12/12; each of 8 mutations of the
+      replacement lookup fails at least one case
+Test: with the emulator turning the feature on (qemu "opengles:
+      allocate uncached host visible memory as cached ..."), 10 Star
+      Rail cold boots log the replacement and never "has no effect";
+      Vulkan validation on Star Rail, Endfield and Arknights shows no
+      new error category and no memory type or mapping error
+Test: frame rate against 0.37 on Star Rail (2 A/B pairs) and Endfield
+      (1 pair): no regression
+
+Refs ModAVD/ModAVD#37
+---
+ .../include/gfxstream/host/features.h         |   8 +
+ host/vulkan/vk_decoder_global_state.cpp       |  49 ++---
+ .../vk_emulated_physical_device_memory.cpp    | 102 ++++++++-
+ .../vk_emulated_physical_device_memory.h      |   3 +
+ ..._emulated_physical_device_memory_tests.cpp | 207 ++++++++++++++++++
+ 5 files changed, 332 insertions(+), 37 deletions(-)
+
+diff --git a/host/features/include/gfxstream/host/features.h b/host/features/include/gfxstream/host/features.h
+index cdfa4e41..e6e2424f 100644
+--- a/host/features/include/gfxstream/host/features.h
++++ b/host/features/include/gfxstream/host/features.h
+@@ -431,6 +431,14 @@ struct FeatureSet {
+         "app-compatiblity for common graphics layers in the guest.",
+         &map,
+     };
++    BoolFeatureInfo VulkanAllocateUncachedHostVisibleAsCached = {
++        "VulkanAllocateUncachedHostVisibleAsCached",
++        "If enabled, guest allocations from a host visible memory type that is neither host "
++        "cached nor device local (e.g. write-combined system memory) are made from a host "
++        "visible, coherent and cached memory type on the same heap. Has no effect with "
++        "ExternalBlob, SystemBlob, VulkanAllocateHostVisibleAsUdmabuf or VulkanAllocateHostMemory.",
++        &map,
++    };
+     StringFeatureInfo VulkanExternalMemoryMode = {
+         "VulkanExternalMemoryMode",
+         "A string specifying the ExternalMemoryMode for VkEmulation to use, "
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 4c3b937d..9f745966 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -6863,41 +6863,26 @@ class VkDecoderGlobalState::Impl {
+             }
+             const auto& hostMemoryInfo = *hostMemoryInfoOpt;
+ 
+-            localAllocInfo.memoryTypeIndex = hostMemoryInfo.index;
+-            memoryPropertyFlags = hostMemoryInfo.memoryType.propertyFlags;
+-
+-            // MAS (plan P2.6), on by default, ANDROID_EMU_VK_WC_AS_CACHED=0 turns it off: back guest
+-            // allocations of a host-visible, uncached, non-device-local type (NVIDIA's
+-            // write-combined system memory) with a host-cached coherent type on the same heap. The
+-            // guest writes its uploads straight into this memory through the address space
+-            // mapping; with the write-combined type that copy loop takes a third of Star Rail's
+-            // render thread (ANGLE's memcpy almost half). Without a cached coherent type on the
+-            // heap the allocation keeps its type.
+-            static const bool sWcAsCached =
+-                gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_WC_AS_CACHED") != "0";
+-            constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+-                                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+-                                                              VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+-            if (sWcAsCached && (memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+-                !(memoryPropertyFlags & (VK_MEMORY_PROPERTY_HOST_CACHED_BIT |
+-                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) &&
+-                !importCbInfoPtr && !importBufferInfoPtr && !createBlobInfoPtr &&
+-                !(dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image != VK_NULL_HANDLE)) {
+-                for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i) {
+-                    const auto candidate =
+-                        physicalDeviceInfo->memoryPropertiesHelper
+-                            ->getHostMemoryInfoFromHostMemoryTypeIndex(i);
+-                    if (!candidate) break;
+-                    if (candidate->memoryType.heapIndex == hostMemoryInfo.memoryType.heapIndex &&
+-                        (candidate->memoryType.propertyFlags & kCachedCoherent) == kCachedCoherent &&
+-                        !(candidate->memoryType.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+-                        localAllocInfo.memoryTypeIndex = candidate->index;
+-                        memoryPropertyFlags = candidate->memoryType.propertyFlags;
+-                        break;
+-                    }
++            // MAS local diagnostic: the first allocation from each guest memory type that
++            // VulkanAllocateUncachedHostVisibleAsCached moves to another host memory type.
++            if (!importEmulatedExternalMemory &&
++                hostMemoryInfo.index != localAllocInfo.memoryTypeIndex) {
++                static std::atomic<uint32_t> sLoggedGuestMemoryTypes{0};
++                const uint32_t guestMemoryTypeBit = 1u << localAllocInfo.memoryTypeIndex;
++                if (!(sLoggedGuestMemoryTypes.fetch_or(guestMemoryTypeBit) & guestMemoryTypeBit)) {
++                    GFXSTREAM_INFO(
++                        "MAS: guest memory type %u is allocated from host memory type %u (first: "
++                        "%llu bytes%s%s)",
++                        localAllocInfo.memoryTypeIndex, hostMemoryInfo.index,
++                        static_cast<unsigned long long>(localAllocInfo.allocationSize),
++                        dedicatedAllocInfoPtr ? ", dedicated" : "",
++                        createBlobInfoPtr ? ", blob" : "");
+                 }
+             }
+ 
++            localAllocInfo.memoryTypeIndex = hostMemoryInfo.index;
++            memoryPropertyFlags = hostMemoryInfo.memoryType.propertyFlags;
++
+             auto virtioGpuContextIdOpt = getContextIdForDeviceLocked(device);
+             if (!virtioGpuContextIdOpt) {
+                 GFXSTREAM_ERROR("VkDevice:%p missing context id for vkAllocateMemory().");
+diff --git a/host/vulkan/vk_emulated_physical_device_memory.cpp b/host/vulkan/vk_emulated_physical_device_memory.cpp
+index b8d0363d..d8b6f187 100644
+--- a/host/vulkan/vk_emulated_physical_device_memory.cpp
++++ b/host/vulkan/vk_emulated_physical_device_memory.cpp
+@@ -15,7 +15,9 @@
+ #include "vk_emulated_physical_device_memory.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <limits>
++#include <mutex>
+ 
+ #include "gfxstream/common/logging.h"
+ #include "gfxstream/system/System.h"
+@@ -27,6 +29,39 @@ namespace {
+ 
+ static constexpr const uint32_t kInvalidMemoryTypeIndex = std::numeric_limits<uint32_t>::max();
+ 
++// MAS port of google/gfxstream e2ddfc73 (#209): the same function as upstream.
++// The host memory type to allocate from instead of the given one with the
++// VulkanAllocateUncachedHostVisibleAsCached feature.
++//
++// Host visible memory that is neither cached nor device local is typically write-combined system
++// memory, e.g. on NVIDIA. The guest writes into it through its mapping, which we measured to be
++// much slower than cached memory under WHPX, so use a cached coherent type on the same heap
++// instead, if there is one.
++uint32_t FindReplacementCachedHostMemoryTypeIndex(
++    const VkPhysicalDeviceMemoryProperties& hostMemoryProperties, uint32_t hostMemoryTypeIndex) {
++    const VkMemoryType& memoryType = hostMemoryProperties.memoryTypes[hostMemoryTypeIndex];
++    if (!(memoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
++        (memoryType.propertyFlags &
++         (VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) {
++        return hostMemoryTypeIndex;
++    }
++
++    constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                                                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++    for (uint32_t i = 0; i < hostMemoryProperties.memoryTypeCount; i++) {
++        const VkMemoryType& candidate = hostMemoryProperties.memoryTypes[i];
++        if (candidate.heapIndex == memoryType.heapIndex &&
++            (candidate.propertyFlags & kCachedCoherent) == kCachedCoherent &&
++            !(candidate.propertyFlags &
++              (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD |
++               VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD))) {
++            return i;
++        }
++    }
++    return hostMemoryTypeIndex;
++}
++
+ }  // namespace
+ 
+ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
+@@ -159,6 +194,39 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
+         }
+     }
+ 
++    // MAS port of google/gfxstream e2ddfc73 (#209). Upstream sets the host memory type index of
++    // each guest memory type here; this tree keeps mGuestToHostMemoryTypeIndexMap instead.
++    // Only replace the memory type when gfxstream allocates host visible memory itself and maps
++    // it with vkMapMemory(). With these features, host visible memory is exported or is host
++    // memory that gfxstream imports, and it keeps its memory type.
++    const bool hostVisibleMemoryIsExportedOrImported =
++        features.ExternalBlob.enabled() || features.SystemBlob.enabled() ||
++        features.VulkanAllocateHostVisibleAsUdmabuf.enabled() ||
++        features.VulkanAllocateHostMemory.enabled();
++    bool allocateUncachedHostVisibleAsCached = false;
++    if (features.VulkanAllocateUncachedHostVisibleAsCached.enabled()) {
++        if (hostVisibleMemoryIsExportedOrImported) {
++            // This is built again for every vkEnumeratePhysicalDevices(), so warn only once.
++            static std::once_flag sWarnOnce;
++            std::call_once(sWarnOnce, [] {
++                GFXSTREAM_WARNING(
++                    "VulkanAllocateUncachedHostVisibleAsCached has no effect with ExternalBlob, "
++                    "SystemBlob, VulkanAllocateHostVisibleAsUdmabuf or VulkanAllocateHostMemory.");
++            });
++        } else {
++            allocateUncachedHostVisibleAsCached = true;
++        }
++    }
++    if (allocateUncachedHostVisibleAsCached) {
++        for (uint32_t i = 0; i < mGuestMemoryProperties.memoryTypeCount; i++) {
++            // A replaced guest memory type keeps the flags of the original host memory type, and
++            // transformToGuestMemoryRequirements() only offers it for resources that allow the
++            // replacement.
++            mGuestToHostMemoryTypeIndexMap[i] =
++                FindReplacementCachedHostMemoryTypeIndex(mHostMemoryProperties, i);
++        }
++    }
++
+     // If enabled, reserve an additional memory type for AHB backed buffers and images
+     // so that the host can control its memory properties. This ensures that the guest
+     // only sees `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT` and will not try to map the
+@@ -179,6 +247,7 @@ EmulatedPhysicalDeviceMemoryProperties::EmulatedPhysicalDeviceMemoryProperties(
+             mHostMemoryProperties.memoryTypes[hostColorBufferMemoryTypeIndex].heapIndex;
+ 
+         mGuestToHostMemoryTypeIndexMap[ahbMemoryTypeIndex] = hostColorBufferMemoryTypeIndex;
++        mGuestAhbMemoryTypeIndex = ahbMemoryTypeIndex;
+ 
+         mGuestColorBufferMemoryTypeIndex = ahbMemoryTypeIndex;
+     }
+@@ -216,15 +285,38 @@ void EmulatedPhysicalDeviceMemoryProperties::transformToGuestMemoryRequirements(
+     VkMemoryRequirements* memoryRequirements) const {
+     uint32_t guestMemoryTypeBits = 0;
+ 
++    // MAS port of google/gfxstream e2ddfc73 (#209): go through the guest memory types as upstream,
++    // since VulkanAllocateUncachedHostVisibleAsCached backs two guest memory types with one host
++    // memory type, which mHostToGuestMemoryTypeIndexMap cannot express. The AHB memory type is
++    // skipped, as it was never in mHostToGuestMemoryTypeIndexMap.
+     const uint32_t hostMemoryTypeBits = memoryRequirements->memoryTypeBits;
+-    for (uint32_t hostMemoryTypeIndex = 0;
+-         hostMemoryTypeIndex < mHostMemoryProperties.memoryTypeCount; hostMemoryTypeIndex++) {
+-        if (!(hostMemoryTypeBits & (1u << hostMemoryTypeIndex))) {
++    for (uint32_t guestMemoryTypeIndex = 0;
++         guestMemoryTypeIndex < mGuestMemoryProperties.memoryTypeCount; guestMemoryTypeIndex++) {
++        const uint32_t hostMemoryTypeIndex = mGuestToHostMemoryTypeIndexMap[guestMemoryTypeIndex];
++        if (hostMemoryTypeIndex == kInvalidMemoryTypeIndex) {
++            continue;
++        }
++        if (mGuestAhbMemoryTypeIndex && guestMemoryTypeIndex == *mGuestAhbMemoryTypeIndex) {
+             continue;
+         }
+ 
+-        uint32_t guestMemoryTypeIndex = mHostToGuestMemoryTypeIndexMap[hostMemoryTypeIndex];
+-        if (guestMemoryTypeIndex == kInvalidMemoryTypeIndex) {
++        if (!(hostMemoryTypeBits & (1u << hostMemoryTypeIndex))) {
++            // MAS local diagnostic: the resource allows the original host memory type of a
++            // replaced guest memory type, but not the replacement, so the guest loses that type
++            // for it. Never seen on NVIDIA (11-01); say so if a driver does it.
++            if (hostMemoryTypeIndex != guestMemoryTypeIndex &&
++                guestMemoryTypeIndex < mHostMemoryProperties.memoryTypeCount &&
++                (hostMemoryTypeBits & (1u << guestMemoryTypeIndex))) {
++                static std::atomic<uint32_t> sHiddenCount{0};
++                const uint32_t hiddenCount = ++sHiddenCount;
++                if (hiddenCount <= 20 || (hiddenCount & (hiddenCount - 1)) == 0) {
++                    GFXSTREAM_INFO(
++                        "MAS: guest memory type %u hidden from a resource that allows host "
++                        "memory type %u but not %u (host bits 0x%x, %u so far)",
++                        guestMemoryTypeIndex, guestMemoryTypeIndex, hostMemoryTypeIndex,
++                        hostMemoryTypeBits, hiddenCount);
++                }
++            }
+             continue;
+         }
+ 
+diff --git a/host/vulkan/vk_emulated_physical_device_memory.h b/host/vulkan/vk_emulated_physical_device_memory.h
+index 9d344dc5..6486a720 100644
+--- a/host/vulkan/vk_emulated_physical_device_memory.h
++++ b/host/vulkan/vk_emulated_physical_device_memory.h
+@@ -63,6 +63,9 @@ class EmulatedPhysicalDeviceMemoryProperties {
+     VkPhysicalDeviceMemoryProperties mHostMemoryProperties;
+     uint32_t mGuestToHostMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
+     uint32_t mHostToGuestMemoryTypeIndexMap[VK_MAX_MEMORY_TYPES];
++    // MAS port of google/gfxstream e2ddfc73 (#209): the memory type reserved for AHBs with the
++    // VulkanUseDedicatedAhbMemoryType feature, which transformToGuestMemoryRequirements() skips.
++    std::optional<uint32_t> mGuestAhbMemoryTypeIndex;
+ 
+     // The memory type index reported to the guest for VkDeviceMemory requirements which would
+     // try to import host ColorBuffer allocations
+diff --git a/host/vulkan/vk_emulated_physical_device_memory_tests.cpp b/host/vulkan/vk_emulated_physical_device_memory_tests.cpp
+index cb8167f5..a8e20b92 100644
+--- a/host/vulkan/vk_emulated_physical_device_memory_tests.cpp
++++ b/host/vulkan/vk_emulated_physical_device_memory_tests.cpp
+@@ -15,6 +15,7 @@
+ #include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+ 
++#include <ios>
+ #include <vector>
+ 
+ #include "gfxstream/host/features.h"
+@@ -511,6 +512,212 @@ TEST(VkGuestMemoryUtilsTest, VulkanEnsureCachedCoherentMemoryAvailable) {
+                 EqsVkPhysicalDeviceMemoryProperties(expectedGuestMemoryProperties));
+ }
+ 
++TEST(VkGuestMemoryUtilsTest, VulkanAllocateUncachedHostVisibleAsCached) {
++    constexpr VkMemoryPropertyFlags kDeviceLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
++    constexpr VkMemoryPropertyFlags kVisibleCoherent =
++        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++    constexpr VkMemoryPropertyFlags kVisibleCoherentCached =
++        kVisibleCoherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++
++    // The memory types of an NVIDIA RTX 4070 SUPER on Windows: heap 0 is VRAM and heap 1 is
++    // system memory. Type 2 is write-combined system memory and type 4 is ReBAR.
++    const std::vector<VkMemoryType> kNvidiaTypes = {
++        {.propertyFlags = 0, .heapIndex = 1},
++        {.propertyFlags = kDeviceLocal, .heapIndex = 0},
++        {.propertyFlags = kVisibleCoherent, .heapIndex = 1},
++        {.propertyFlags = kVisibleCoherentCached, .heapIndex = 1},
++        {.propertyFlags = kDeviceLocal | kVisibleCoherent, .heapIndex = 0},
++    };
++    // The only cached coherent type is on the other heap.
++    const std::vector<VkMemoryType> kCachedTypeOnOtherHeap = {
++        {.propertyFlags = kVisibleCoherent, .heapIndex = 1},
++        {.propertyFlags = kVisibleCoherentCached, .heapIndex = 0},
++    };
++    // The only cached coherent type is device local.
++    const std::vector<VkMemoryType> kCachedTypeIsDeviceLocal = {
++        {.propertyFlags = kVisibleCoherent, .heapIndex = 1},
++        {.propertyFlags = kDeviceLocal | kVisibleCoherentCached, .heapIndex = 1},
++    };
++    // The only cached coherent type is AMD device uncached memory.
++    const std::vector<VkMemoryType> kCachedTypeIsAmdDeviceUncached = {
++        {.propertyFlags = kVisibleCoherent, .heapIndex = 1},
++        {.propertyFlags = kVisibleCoherentCached | VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
++         .heapIndex = 1},
++    };
++    // The only cached type is not coherent.
++    const std::vector<VkMemoryType> kCachedTypeIsNotCoherent = {
++        {.propertyFlags = kVisibleCoherent, .heapIndex = 1},
++        {.propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
++         .heapIndex = 1},
++    };
++
++    const auto makeHostMemoryProperties = [](const std::vector<VkMemoryType>& memoryTypes) {
++        VkPhysicalDeviceMemoryProperties hostMemoryProperties = {};
++        hostMemoryProperties.memoryTypeCount = static_cast<uint32_t>(memoryTypes.size());
++        for (uint32_t i = 0; i < hostMemoryProperties.memoryTypeCount; i++) {
++            hostMemoryProperties.memoryTypes[i] = memoryTypes[i];
++        }
++        hostMemoryProperties.memoryHeapCount = 2;
++        hostMemoryProperties.memoryHeaps[0] = {.size = 0x2edd00000,
++                                               .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
++        hostMemoryProperties.memoryHeaps[1] = {.size = 0x7e3a7a000, .flags = 0};
++        return hostMemoryProperties;
++    };
++
++    using Features = gfxstream::host::FeatureSet;
++    using Feature = gfxstream::host::BoolFeatureInfo Features::*;
++    const Feature kAsCached = &Features::VulkanAllocateUncachedHostVisibleAsCached;
++
++    struct TestCase {
++        const char* name;
++        std::vector<VkMemoryType> hostMemoryTypes;
++        std::vector<Feature> enabledFeatures;
++        // No memory types are added in these cases, so guest memory type i has the flags of host
++        // memory type i.
++        uint32_t guestMemoryTypeIndex;
++        uint32_t expectedHostMemoryTypeIndex;
++    };
++    const std::vector<TestCase> testCases = {
++        {.name = "WriteCombinedUsesCachedTypeOnSameHeap",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 3},
++        {.name = "FeatureDisabled",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 2},
++        {.name = "AlreadyCached",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 3,
++         .expectedHostMemoryTypeIndex = 3},
++        {.name = "DeviceLocal",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 1,
++         .expectedHostMemoryTypeIndex = 1},
++        {.name = "DeviceLocalHostVisible",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 4,
++         .expectedHostMemoryTypeIndex = 4},
++        {.name = "NotHostVisible",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 0,
++         .expectedHostMemoryTypeIndex = 0},
++        {.name = "CachedTypeOnOtherHeap",
++         .hostMemoryTypes = kCachedTypeOnOtherHeap,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 0,
++         .expectedHostMemoryTypeIndex = 0},
++        {.name = "CachedTypeIsDeviceLocal",
++         .hostMemoryTypes = kCachedTypeIsDeviceLocal,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 0,
++         .expectedHostMemoryTypeIndex = 0},
++        {.name = "CachedTypeIsAmdDeviceUncached",
++         .hostMemoryTypes = kCachedTypeIsAmdDeviceUncached,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 0,
++         .expectedHostMemoryTypeIndex = 0},
++        {.name = "CachedTypeIsNotCoherent",
++         .hostMemoryTypes = kCachedTypeIsNotCoherent,
++         .enabledFeatures = {kAsCached},
++         .guestMemoryTypeIndex = 0,
++         .expectedHostMemoryTypeIndex = 0},
++        // Host visible memory that is exported or imported keeps its type.
++        {.name = "ExternalBlob",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached, &Features::ExternalBlob},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 2},
++        {.name = "SystemBlob",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached, &Features::SystemBlob},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 2},
++        {.name = "VulkanAllocateHostVisibleAsUdmabuf",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached, &Features::VulkanAllocateHostVisibleAsUdmabuf},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 2},
++        {.name = "VulkanAllocateHostMemory",
++         .hostMemoryTypes = kNvidiaTypes,
++         .enabledFeatures = {kAsCached, &Features::VulkanAllocateHostMemory},
++         .guestMemoryTypeIndex = 2,
++         .expectedHostMemoryTypeIndex = 2},
++    };
++
++    for (const TestCase& testCase : testCases) {
++        SCOPED_TRACE(testCase.name);
++
++        const VkPhysicalDeviceMemoryProperties hostMemoryProperties =
++            makeHostMemoryProperties(testCase.hostMemoryTypes);
++
++        gfxstream::host::FeatureSet features;
++        for (const Feature feature : testCase.enabledFeatures) {
++            (features.*feature).setEnabled(true);
++        }
++        EmulatedPhysicalDeviceMemoryProperties helper(hostMemoryProperties, 0, features);
++
++        // The feature never changes what the guest sees.
++        gfxstream::host::FeatureSet featuresWithoutAsCached = features;
++        featuresWithoutAsCached.VulkanAllocateUncachedHostVisibleAsCached.setEnabled(false);
++        EmulatedPhysicalDeviceMemoryProperties withoutAsCached(hostMemoryProperties, 0,
++                                                               featuresWithoutAsCached);
++        EXPECT_THAT(
++            helper.getGuestMemoryProperties(),
++            EqsVkPhysicalDeviceMemoryProperties(withoutAsCached.getGuestMemoryProperties()));
++
++        EXPECT_THAT(
++            helper.getHostMemoryInfoFromGuestMemoryTypeIndex(testCase.guestMemoryTypeIndex),
++            Optional(EqsHostMemoryInfo(EmulatedPhysicalDeviceMemoryProperties::HostMemoryInfo{
++                .index = testCase.expectedHostMemoryTypeIndex,
++                .memoryType = testCase.hostMemoryTypes[testCase.expectedHostMemoryTypeIndex],
++            })));
++
++        // The guest memory type is offered for a resource exactly when the resource allows the
++        // host memory type that it is allocated from.
++        const uint32_t allHostMemoryTypeBits = (1u << hostMemoryProperties.memoryTypeCount) - 1;
++        const uint32_t expectedHostMemoryTypeBit = 1u << testCase.expectedHostMemoryTypeIndex;
++        const uint32_t guestMemoryTypeBit = 1u << testCase.guestMemoryTypeIndex;
++        for (const uint32_t hostMemoryTypeBits :
++             {allHostMemoryTypeBits, expectedHostMemoryTypeBit,
++              allHostMemoryTypeBits & ~expectedHostMemoryTypeBit}) {
++            VkMemoryRequirements requirements = {.memoryTypeBits = hostMemoryTypeBits};
++            helper.transformToGuestMemoryRequirements(&requirements);
++            EXPECT_EQ(requirements.memoryTypeBits & guestMemoryTypeBit,
++                      (hostMemoryTypeBits & expectedHostMemoryTypeBit) ? guestMemoryTypeBit : 0u)
++                << "host memory type bits 0x" << std::hex << hostMemoryTypeBits;
++        }
++    }
++
++    // With the NVIDIA memory types, guest memory types 2 and 3 are both allocated from host memory
++    // type 3.
++    gfxstream::host::FeatureSet features;
++    features.VulkanAllocateUncachedHostVisibleAsCached.setEnabled(true);
++    EmulatedPhysicalDeviceMemoryProperties helper(makeHostMemoryProperties(kNvidiaTypes), 0,
++                                                  features);
++    const struct {
++        uint32_t hostMemoryTypeBits;
++        uint32_t expectedGuestMemoryTypeBits;
++    } kRequirements[] = {
++        {0b11111, 0b11111},
++        {0b01000, 0b01100},
++        // Allows the write-combined type but not the cached one.
++        {0b00110, 0b00010},
++    };
++    for (const auto& [hostMemoryTypeBits, expectedGuestMemoryTypeBits] : kRequirements) {
++        VkMemoryRequirements requirements = {.memoryTypeBits = hostMemoryTypeBits};
++        helper.transformToGuestMemoryRequirements(&requirements);
++        EXPECT_EQ(requirements.memoryTypeBits, expectedGuestMemoryTypeBits)
++            << "host memory type bits 0x" << std::hex << hostMemoryTypeBits;
++    }
++}
++
+ TEST(VkGuestMemoryUtilsTest, VulkanAMDCoherentFlagsNotLeakedToGuest) {
+     VkPhysicalDeviceMemoryProperties hostMemoryProperties = {};
+     hostMemoryProperties.memoryHeapCount = 2;

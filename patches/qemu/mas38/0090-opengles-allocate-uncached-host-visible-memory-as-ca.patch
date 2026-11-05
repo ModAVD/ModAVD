@@ -1,0 +1,52 @@
+From d1a16d29cc0958177a1ebef4e20b3f92577fe0a1 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:26:40 +0100
+Subject: [PATCH 90/95] opengles: allocate uncached host visible memory as
+ cached unless ANDROID_EMU_VK_WC_AS_CACHED=0
+
+gfxstream now has this as the VulkanAllocateUncachedHostVisibleAsCached
+feature (gfxstream e2ddfc73, google/gfxstream#209), off by default, in
+place of the local change that read ANDROID_EMU_VK_WC_AS_CACHED inside
+gfxstream (ModAVD/ModAVD#37). Turn the feature on here, keeping what
+that change did: on by default, off with ANDROID_EMU_VK_WC_AS_CACHED=0.
+
+Test: 10 Star Rail cold boots log "is allocated from host memory type"
+      and never "VulkanAllocateUncachedHostVisibleAsCached has no
+      effect"
+
+Refs ModAVD/ModAVD#37
+---
+ android/android-emu/android/opengles.cpp | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/android/android-emu/android/opengles.cpp b/android/android-emu/android/opengles.cpp
+index c00468607..ce28d8fb4 100644
+--- a/android/android-emu/android/opengles.cpp
++++ b/android/android-emu/android/opengles.cpp
+@@ -488,6 +488,26 @@ static int startOpenglesRendererImpl(
+                     gfxstreamFeatures.VulkanAstcEmulation.getName(), ", ",
+                     gfxstreamFeatures.VulkanEtc2Emulation.getName(), ", ");
+ 
++    // MAS (ModAVD#37), on unless ANDROID_EMU_VK_WC_AS_CACHED=0: allocate guest
++    // memory of a host visible type that is neither cached nor device local
++    // (NVIDIA's write-combined system memory) from a cached coherent type on
++    // the same heap. The guest writes its uploads through that mapping, and
++    // with the write-combined type the copy took a third of Star Rail's render
++    // thread under WHPX.
++    if (const char* env = getenv("ANDROID_EMU_VK_WC_AS_CACHED");
++        env && strcmp(env, "0") == 0) {
++        dinfo("Vulkan: uncached host visible memory keeps its memory type "
++              "(ANDROID_EMU_VK_WC_AS_CACHED=0)");
++    } else {
++        gfxstreamFeatures.VulkanAllocateUncachedHostVisibleAsCached.setEnabled(
++                true);
++        absl::StrAppend(&reportGfxstreamFeatures,
++                        gfxstreamFeatures
++                                .VulkanAllocateUncachedHostVisibleAsCached
++                                .getName(),
++                        ", ");
++    }
++
+     std::string maxGuestVulkan = "1.3";
+     if (const char* env = getenv("ANDROID_EMU_VK_ENABLE_1_4")) {
+         // Allow force-enabling with env variable for tests

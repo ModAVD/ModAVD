@@ -1,0 +1,90 @@
+From f603450597e32da8b9f4407111cd7a432652cb7b Mon Sep 17 00:00:00 2001
+From: Jason Macnak <natsu@google.com>
+Date: Sat, 10 Oct 2026 16:47:52 -0700
+Subject: [PATCH 41/42] gfxstream: mask unsupported video format feature flags
+
+The host Vulkan driver (such as NVIDIA) may report
+VK_KHR_video_decode_queue and VK_KHR_video_encode_queue format
+feature flags in VkFormatProperties and VkFormatProperties3 for
+2-plane YCbCr formats. Because Gfxstream does not expose those
+video extensions to the guest, mask out the unsupported video
+format feature flags in getPhysicalDeviceFormatPropertiesCore.
+
+Bug: b/572867401
+Test: dEQP-VK.api.info.format_properties#*_2plane_{420,444}_*
+Low-Coverage-Reason: full dEQP not yet in CI
+Flag: EXEMPT BUGFIX
+Change-Id: If022485c10a5976c07182895a1c07eee4f3d9d5e
+(cherry picked from commit 47ebceeed31ca4d57106cc3f2a5c691decc29f96)
+
+Refs ModAVD/ModAVD#41
+---
+ host/vulkan/cereal/common/vk_struct_id.h |  3 +++
+ host/vulkan/vk_decoder_global_state.cpp  | 32 ++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/host/vulkan/cereal/common/vk_struct_id.h b/host/vulkan/cereal/common/vk_struct_id.h
+index 42af6463..22fc0802 100644
+--- a/host/vulkan/cereal/common/vk_struct_id.h
++++ b/host/vulkan/cereal/common/vk_struct_id.h
+@@ -195,4 +195,7 @@ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceMemoryProperties2,
+ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceMemoryBudgetPropertiesEXT,
+                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT);
+ 
++REGISTER_VK_STRUCT_ID(VkFormatProperties2, VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2);
++REGISTER_VK_STRUCT_ID(VkFormatProperties3, VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3);
++
+ #undef REGISTER_VK_STRUCT_ID
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index f905acae..da990888 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -10951,6 +10951,36 @@ class VkDecoderGlobalState::Impl {
+         pFormatProp->formatProperties.bufferFeatures &= kEmulatedTextureBufferFeatureMask;
+     }
+ 
++    static const VkFormatFeatureFlags kUnsupportedFormatFeatureFlags =
++        VK_FORMAT_FEATURE_VIDEO_DECODE_OUTPUT_BIT_KHR |
++        VK_FORMAT_FEATURE_VIDEO_DECODE_DPB_BIT_KHR |
++        VK_FORMAT_FEATURE_VIDEO_ENCODE_INPUT_BIT_KHR |
++        VK_FORMAT_FEATURE_VIDEO_ENCODE_DPB_BIT_KHR;
++
++    static const VkFormatFeatureFlags2 kUnsupportedFormatFeatureFlags2 =
++        VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR |
++        VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR |
++        VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR |
++        VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR |
++        VK_FORMAT_FEATURE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR |
++        VK_FORMAT_FEATURE_2_VIDEO_ENCODE_EMPHASIS_MAP_BIT_KHR;
++
++    void maskFormatPropertiesForUnsupportedExtensions(VkFormatProperties* pFormatProp) {
++        pFormatProp->linearTilingFeatures &= ~kUnsupportedFormatFeatureFlags;
++        pFormatProp->optimalTilingFeatures &= ~kUnsupportedFormatFeatureFlags;
++        pFormatProp->bufferFeatures &= ~kUnsupportedFormatFeatureFlags;
++    }
++
++    void maskFormatPropertiesForUnsupportedExtensions(VkFormatProperties2* pFormatProp) {
++        maskFormatPropertiesForUnsupportedExtensions(&pFormatProp->formatProperties);
++        VkFormatProperties3* formatProps3 = vk_find_struct<VkFormatProperties3>(pFormatProp);
++        if (formatProps3) {
++            formatProps3->linearTilingFeatures &= ~kUnsupportedFormatFeatureFlags2;
++            formatProps3->optimalTilingFeatures &= ~kUnsupportedFormatFeatureFlags2;
++            formatProps3->bufferFeatures &= ~kUnsupportedFormatFeatureFlags2;
++        }
++    }
++
+     void maskImageFormatPropertiesForEmulatedTextures(VkImageFormatProperties* pProperties) {
+         // dEQP-VK.api.info.image_format_properties.2d.optimal#etc2_r8g8b8_unorm_block
+         pProperties->sampleCounts &= VK_SAMPLE_COUNT_1_BIT;
+@@ -10967,9 +10997,11 @@ class VkDecoderGlobalState::Impl {
+                 physicalDevice, CompressedImageInfo::getOutputFormat(format),
+                 pFormatProperties);
+             maskFormatPropertiesForEmulatedTextures(pFormatProperties);
++            maskFormatPropertiesForUnsupportedExtensions(pFormatProperties);
+             return;
+         }
+         getPhysicalDeviceFormatPropertiesFunc(physicalDevice, format, pFormatProperties);
++        maskFormatPropertiesForUnsupportedExtensions(pFormatProperties);
+     }
+ 
+     template <typename VkHandleToInfoMap,

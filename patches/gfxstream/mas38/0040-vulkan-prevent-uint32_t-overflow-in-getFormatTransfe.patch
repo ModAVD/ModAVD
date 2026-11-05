@@ -1,0 +1,311 @@
+From 3e6bb4069ac473ccc2d19b6e6b04024365542ff8 Mon Sep 17 00:00:00 2001
+From: Bo Hu <bohu@google.com>
+Date: Sun, 20 Sep 2026 20:39:43 -0700
+Subject: [PATCH 40/42] vulkan: prevent uint32_t overflow in
+ getFormatTransferInfo
+
+getFormatTransferInfo() previously computed plane offsets, row strides,
+and plane sizes using 32-bit uint32_t before assigning the result to
+VkDeviceSize stagingBufferCopySize. For large ColorBuffer extents (such
+as 16384x16384 with 16-bpp VK_FORMAT_R32G32B32A32_SFLOAT), planeSize
+wrapped around to 0 in uint32_t while VkBufferImageCopy::imageExtent
+retained the true dimensions, bypassing staging buffer size checks.
+
+- Widen cumulativeOffset, planeOffset, planeBpp, planeStrideBytes, and
+  planeSize in getFormatTransferInfo() to 64-bit VkDeviceSize, and check
+  that width alignment does not overflow uint32_t.
+- Template alignToPower2() and widen pixel/plane offset calculations in
+  Pack/Unpack depth-stencil helpers to size_t.
+- Check stagingBufferCopySize against mStaging.mAllocationSize before
+  resizing/allocating host vectors in readColorBufferToBytes() and
+  clearColorBuffer().
+- Add unit tests in vk_format_utils_unittest.cpp covering >= 4 GiB
+  single-plane and multi-plane transfer sizes and width alignment
+  overflow.
+
+Bug: 514121060
+Test: bazel test //host/vulkan:vk_format_utils_tests
+Change-Id: Ia327c8910ff6c97f9174ca76b2ede402e366cde5
+(cherry picked from commit 2fab5a4b5763a231f457989ea8a112584e9616b3)
+
+Refs ModAVD/ModAVD#41
+---
+ host/vulkan/vk_common_operations.cpp     | 14 +++++
+ host/vulkan/vk_format_utils.cpp          | 77 ++++++++++++++----------
+ host/vulkan/vk_format_utils_unittest.cpp | 61 +++++++++++++++++++
+ 3 files changed, 119 insertions(+), 33 deletions(-)
+
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index b3199638..6e6340fc 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -3457,6 +3457,14 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
+         return false;
+     }
+ 
++    if (transferInfo.stagingBufferCopySize > mStaging.mAllocationSize) {
++        GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, transfer size %" PRIu64
++                        " too large for staging buffer size:%" PRIu64 ".",
++                        colorBufferHandle, transferInfo.stagingBufferCopySize,
++                        mStaging.mAllocationSize);
++        return false;
++    }
++
+     bytes->resize(transferInfo.stagingBufferCopySize);
+ 
+     result = readColorBufferToBytesLocked(
+@@ -4316,6 +4324,12 @@ bool VkEmulation::clearColorBuffer(uint32_t colorBufferHandle) {
+     }
+ 
+     VkDeviceSize dstBufferSize = transferInfo.stagingBufferCopySize;
++    if (dstBufferSize > mStaging.mAllocationSize) {
++        GFXSTREAM_ERROR("Failed to clear ColorBuffer:%d, transfer size %" PRIu64
++                        " too large for staging buffer size:%" PRIu64 ".",
++                        colorBufferHandle, dstBufferSize, mStaging.mAllocationSize);
++        return false;
++    }
+     const std::vector<uint8_t> clearData(dstBufferSize, 0);
+     return updateColorBufferFromBytesLocked(
+         colorBufferHandle, 0, 0, colorBufferInfo->imageCreateInfoShallow.extent.width,
+diff --git a/host/vulkan/vk_format_utils.cpp b/host/vulkan/vk_format_utils.cpp
+index a4a029ad..935e9405 100644
+--- a/host/vulkan/vk_format_utils.cpp
++++ b/host/vulkan/vk_format_utils.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include "vk_format_utils.h"
+ 
++#include <limits>
+ #include <unordered_map>
+ 
+ #include "gfxstream/common/logging.h"
+@@ -33,7 +34,8 @@ struct FormatPlaneLayout {
+     VkImageAspectFlags aspectMask = 0;
+ };
+ 
+-inline uint32_t alignToPower2(uint32_t val, uint32_t align) {
++template <typename T>
++inline T alignToPower2(T val, T align) {
+     return (val + (align - 1)) & ~(align - 1);
+ }
+ 
+@@ -45,13 +47,13 @@ struct FormatPlaneLayouts {
+ };
+ 
+ void PackD16S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 2;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 2;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcPixels = src;
+     uint8_t* dstDepth = dst;
+     uint8_t* dstStencil = dst + plane1Offset;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstDepth[i * 2 + 0] = srcPixels[i * 3 + 0];
+         dstDepth[i * 2 + 1] = srcPixels[i * 3 + 1];
+         dstStencil[i] = srcPixels[i * 3 + 2];
+@@ -59,13 +61,13 @@ void PackD16S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+ }
+ 
+ void UnpackD16S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 2;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 2;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcDepth = src;
+     const uint8_t* srcStencil = src + plane1Offset;
+     uint8_t* dstPixels = dst;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstPixels[i * 3 + 0] = srcDepth[i * 2 + 0];
+         dstPixels[i * 3 + 1] = srcDepth[i * 2 + 1];
+         dstPixels[i * 3 + 2] = srcStencil[i];
+@@ -75,13 +77,13 @@ void UnpackD16S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+ // Per the Vulkan spec, buffer copies of the depth aspect of D24 formats use
+ // VK_FORMAT_X8_D24_UNORM_PACK32: one 32-bit word per texel, upper 8 bits unused.
+ void PackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 4;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 4;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcPixels = src;
+     uint8_t* dstDepth = dst;
+     uint8_t* dstStencil = dst + plane1Offset;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstDepth[i * 4 + 0] = srcPixels[i * 4 + 0];
+         dstDepth[i * 4 + 1] = srcPixels[i * 4 + 1];
+         dstDepth[i * 4 + 2] = srcPixels[i * 4 + 2];
+@@ -92,13 +94,13 @@ void PackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+ }
+ 
+ void UnpackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 4;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 4;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcDepth = src;
+     const uint8_t* srcStencil = src + plane1Offset;
+     uint8_t* dstPixels = dst;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstPixels[i * 4 + 0] = srcDepth[i * 4 + 0];
+         dstPixels[i * 4 + 1] = srcDepth[i * 4 + 1];
+         dstPixels[i * 4 + 2] = srcDepth[i * 4 + 2];
+@@ -107,13 +109,13 @@ void UnpackD24S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+ }
+ 
+ void PackD32S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 4;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 4;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcPixels = src;
+     uint8_t* dstDepth = dst;
+     uint8_t* dstStencil = dst + plane1Offset;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstDepth[i * 4 + 0] = srcPixels[i * 5 + 0];
+         dstDepth[i * 4 + 1] = srcPixels[i * 5 + 1];
+         dstDepth[i * 4 + 2] = srcPixels[i * 5 + 2];
+@@ -123,13 +125,13 @@ void PackD32S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+ }
+ 
+ void UnpackD32S8(const VkExtent3D& extent, const uint8_t* src, uint8_t* dst) {
+-    const uint32_t numPixels = extent.width * extent.height * extent.depth;
+-    const uint32_t plane0Size = numPixels * 4;
+-    const uint32_t plane1Offset = alignToPower2(plane0Size, 4);
++    const size_t numPixels = static_cast<size_t>(extent.width) * extent.height * extent.depth;
++    const size_t plane0Size = numPixels * 4;
++    const size_t plane1Offset = alignToPower2<size_t>(plane0Size, 4);
+     const uint8_t* srcDepth = src;
+     const uint8_t* srcStencil = src + plane1Offset;
+     uint8_t* dstPixels = dst;
+-    for (uint32_t i = 0; i < numPixels; ++i) {
++    for (size_t i = 0; i < numPixels; ++i) {
+         dstPixels[i * 5 + 0] = srcDepth[i * 4 + 0];
+         dstPixels[i * 5 + 1] = srcDepth[i * 4 + 1];
+         dstPixels[i * 5 + 2] = srcDepth[i * 4 + 2];
+@@ -455,22 +457,31 @@ bool getFormatTransferInfo(VkFormat format, VkExtent3D extent, TransferInfo* out
+         }
+     }
+ 
+-    const uint32_t alignedWidth = alignToPower2(extent.width, alignmentPixels);
++    const VkDeviceSize alignedWidth64 =
++        alignToPower2<VkDeviceSize>(extent.width, alignmentPixels);
++    if (alignedWidth64 > std::numeric_limits<uint32_t>::max()) {
++        GFXSTREAM_ERROR("Overflow aligning width %u with alignment %u", extent.width,
++                        alignmentPixels);
++        return false;
++    }
++    const uint32_t alignedWidth = static_cast<uint32_t>(alignedWidth64);
+     const uint32_t alignedHeight = extent.height;
+-    uint32_t cumulativeOffset = 0;
++    VkDeviceSize cumulativeOffset = 0;
+ 
+     outTransferInfo->bufferImageCopies.clear();
+     for (const FormatPlaneLayout& planeInfo : formatInfo->planeLayouts) {
+         // Align to 4 for VUID-vkCmdCopyBufferToImage-dstImage-07978
+-        const uint32_t planeOffset = (formatInfo->packFunction || formatInfo->unpackFunction)
+-                                         ? alignToPower2(cumulativeOffset, 4)
+-                                         : cumulativeOffset;
++        const VkDeviceSize planeOffset = (formatInfo->packFunction || formatInfo->unpackFunction)
++                                             ? alignToPower2<VkDeviceSize>(cumulativeOffset, 4)
++                                             : cumulativeOffset;
+         const uint32_t planeWidth = alignedWidth / planeInfo.horizontalSubsampling;
+         const uint32_t planeHeight = alignedHeight / planeInfo.verticalSubsampling;
+-        const uint32_t planeBpp = planeInfo.sampleIncrementBytes;
++        const VkDeviceSize planeBpp = planeInfo.sampleIncrementBytes;
+         const uint32_t planeStrideTexels = planeWidth;
+-        const uint32_t planeStrideBytes = planeStrideTexels * planeBpp;
+-        const uint32_t planeSize = planeHeight * planeStrideBytes * extent.depth;
++        const VkDeviceSize planeStrideBytes =
++            static_cast<VkDeviceSize>(planeStrideTexels) * planeBpp;
++        const VkDeviceSize planeSize =
++            static_cast<VkDeviceSize>(planeHeight) * planeStrideBytes * extent.depth;
+ 
+         outTransferInfo->bufferImageCopies.emplace_back(VkBufferImageCopy{
+             .bufferOffset = planeOffset,
+diff --git a/host/vulkan/vk_format_utils_unittest.cpp b/host/vulkan/vk_format_utils_unittest.cpp
+index 6ec7322a..d7f4f890 100644
+--- a/host/vulkan/vk_format_utils_unittest.cpp
++++ b/host/vulkan/vk_format_utils_unittest.cpp
+@@ -405,6 +405,67 @@ TEST(VkFormatUtilsTest, GetTransferInfoDepthStencilWithDepth) {
+                             })));
+ }
+ 
++TEST(VkFormatUtilsTest, GetTransferInfoLargeExtentNoUint32Overflow) {
++    // 16384 * 16384 * 16 bytes/pixel (R32G32B32A32_SFLOAT) = 4,294,967,296 bytes (2^32).
++    // Verify stagingBufferCopySize does not wrap around to 0 in 32-bit arithmetic (b/514121060).
++    const VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT;
++    const uint32_t width = 16384;
++    const uint32_t height = 16384;
++
++    TransferInfo transferInfo;
++    ASSERT_THAT(getFormatTransferInfo(format, {width, height, 1}, &transferInfo), IsTrue());
++    EXPECT_THAT(transferInfo.stagingBufferCopySize, Eq(4294967296ULL));
++    ASSERT_THAT(transferInfo.bufferImageCopies,
++                ElementsAre(EqsVkBufferImageCopy(VkBufferImageCopy{
++                    .bufferOffset = 0,
++                    .bufferRowLength = 16384,
++                    .bufferImageHeight = 0,
++                    .imageSubresource =
++                        {
++                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++                            .mipLevel = 0,
++                            .baseArrayLayer = 0,
++                            .layerCount = 1,
++                        },
++                    .imageOffset =
++                        {
++                            .x = 0,
++                            .y = 0,
++                            .z = 0,
++                        },
++                    .imageExtent =
++                        {
++                            .width = 16384,
++                            .height = 16384,
++                            .depth = 1,
++                        },
++                })));
++}
++
++TEST(VkFormatUtilsTest, GetTransferInfoMultiPlaneLargeOffsetNoUint32Overflow) {
++    // Verify planeOffset for a second plane beyond 4 GiB is preserved as a 64-bit VkDeviceSize.
++    const VkFormat format = VK_FORMAT_D24_UNORM_S8_UINT;
++    const uint32_t width = 32768;
++    const uint32_t height = 32768;
++
++    TransferInfo transferInfo;
++    ASSERT_THAT(getFormatTransferInfo(format, {width, height, 1}, &transferInfo), IsTrue());
++    // Depth plane (4 bytes/pixel): 32768 * 32768 * 4 = 4,294,967,296 bytes (4 GiB)
++    // Stencil plane (1 byte/pixel): 32768 * 32768 * 1 = 1,073,741,824 bytes (1 GiB)
++    EXPECT_THAT(transferInfo.stagingBufferCopySize, Eq(5368709120ULL));
++    ASSERT_THAT(transferInfo.bufferImageCopies.size(), Eq(2u));
++    EXPECT_THAT(transferInfo.bufferImageCopies[0].bufferOffset, Eq(0ULL));
++    EXPECT_THAT(transferInfo.bufferImageCopies[1].bufferOffset, Eq(4294967296ULL));
++}
++
++TEST(VkFormatUtilsTest, GetTransferInfoWidthAlignmentOverflowReturnsFalse) {
++    // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM aligns width to a multiple of 2.
++    // UINT32_MAX + 1 overflows uint32_t and must fail rather than wrapping alignedWidth to 0.
++    const VkFormat format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
++    TransferInfo transferInfo;
++    EXPECT_THAT(getFormatTransferInfo(format, {UINT32_MAX, 16, 1}, &transferInfo), IsFalse());
++}
++
+ }  // namespace
+ }  // namespace vk
+ }  // namespace host

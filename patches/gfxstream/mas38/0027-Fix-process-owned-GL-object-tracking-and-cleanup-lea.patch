@@ -1,0 +1,274 @@
+From fe69c509fad6add2ad08c1a0e9809fa7468e8598 Mon Sep 17 00:00:00 2001
+From: Serdar Kocdemir <kocdemir@google.com>
+Date: Fri, 11 Sep 2026 16:03:32 +0000
+Subject: [PATCH 27/42] Fix process-owned GL object tracking and cleanup leak
+
+Recent changes moved GL object ownership tracking to EmulationGl using
+RenderThreadInfoGl::m_puid, but RenderThreadInfoGl::m_puid was never
+updated, as a result caused memory leaks when processes exit.
+
+- Add RenderThreadInfo::setPuid() to synchronize m_puid across
+  RenderThreadInfo, RenderThreadInfoGl, and RenderThreadInfoVk, and
+  propagating m_puid in RenderThreadInfo::initGl().
+- Restore the fallback to tinfo->m_contextSet in
+  EmulationGl::createEmulatedEglContext() when puid == 0.
+- Acquire mContextStructureLock and unbinding the helper context
+  before erasing contexts in EmulationGl::cleanupProcGLObjects().
+- Calls sweepColorBuffersLocked() during process GL object cleanup.
+
+Bug: 559660099
+Bug: 560140165
+Test: bazel test //host:gfxstream_framebuffer_tests
+Test: OpenglRender_unittests
+Change-Id: Ib814de16ac98560028a44897fc2d24a42a19bd60
+(cherry picked from commit a5b0def9cd0f858b3fc9e2fa88a11a6271f46b02)
+(cherry picked from commit 3535eb53db97dab27daf7203317635fb0b97415f)
+
+Refs ModAVD/ModAVD#38
+---
+ host/frame_buffer.cpp          |  1 +
+ host/frame_buffer_unittest.cpp | 32 +++++++++++++++++++
+ host/gl/emulation_gl.cpp       | 56 +++++++++++++++++++---------------
+ host/render_control.cpp        |  4 ++-
+ host/render_thread.cpp         |  7 ++---
+ host/render_thread_info.cpp    | 17 ++++++++++-
+ host/render_thread_info.h      |  3 ++
+ 7 files changed, 89 insertions(+), 31 deletions(-)
+
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 9eb56a7f..235ff200 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -2497,6 +2497,7 @@ void FrameBuffer::Impl::cleanupProcGLObjects(uint64_t puid) {
+ 
+ std::vector<HandleType> FrameBuffer::Impl::cleanupProcGLObjects_locked(uint64_t puid, bool forced)
+     NO_THREAD_SAFETY_ANALYSIS {
++    sweepColorBuffersLocked();
+     std::vector<HandleType> colorBuffersToCleanup;
+     {
+         std::unique_ptr<RecursiveScopedContextBind> bind = nullptr;
+diff --git a/host/frame_buffer_unittest.cpp b/host/frame_buffer_unittest.cpp
+index 1429d6a6..f695cb69 100644
+--- a/host/frame_buffer_unittest.cpp
++++ b/host/frame_buffer_unittest.cpp
+@@ -35,6 +35,7 @@
+ #include "gfxstream/host/testing/ShaderUtils.h"
+ #include "gfxstream/host/window_operations.h"
+ #include "gfxstream/system/System.h"
++#include "host/gl/emulation_gl.h"
+ #include "render_channel_impl.h"
+ #include "render_thread_info.h"
+ 
+@@ -952,6 +953,37 @@ TEST_F(RenderThreadDeadlockTest, ReproDeadlockOnTeardown) {
+     fb->removeGraphicsProcessResources(contextId);
+ }
+ 
++TEST_F(FrameBufferTest, CleanupProcGLObjects) {
++    if (!mFb->hasEmulationGl()) {
++        GTEST_SKIP() << "GL emulation not enabled.";
++    }
++
++    const uint64_t testPuid = 42;
++    mRenderThreadInfo->setPuid(testPuid);
++    EXPECT_EQ(testPuid, mRenderThreadInfo->m_glInfo->m_puid);
++
++    HandleType context = mFb->createEmulatedEglContext(0, 0, gl::GLESApi_2);
++    EXPECT_NE((HandleType)0, context);
++    HandleType surface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
++    EXPECT_NE((HandleType)0, surface);
++    EXPECT_TRUE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
++    EXPECT_TRUE(mFb->getEmulationGl()->hasProcOwnedResources());
++
++    // Simulate render thread exit for this process before cleanupProcGLObjects
++    mRenderThreadInfo->setPuid(0);
++    mFb->cleanupProcGLObjects(testPuid);
++
++    EXPECT_FALSE(mFb->getEmulationGl()->hasProcOwnedResources());
++    EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
++
++    // Verify fallback thread context tracking when puid == 0
++    HandleType threadContext = mFb->createEmulatedEglContext(0, 0, gl::GLESApi_2);
++    EXPECT_NE((HandleType)0, threadContext);
++    EXPECT_TRUE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
++    mFb->getEmulationGl()->drainRenderThreadContexts();
++    EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
++}
++
+ }  // namespace
+ }  // namespace host
+ }  // namespace gfxstream
+diff --git a/host/gl/emulation_gl.cpp b/host/gl/emulation_gl.cpp
+index 84a3148d..83e7020a 100644
+--- a/host/gl/emulation_gl.cpp
++++ b/host/gl/emulation_gl.cpp
+@@ -1003,6 +1003,8 @@ HandleType EmulationGl::createEmulatedEglContext(uint32_t emulatedConfigIndex,
+     uint64_t puid = tinfo->m_puid;
+     if (puid) {
+         mProcOwnedEmulatedEglContexts[puid].insert(handle);
++    } else {
++        tinfo->m_contextSet.insert(handle);
+     }
+     return handle;
+ }
+@@ -1327,40 +1329,46 @@ HandleType EmulationGl::getWindowSurfaceColorBufferHandle(HandleType surfaceHand
+ }
+ 
+ std::vector<HandleType> EmulationGl::cleanupProcGLObjects(uint64_t puid) {
+-    RecursiveScopedContextBind bind(getColorBufferContextHelper());
+     std::vector<HandleType> colorBuffersToCleanUp;
++    {
++        RecursiveScopedContextBind bind(getColorBufferContextHelper());
+ 
+-    // Clean up window surfaces
+-    auto procWindowsIt = mProcOwnedEmulatedEglWindowSurfaces.find(puid);
+-    if (procWindowsIt != mProcOwnedEmulatedEglWindowSurfaces.end()) {
+-        for (auto whndl : procWindowsIt->second) {
+-            auto w = mWindows.find(whndl);
+-            if (w != mWindows.end()) {
+-                if (w->second.second != 0) {
+-                    colorBuffersToCleanUp.push_back(w->second.second);
++        // Clean up window surfaces
++        auto procWindowsIt = mProcOwnedEmulatedEglWindowSurfaces.find(puid);
++        if (procWindowsIt != mProcOwnedEmulatedEglWindowSurfaces.end()) {
++            for (auto whndl : procWindowsIt->second) {
++                auto w = mWindows.find(whndl);
++                if (w != mWindows.end()) {
++                    if (w->second.second != 0) {
++                        colorBuffersToCleanUp.push_back(w->second.second);
++                    }
++                    mWindows.erase(w);
+                 }
+-                mWindows.erase(w);
+             }
++            mProcOwnedEmulatedEglWindowSurfaces.erase(procWindowsIt);
+         }
+-        mProcOwnedEmulatedEglWindowSurfaces.erase(procWindowsIt);
+-    }
+ 
+-    // Cleanup render contexts
+-    auto procContextsIt = mProcOwnedEmulatedEglContexts.find(puid);
+-    if (procContextsIt != mProcOwnedEmulatedEglContexts.end()) {
+-        for (auto ctx : procContextsIt->second) {
+-            mContexts.erase(ctx);
++        // Cleanup EGLImages
++        auto procImagesIt = mProcOwnedEmulatedEglImages.find(puid);
++        if (procImagesIt != mProcOwnedEmulatedEglImages.end()) {
++            for (auto image : procImagesIt->second) {
++                mImages.erase(image);
++            }
++            mProcOwnedEmulatedEglImages.erase(procImagesIt);
+         }
+-        mProcOwnedEmulatedEglContexts.erase(procContextsIt);
+     }
+ 
+-    // Cleanup EGLImages
+-    auto procImagesIt = mProcOwnedEmulatedEglImages.find(puid);
+-    if (procImagesIt != mProcOwnedEmulatedEglImages.end()) {
+-        for (auto image : procImagesIt->second) {
+-            mImages.erase(image);
++    // Unbind before cleaning up contexts
++    // Cleanup render contexts
++    {
++        gfxstream::base::AutoWriteLock contextLock(mContextStructureLock);
++        auto procContextsIt = mProcOwnedEmulatedEglContexts.find(puid);
++        if (procContextsIt != mProcOwnedEmulatedEglContexts.end()) {
++            for (auto ctx : procContextsIt->second) {
++                mContexts.erase(ctx);
++            }
++            mProcOwnedEmulatedEglContexts.erase(procContextsIt);
+         }
+-        mProcOwnedEmulatedEglImages.erase(procImagesIt);
+     }
+     return colorBuffersToCleanUp;
+ }
+diff --git a/host/render_control.cpp b/host/render_control.cpp
+index 08a80598..e6af673b 100644
+--- a/host/render_control.cpp
++++ b/host/render_control.cpp
+@@ -1234,7 +1234,9 @@ static void rcSetPuid(uint64_t puid) {
+     }
+ 
+     RenderThreadInfo *tInfo = RenderThreadInfo::get();
+-    tInfo->m_puid = puid;
++    tInfo->setPuid(puid);
++
++    // TODO(b/560140165): remove RenderThreadInfoVk::get and separate thread local storage
+     auto* renderThreadInfoVk = vk::RenderThreadInfoVk::get();
+     if (renderThreadInfoVk) {
+         renderThreadInfoVk->ctx_id = puid;
+diff --git a/host/render_thread.cpp b/host/render_thread.cpp
+index d6907234..f73e7942 100644
+--- a/host/render_thread.cpp
++++ b/host/render_thread.cpp
+@@ -454,7 +454,7 @@ intptr_t RenderThread::main() {
+             }
+ 
+             if (!tInfo->m_puid) {
+-                tInfo->m_puid = mContextId;
++                tInfo->setPuid(mContextId);
+             }
+ 
+             if (!processResources && tInfo->m_puid && tInfo->m_puid != INVALID_CONTEXT_ID) {
+@@ -462,7 +462,7 @@ intptr_t RenderThread::main() {
+             }
+ 
+             progress = false;
+-            size_t last;
++            size_t last = 0;
+ 
+             //
+             // try to process some of the command buffer using the
+@@ -471,9 +471,6 @@ intptr_t RenderThread::main() {
+             // Note: It's risky to limit Vulkan decoding to one thread,
+             // so we do it outside the limiter
+             if (tInfo->m_vkInfo) {
+-                if (tInfo->m_vkInfo->ctx_id == 0) {
+-                    tInfo->m_vkInfo->ctx_id = mContextId;
+-                }
+                 VkDecoderContext context = {
+                     .processName = contextName,
+                     .gfxApiLogger = &gfxLogger,
+diff --git a/host/render_thread_info.cpp b/host/render_thread_info.cpp
+index b533d5e5..26e6956c 100644
+--- a/host/render_thread_info.cpp
++++ b/host/render_thread_info.cpp
+@@ -63,9 +63,24 @@ void RenderThreadInfo::forAllRenderThreadInfos(std::function<void(RenderThreadIn
+ }
+ 
+ #if GFXSTREAM_ENABLE_HOST_GLES
+-void RenderThreadInfo::initGl(gl::EmulationGl* emulationGl) { m_glInfo.emplace(emulationGl); }
++void RenderThreadInfo::initGl(gl::EmulationGl* emulationGl) {
++    m_glInfo.emplace(emulationGl);
++    m_glInfo->m_puid = m_puid;
++}
+ #endif
+ 
++void RenderThreadInfo::setPuid(uint64_t puid) {
++    m_puid = puid;
++#if GFXSTREAM_ENABLE_HOST_GLES
++    if (m_glInfo) {
++        m_glInfo->m_puid = puid;
++    }
++#endif
++    if (m_vkInfo) {
++        m_vkInfo->ctx_id = puid;
++    }
++}
++
+ void RenderThreadInfo::onSave(Stream* stream) {
+     // TODO(b/309858017): remove if when ready to bump snapshot version
+     if (FrameBuffer::getFB()->getFeatures().VulkanSnapshots.enabled()) {
+diff --git a/host/render_thread_info.h b/host/render_thread_info.h
+index 88b38f43..04ba45f5 100644
+--- a/host/render_thread_info.h
++++ b/host/render_thread_info.h
+@@ -53,6 +53,9 @@ struct RenderThreadInfo {
+     void initGl(gl::EmulationGl* emulationGl);
+ #endif
+ 
++    void setPuid(uint64_t puid);
++    uint64_t getPuid() const { return m_puid; };
++
+     // The unique id of owner guest process of this render thread
+     uint64_t m_puid = 0;
+     std::optional<std::string> m_processName;

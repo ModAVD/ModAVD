@@ -1,0 +1,60 @@
+From d6a0add1a87d4bab953de8973e4c11582efad8b7 Mon Sep 17 00:00:00 2001
+From: Jason Macnak <natsu@google.com>
+Date: Tue, 27 Oct 2026 14:49:02 -0700
+Subject: [PATCH 35/42] Fix on_vkAllocateMemory() host memory lookup
+
+If the host is importing memory from a Buffer/ColorBuffer, then
+the `localAllocInfo.memoryTypeIndex` is a host memory index that
+was returned from either getBufferAllocationInfo() or
+getColorBufferAllocationInfo().
+
+Noticed while looking through
+https://github.com/google/gfxstream/pull/209
+
+Bug: b/578622277
+Test: CI
+
+(cherry picked from commit ececb7a28b4e9fd12700cee5d5e4976e81ac60c1)
+[MAS: the old declaration sat after a local host-visible allocation log;
+ kept the log.]
+
+Refs ModAVD/ModAVD#37
+---
+ host/vulkan/vk_decoder_global_state.cpp | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index ac750a17..4c3b937d 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -6577,6 +6577,8 @@ class VkDecoderGlobalState::Impl {
+             vk_find_struct<VkImportColorBufferGOOGLE>(pAllocateInfo);
+         const VkImportBufferGOOGLE* importBufferInfoPtr =
+             vk_find_struct<VkImportBufferGOOGLE>(pAllocateInfo);
++        const bool importEmulatedExternalMemory =
++            importCbInfoPtr || importBufferInfoPtr;
+ 
+         const VkCreateBlobGOOGLE* createBlobInfoPtr =
+             vk_find_struct<VkCreateBlobGOOGLE>(pAllocateInfo);
+@@ -6850,8 +6852,11 @@ class VkDecoderGlobalState::Impl {
+                 hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+ 
+             const auto hostMemoryInfoOpt =
+-                physicalDeviceInfo->memoryPropertiesHelper
+-                    ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
++                importEmulatedExternalMemory
++                    ? physicalDeviceInfo->memoryPropertiesHelper
++                              ->getHostMemoryInfoFromHostMemoryTypeIndex(localAllocInfo.memoryTypeIndex)
++                    : physicalDeviceInfo->memoryPropertiesHelper
++                          ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
+             if (!hostMemoryInfoOpt) {
+                 GFXSTREAM_ERROR("Failed to get host memory info.");
+                 return VK_ERROR_INCOMPATIBLE_DRIVER;
+@@ -6935,7 +6940,6 @@ class VkDecoderGlobalState::Impl {
+                                (unsigned long long)localAllocInfo.allocationSize);
+             }
+         }
+-        bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
+         const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
+ 
+         std::optional<SharedMemory> sharedMemory = std::nullopt;
