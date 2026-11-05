@@ -236,6 +236,8 @@ int main() {
     reset(L"FAT32", 4 * GiB, 100 * GiB);
     expect(check() == 1, "FAT32 rejects a raw file above its single-file limit");
     expect(fixture.panic.find("FAT32") != std::string::npos, "FAT32 limit has a specific error");
+    expect(fixture.panic.find("NTFS") != std::string::npos && fixture.panic.find("exFAT") != std::string::npos,
+           "FAT32 limit suggests a supported volume for the instance");
     reset(L"FAT32", 4 * GiB - 1, 5 * GiB);
     expect(check() == 0, "FAT32 accepts a raw file at the file-size limit with enough space");
     for (int64_t size : {int64_t(0), int64_t(-1)}) {

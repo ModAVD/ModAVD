@@ -1,31 +1,31 @@
-From aa61d4de59f6a723f0cb07fdfa5a29c6f4f3dcb9 Mon Sep 17 00:00:00 2001
+From 657d953b55759cf9d637b20e865c3988ac1c7a8d Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Wed, 4 Nov 2026 19:56:36 +0800
 Subject: [PATCH] userdata: budget first-creation space on FAT32 and exFAT
 
-The sparse-volume check intentionally excluded FAT32 and exFAT because
-libsparse must allocate the temporary raw image in full there. Keep that
-requirement, but replace the unconditional 20% margin with a budget for
-the initial data plus ext4/qcow2 metadata and allocation rounding.
+Keep room for the fully allocated temporary raw image on FAT32 and exFAT.
+Its inode tables and journal are already included in the raw capacity.
+Also budget the simultaneous qcow2, including the initial data and written
+ext4 metadata, plus qcow2 overhead, cache files and allocation rounding.
 
-Use the larger of the init directory and init image sizes, including the
-copy fallback. Reserve at least 512 MiB, growing to 1/64 of the partition
-size on larger disks. Compare each byte count before subtracting so a
-one-byte deficit or an overflowing combined size cannot pass the check.
-Reject a FAT32 raw image above its single-file size limit explicitly.
+Use the larger of the init directory and init image sizes for initial data,
+including the copy fallback. Keep the conservative, uncalibrated margin of
+at least 512 MiB, growing to 1/64 of the partition size on larger disks.
+Compare byte counts before subtraction to avoid overflow and rounding.
+When FAT32 cannot hold the raw file, suggest an NTFS or exFAT volume.
 
-Preserve the sparse-volume 10 GiB cap, the legacy policy for other or
-unknown volumes, and the free-space query failure behavior. Only run this
-policy for first setup with no existing userdata file. Creation,
-conversion, existing images and expansion are unchanged.
+Preserve the sparse-volume 10 GiB cap, the policy for other or unknown
+volumes, and free-space query failure behavior. Only check first setup
+without an existing userdata file. Creation, conversion and growth stay
+unchanged.
 
-Refs: ModAVD/ModAVD#3
+Refs ModAVD/ModAVD#3
 ---
- android-qemu2-glue/main.cpp | 87 +++++++++++++++++++++++++++----------
- 1 file changed, 65 insertions(+), 22 deletions(-)
+ android-qemu2-glue/main.cpp | 89 ++++++++++++++++++++++++++++---------
+ 1 file changed, 67 insertions(+), 22 deletions(-)
 
 diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
-index 646d0a09..5f4a27f4 100644
+index 646d0a09..708fa184 100644
 --- a/android-qemu2-glue/main.cpp
 +++ b/android-qemu2-glue/main.cpp
 @@ -533,21 +533,31 @@ static void replaceDefaultPath(AvdInfo* avd,
@@ -68,7 +68,7 @@ index 646d0a09..5f4a27f4 100644
  }
  #endif
  
-@@ -2672,24 +2682,57 @@ extern "C" int main(int argc, char** argv) {
+@@ -2672,24 +2682,59 @@ extern "C" int main(int argc, char** argv) {
                                          ->settings->hw()
                                          ->disk_dataPartition_size /
                                  (1024.0 * 1024.0);
@@ -99,16 +99,18 @@ index 646d0a09..5f4a27f4 100644
 +                        rawSize > 0xffffffffULL) {
 +                        android_panic("Cannot create userdata partition on FAT32: "
 +                                      "the temporary raw image exceeds the "
-+                                      "4 GiB - 1 byte file limit.");
++                                      "4 GiB - 1 byte file limit. Move the "
++                                      "instance to an NTFS or exFAT volume.");
 +                        return 1;
 +                    }
 +
 +                    // libsparse cannot make holes here: the temporary raw
-+                    // image needs its full size. Budget the seed data too,
-+                    // plus ext4/qcow2 metadata and allocation rounding. ext4
-+                    // caps computed inodes at 1M (256 MiB before block-group
-+                    // rounding) and the journal at 128 MiB. Keep at least
-+                    // 512 MiB, growing with large partitions.
++                    // image needs its full size, including inode tables and
++                    // the journal. Also budget the simultaneous temporary
++                    // qcow2: seed data, written ext4 metadata and qcow2
++                    // overhead, plus cache files and allocation rounding.
++                    // Keep at least 512 MiB, growing with large partitions;
++                    // this conservative margin is not measured on FAT yet.
 +                    const uint64_t workingSpace = std::max<uint64_t>(
 +                            512ULL * 1024 * 1024, rawSize / 64);
 +                    uint64_t seedSize = 0;
