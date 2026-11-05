@@ -18,12 +18,12 @@
         "点 × 改走安卓自己的正常关机（先 sync 再关机），前台应用会先收到关机通知；暂停中的实例先恢复再关。（[#60](https://github.com/ModAVD/ModAVD/issues/60)）",
         "图形：游戏进程退出后按进程回收 EGL 资源（[#38](https://github.com/ModAVD/ModAVD/issues/38)）；ASTC / ETC2 压缩纹理能正确解压，没有原生 ASTC 的显卡上不再花屏或全黑（[#39](https://github.com/ModAVD/ModAVD/issues/39)）；游戏进程被杀后渲染线程不再一直等它，不会因此卡死整台模拟器（[#40](https://github.com/ModAVD/ModAVD/issues/40)）。",
         "FAT32 / exFAT 上首次建数据盘按实际需要的空间检查，不再固定要上限的 1.2 倍。（[#3](https://github.com/ModAVD/ModAVD/issues/3)）",
-        "游戏里的视频解码更稳。（[#43](https://github.com/ModAVD/ModAVD/issues/43)）",
+        "加载快照、手动开 CUDA 硬解 VPX 时的几处媒体解码问题修了（默认配置碰不到）。（[#43](https://github.com/ModAVD/ModAVD/issues/43)）",
         "整个根目录搬走以后，装过执行桥的实例也能开机了；老实例先在原位置用新版开关机一次再搬。（[#99](https://github.com/ModAVD/ModAVD/issues/99)）"
       ],
       "说明": [
         "点 × 以后模拟器进程还会在后台跑一会儿（通常几秒到十几秒，最长约半分钟），请不要结束它。",
-        "FAT32 / exFAT 上首次建盘只在 NTFS 上实测过，有问题请到 [#3](https://github.com/ModAVD/ModAVD/issues/3) 反馈。"
+        "FAT32 / exFAT 卷上新的首次建盘空间检查还没实测，只有单元测试；碰到问题请新开 issue。"
       ]
     }
   },
