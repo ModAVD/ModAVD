@@ -1,0 +1,22 @@
+From c154e2b9e256144e35f127879be92d1582624ffd Mon Sep 17 00:00:00 2001
+From: jinghero <44921326+jinghero@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 13:08:19 +0800
+Subject: [PATCH 1/4] media/vpx: select the render path from the decoded frame
+
+---
+ .../emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+index 12085d8c..c983f621 100644
+--- a/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
++++ b/android/emu/media/src/android/emulation/MediaVpxDecoderGeneric.cpp
+@@ -322,7 +322,7 @@ void MediaVpxDecoderGeneric::getImage(void* ptr) {
+     if (mParser.version() == 200) {
+         VPX_DPRINT("calling rendering to host side color buffer with id %d",
+                    param.hostColorBufferId);
+-        if (mUseGpuTexture && pFrame->texture[0] > 0 &&
++        if (pFrame->texture.size() >= 2 && pFrame->texture[0] > 0 &&
+             pFrame->texture[1] > 0) {
+             VPX_DPRINT(
+                     "calling rendering to host side color buffer with id %d "
