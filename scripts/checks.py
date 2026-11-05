@@ -30,7 +30,12 @@ PLAIN_AUTHOR = re.compile(r"[^<>@\r\n]+ <[^<>@\s]+@[^<>@\s]+\.[^<>@\s]+>")
 
 
 def author_allowed(author, message=None):
-    """With |message| (the commit's), an upstream author of a cherry-pick is allowed too."""
+    """With |message| (the commit's), an upstream author of a cherry-pick is allowed too.
+
+    Patches and the replayed commits carry no trace of who committed them locally, so here the cherry-pick line is
+    all there is to go on. Whether a commit really came from upstream (author is not its committer) is decided by the
+    local export, and a maintainer identity that still got through is stopped by the release privacy scan's private
+    rules."""
     if author == MAINTAINER or NOREPLY_AUTHOR.fullmatch(author):
         return True
     return (message is not None and bool(UPSTREAM_PICK.search(message)) and bool(PLAIN_AUTHOR.fullmatch(author))
