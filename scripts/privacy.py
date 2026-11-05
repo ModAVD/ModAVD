@@ -130,12 +130,14 @@ def strings(data):
                     yield data[lo:hi].decode(encoding)
                 except UnicodeDecodeError:
                     # The ASCII bytes regex can swallow non-ASCII bytes.
-                    # Preserve its printable prefix; Unicode is scanned below.
+                    # Preserve the printable prefix and report the full span
+                    # even when its bytes are not valid Unicode.
                     end = lo
                     while end < hi and 32 <= data[end] <= 126:
                         end += 1
                     if end > lo:
                         yield data[lo:end].decode("ascii")
+                    yield data[lo:hi].decode("latin-1")
     yield from unicode_strings(data)
     try:
         text = data.decode("utf-8-sig")

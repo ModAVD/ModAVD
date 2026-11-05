@@ -131,8 +131,8 @@ class ReleaseChecks(unittest.TestCase):
             with self.subTest(user=user):
                 file.write_bytes(text.encode() + b"\x00\x90")
                 report = privacy.scan_files([(file, file.name)], allow)
-                self.assertEqual(len(report["failures"]), 1)
-                self.assertEqual(report["failures"][0]["string_sha256"], hashlib.sha256(text.encode()).hexdigest())
+                self.assertIn(hashlib.sha256(text.encode()).hexdigest(),
+                              [e["string_sha256"] for e in report["failures"]])
 
     def test_privacy_unicode_users_in_binary_at_both_alignments(self):
         path = self.folder()
@@ -146,6 +146,20 @@ class ReleaseChecks(unittest.TestCase):
                         file.write_bytes(prefix + text.encode(encoding) + b"\x00\x00\xfe")
                         report = privacy.scan_files([(file, file.name)], allow)
                         self.assertTrue(any(user in e["sample"] for e in report["failures"]))
+
+    def test_privacy_gbk_usernames_in_binary_are_reported(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        allow.write_text('{"exceptions": []}', encoding="utf-8")
+        for user in ["张三", "A张三"]:
+            for suffix in ["", chr(92) + "project"]:
+                text = "C:" + chr(92) + "Users" + chr(92) + user + suffix
+                data = text.encode("gbk")
+                with self.subTest(user=user, suffix=suffix):
+                    file.write_bytes(b"\x90\x00" + data + b"\x00\xff")
+                    report = privacy.scan_files([(file, file.name)], allow)
+                    self.assertTrue(any(e["rule"] == "user-path" and data.decode("latin-1") in e["sample"]
+                                        for e in report["failures"]))
 
     def test_privacy_invalid_unicode_sequences_bound_candidates(self):
         text = "C:" + chr(92) + "Users" + chr(92) + "张三" + chr(92) + "project"
