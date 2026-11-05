@@ -79,6 +79,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | `-Repository` | ModAVD 的发版克隆，默认是这份工具所在的克隆。随包脚本（`package/`）和执行桥源码（`bridge/`）取它当前提交，这两处有没提交的改动就停；清单、补丁、Release 说明同步进它 |
 | `-OutputRoot` / `-OutputName` | 默认 `<TempRoot>\pubrel`；名称只允许默认名或 `<默认名>-check`。输出根目录和发版克隆都不能在源码树、SDK、本机配置 `ProtectedRoots` 列的目录里，输出根目录也不能在发版克隆里 |
 | `-PrivateRules` | 仓库外的私有隐私规则（`PrivateRules`，或环境变量 `MODAVD_PRIVATE_RULES`）；开跑前就查，没有就停 |
+| `-PrivacyCache` / `-NoPrivacyCache` | 第 8 步的扫描缓存（`PrivacyCache`；都没给就是 `<OutputRoot>\privacy-cache.json`），只在本机，不能在输出目录和发版克隆里；`-NoPrivacyCache` 全部重扫。见「共享校验与隐私规则」 |
 | `-MinFreeGB` | 写之前要求的磁盘空闲，默认 120（`MinFreeGB`） |
 | `-Force` | 只重建同名、有匹配所有权标记、没有链接的本脚本输出目录；不会清理别的目录 |
 | `-Python` / `-SevenZip` | 指定可执行文件；Python 也可由 `MODAVD_PYTHON` 指定，再是本机配置 `Python`、PATH 里的 `python.exe`；7-Zip 再是本机配置 `SevenZip`、PATH 里的 `7z.exe`、`Program Files\7-Zip` |
@@ -130,6 +131,12 @@ P3 审核过的说明和 NOTICE 里写的是 `37.2.10-mas30`，组包时换成�
   `privacy-private-rules.json` 里，**放在仓库外，绝不提交**：用环境变量 `MODAVD_PRIVATE_RULES`、`privacy.py --private-rules <文件>`
   或 `privacy.use_rules(<文件>)` 加载，指了却不存在就报错。公开 CI 不带它跑；发版的第 8 步没加载到就停。
 
+发版第 8 步按文件哈希缓存扫过干净的结果（`release_tools.py` 的 `cached_privacy_scan`，`privacy.py` 本身不变）：
+
+- 和上次扫过的文件内容（SHA-256）相同、位置相同（去掉主包外层的 `ModAVD-<版本>-<平台>/`，所以上一版没变的文件也算）的，不再扫；源码归档按整个文件的哈希算，没变的归档连解压都不用。
+- 扫描器的代码或规则（公开的和私有的）一变，整个缓存作废。白名单不在里面：每条缓存记着它用到的例外，命中时逐条在现在的白名单里再查一遍，撤掉的例外会让用到它的文件重扫、照常报失败。
+- 只缓存干净的；有失败的文件每次都扫。报告（`logs/privacy.json`）和不用缓存时一样，多一个 `cache` 记命中、重扫了多少。
+- 缓存每次只留这一轮用到的条目，跟着最新一版走；文件坏了就丢掉重来。缓存是本机的信任输入，只有维护者自己能写。
 白名单只允许已核查的第三方作者/词表/测试数据/示例路径、上游预编译件的构建路径及二进制巧合。
 每条例外固定「规则 + 完整可打印字符串 SHA-256」，并固定具体源文件路径或整个文件 SHA-256；不按姓氏全局豁免。记录的理由不复制私人字符串进仓库。
 新命中要核对来源后人工更新白名单；禁止直接把新扫描报告全部加入白名单。
@@ -141,4 +148,4 @@ python -I tools/pubrel/test_release.py --work <全新临时目录>
 ```
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
-覆盖输出所有权、路径越界、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号、许可证包缺 AGPL-3.0 全文或内容不对、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、发版克隆的 `package/` 有改动）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
+覆盖输出所有权、路径越界、发版隐私扫描的缓存（没变的跳过且报告不变、改了内容 / 撤了例外 / 换了规则或扫描器就重扫、有失败的不缓存、缓存不能放进输出和克隆）、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号、许可证包缺 AGPL-3.0 全文或内容不对、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、发版克隆的 `package/` 有改动）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。

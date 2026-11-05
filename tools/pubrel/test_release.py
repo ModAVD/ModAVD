@@ -272,6 +272,118 @@ class ReleaseChecks(unittest.TestCase):
                 os.environ[privacy.PRIVATE_RULES_ENV] = env
             privacy.use_rules(previous)
 
+    def cache_fixture(self, path, version):
+        """A release-like file list: two package files (one with a reviewed exception by path), an archive (one member
+        with a reviewed exception by file hash) and release notes with a real failure. Returns (files, allowlist)."""
+        user = "C:" + chr(92) + "Users" + chr(92) + "localperson"
+        person = "Qwer" + "zy"
+        package = path / version / f"ModAVD-{version}-win-x64"
+        for rel, data in {"sdk/a.dll": b"\x00nothing to see\x00", "sdk/b.dll": (user + "\n").encode()}.items():
+            (package / rel).parent.mkdir(parents=True, exist_ok=True)
+            (package / rel).write_bytes(data)
+        (path / version / "release-notes.md").write_text(f"written by {person}\n", encoding="utf-8")
+        member = (user + chr(92) + "build\n").encode()
+        archive = path / "source.tar.xz"
+        if not archive.exists():
+            with tarfile.open(archive, "w:xz") as tar:
+                for name, data in [("upstream/clean.txt", b"clean\n"), ("upstream/built.txt", member)]:
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+        digest = lambda s: hashlib.sha256(s.encode()).hexdigest()
+        allow = path / "allow.json"
+        if not allow.exists():
+            allow.write_text(json.dumps({"exceptions": [
+                {"path": "sdk/b.dll", "rule": "user-path", "string_sha256": digest(user)},
+                {"file_sha256": hashlib.sha256(member).hexdigest(), "rule": "user-path", "string_sha256": digest(user + chr(92) + "build")}]}),
+                encoding="utf-8")
+        files = [(package / "sdk/a.dll", f"ModAVD-{version}-win-x64/sdk/a.dll"), (package / "sdk/b.dll", f"ModAVD-{version}-win-x64/sdk/b.dll"),
+                 (archive, "source.tar.xz"), (path / version / "release-notes.md", "release-notes.md")]
+        return files, allow
+
+    def scan_counting(self, files, allow, cache):
+        """cached_privacy_scan, recording which files went to privacy.scan_files."""
+        scanned = []
+        real = privacy.scan_files
+        def spy(batch, allowlist):
+            scanned.extend(name for _, name in batch)
+            return real(batch, allowlist)
+        with mock.patch.object(privacy, "scan_files", spy):
+            report = release.cached_privacy_scan(privacy, files, allow, cache)
+        return report, scanned
+
+    @staticmethod
+    def without_version(report):
+        strip = lambda e: {**e, "file": re.sub(r"^ModAVD-[^/]+/", "", e["file"])}
+        return (report["files_scanned"], sorted(json.dumps(strip(e), sort_keys=True) for e in report["allowed"]),
+                sorted(json.dumps(strip(e), sort_keys=True) for e in report["failures"]))
+
+    def test_privacy_cache_skips_unchanged_clean_files(self):
+        """0.38.0 scanned 380 763 files and members several times. The release scan now skips what the last one found
+        clean and what has not changed since; the report is the same as a full scan's."""
+        path = self.folder()
+        cache = path / "cache/release.json"
+        with self.private_rules():
+            files, allow = self.cache_fixture(path, "0.38.0")
+            full = privacy.scan_files([(p, n) for p, n in files], allow)
+            first, scanned = self.scan_counting(files, allow, cache)
+            self.assertEqual(sorted(scanned), sorted(n for _, n in files))
+            self.assertEqual(self.without_version(first), self.without_version(full))
+            self.assertEqual(full["files_scanned"], 5)
+            self.assertEqual([e["file"] for e in full["failures"]], ["release-notes.md"])
+            self.assertEqual(len(full["allowed"]), 2)
+            # the next release: same files under the new package folder; only the one with a failure is scanned again
+            files, _ = self.cache_fixture(path, "0.39.0")
+            second, scanned = self.scan_counting(files, allow, cache)
+            self.assertEqual(scanned, ["release-notes.md"])
+            self.assertEqual(self.without_version(second), self.without_version(full))
+            self.assertEqual(second["cache"]["hits"], 3)
+            self.assertEqual(sorted(e["file"] for e in second["allowed"]), ["ModAVD-0.39.0-win-x64/sdk/b.dll", "source.tar.xz!upstream/built.txt"])
+            # a changed file is scanned again
+            files[0][0].write_bytes(b"\x00changed\x00")
+            _, scanned = self.scan_counting(files, allow, cache)
+            self.assertEqual(sorted(scanned), sorted([files[0][1], "release-notes.md"]))
+            # an exception taken out of the allowlist: the file that used it is scanned again, and fails
+            rules = json.loads(allow.read_text(encoding="utf-8"))
+            narrowed = path / "allow-narrowed.json"
+            narrowed.write_text(json.dumps({"exceptions": rules["exceptions"][1:]}), encoding="utf-8")
+            third, scanned = self.scan_counting(files, narrowed, cache)
+            self.assertEqual(sorted(scanned), sorted([files[1][1], "release-notes.md"]))
+            self.assertIn(files[1][1], [e["file"] for e in third["failures"]])
+            # different rules drop the whole cache
+            with self.private_rules({"rules": {"realname": {"pattern": "Plonkett", "prefixes": ["Plonkett"]}}}):
+                fourth, scanned = self.scan_counting(files, allow, cache)
+            self.assertEqual(sorted(scanned), sorted(n for _, n in files))
+            self.assertIn("changed", fourth["cache"]["note"])
+            # an unreadable cache is dropped too
+            cache.write_text("{not json", encoding="utf-8")
+            fifth, scanned = self.scan_counting(files, allow, cache)
+            self.assertEqual(sorted(scanned), sorted(n for _, n in files))
+            self.assertIn("unreadable", fifth["cache"]["note"])
+            # a changed scanner drops it as well: its code is part of the fingerprint
+            changed = path / "privacy.py"
+            changed.write_bytes(Path(privacy.__file__).read_bytes() + b"\n# fixed a miss\n")
+            other = SimpleNamespace(__file__=str(changed), RULE_SPECS=privacy.RULE_SPECS)
+            self.assertNotEqual(release.privacy_fingerprint(other), release.privacy_fingerprint(privacy))
+            self.assertEqual(release.privacy_fingerprint(SimpleNamespace(__file__=privacy.__file__, RULE_SPECS=dict(privacy.RULE_SPECS))),
+                             release.privacy_fingerprint(privacy))
+
+    def test_privacy_release_cache_stays_outside_output_and_checkout(self):
+        path = self.folder()
+        out = path / "out"
+        for scope in ["release", "patches", "source"]:
+            (out / scope).mkdir(parents=True)
+        for name in ["SHA256SUMS.txt", "release-assets.json", "release-notes.md"]:
+            (out / name).write_text("x\n", encoding="utf-8")
+        with self.private_rules() as rules:
+            for bad in [out / "privacy-cache.json", release.REPO / "privacy-cache.json"]:
+                with self.assertRaisesRegex(ValueError, "outside the release output"):
+                    release.privacy_release(SimpleNamespace(output=str(out), private_rules=str(rules), privacy_cache=str(bad)))
+            release.privacy_release(SimpleNamespace(output=str(out), private_rules=str(rules), privacy_cache=str(path / "cache.json")))
+            self.assertEqual(release.load(out / "logs/privacy.json")["cache"]["scanned"], 3)
+            release.privacy_release(SimpleNamespace(output=str(out), private_rules=str(rules), privacy_cache=str(path / "cache.json")))
+            self.assertEqual(release.load(out / "logs/privacy.json")["cache"]["hits"], 3)
+
     def test_allowlist_does_not_allow_modified_file(self):
         path = self.folder()
         allow = path / "allow.json"

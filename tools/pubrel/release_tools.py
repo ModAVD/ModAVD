@@ -1135,18 +1135,114 @@ def privacy_release(args):
                 files.append((p, p.relative_to(out / scope).as_posix()))
     for name in ["SHA256SUMS.txt", "release-assets.json", "release-notes.md"]:
         files.append((out / name, name))
-    report = privacy.scan_files(files, REPO / "scripts/privacy-allowlist.json")
+    allowlist = REPO / "scripts/privacy-allowlist.json"
+    cache = getattr(args, "privacy_cache", None)
+    if cache:
+        # outside the output (-Force deletes it) and outside the checkouts (it would be committed)
+        hit = inside(cache, [out, REPO] + ([args.repository] if getattr(args, "repository", None) else []))
+        if hit:
+            raise ValueError(f"The privacy cache must live outside the release output and the checkouts: {cache} is in {hit}")
+        report = cached_privacy_scan(privacy, files, allowlist, Path(cache))
+    else:
+        report = privacy.scan_files(files, allowlist)
     save(out / "logs/privacy.json", report)
-    print(f"Privacy: {report['files_scanned']} files/members, {len(report['allowed'])} reviewed exceptions, {len(report['failures'])} failures", flush=True)
+    from_cache = (f" ({report['cache']['hits']} files from the cache {cache}{', ' + report['cache']['note'] if report['cache']['note'] else ''}; "
+                  f"{report['cache']['scanned']} scanned)" if cache else " (no cache)")
+    print(f"Privacy: {report['files_scanned']} files/members{from_cache}, {len(report['allowed'])} reviewed exceptions, "
+          f"{len(report['failures'])} failures", flush=True)
     if report["failures"]:
         raise ValueError("Privacy failures; see logs/privacy.json")
+
+
+PRIVACY_CACHE_VERSION = 1
+PRIVACY_ARCHIVES = (".tar.xz", ".tar.gz")   # what privacy.scan_files opens and scans member by member
+
+
+def privacy_fingerprint(privacy):
+    """What a cached "clean" verdict depends on besides the file itself: the scanner's code and the rules it ran with
+    (public and private). Either changing drops the whole cache. The allowlist is not in it: a cached entry keeps the
+    exceptions it relied on, and a hit checks each against the current allowlist (adding exceptions never turns a clean
+    file into a failing one; removing one sends the files that used it back to the scanner)."""
+    h = hashlib.sha256(Path(privacy.__file__).read_bytes())
+    h.update(json.dumps(privacy.RULE_SPECS, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    return h.hexdigest()
+
+
+def privacy_key(path, name):
+    """The file's SHA-256 and where an exception by path would look, as privacy.scan_files computes it: the name
+    without the ModAVD-<version>-<platform>/ folder of the package (so an unchanged file of the last release hits).
+    An archive is checked member by member under the member names, so only its content counts."""
+    digest = sha(path)
+    if name.endswith(PRIVACY_ARCHIVES):
+        return digest + "\t!archive"
+    logical = name.split("!", 1)[-1]
+    if logical.startswith("ModAVD-") and "/" in logical:
+        logical = logical.split("/", 1)[1]
+    return digest + "\t" + logical
+
+
+def cached_privacy_scan(privacy, files, allowlist, cache_path):
+    """privacy.scan_files(files, allowlist), without scanning again what the cache at `cache_path` (this machine only)
+    already found clean: same content at the same logical path (an archive: same content), same scanner and rules,
+    and every exception the file needed still in the allowlist. Only clean results are kept; a file with a failure is
+    scanned every time. The cache is rewritten with this run's entries only, so it follows the latest release.
+    The report is privacy.scan_files's, with the cached files' counts and exceptions put back, plus a "cache" entry."""
+    fingerprint = privacy_fingerprint(privacy)
+    entries, note = {}, ""
+    if cache_path.is_file():
+        try:
+            cached = load(cache_path)
+            if cached.get("version") == PRIVACY_CACHE_VERSION and cached.get("fingerprint") == fingerprint:
+                entries = dict(cached["entries"])
+            else:
+                note = "scanner or rules changed, cache dropped"
+        except (ValueError, KeyError, TypeError, AttributeError):
+            note = "cache unreadable, dropped"
+    # read as privacy.scan_files reads it
+    exceptions = load(allowlist)["exceptions"]
+    by_file = {(e["file_sha256"], e["rule"], e["string_sha256"]) for e in exceptions if "file_sha256" in e}
+    by_path = {(e["path"], e["rule"], e["string_sha256"]) for e in exceptions if "path" in e}
+    def still_allowed(a):
+        return (a["file_sha256"], a["rule"], a["string_sha256"]) in by_file or (a["path"], a["rule"], a["string_sha256"]) in by_path
+    report = {"files_scanned": 0, "failures": [], "allowed": []}
+    fresh, todo = {}, []
+    for path, name in files:
+        key = privacy_key(path, name)
+        entry = entries.get(key)
+        if entry is not None and all(still_allowed(a) for a in entry["allowed"]):
+            report["files_scanned"] += entry["files"]
+            report["allowed"] += [{"file": name + a["member"], **{k: v for k, v in a.items() if k != "member"}} for a in entry["allowed"]]
+            fresh[key] = entry
+        else:
+            todo.append((path, name, key))
+    # plain files in one pass; each archive on its own, so its member count and exceptions stay its own
+    batches = [[t for t in todo if not t[1].endswith(PRIVACY_ARCHIVES)]] + [[t] for t in todo if t[1].endswith(PRIVACY_ARCHIVES)]
+    for batch in [b for b in batches if b]:
+        sub = privacy.scan_files([(p, n) for p, n, _ in batch], allowlist)
+        for k in ["failures", "allowed"]:
+            report[k] += sub[k]
+        report["files_scanned"] += sub["files_scanned"]
+        for path, name, key in batch:
+            archive = name.endswith(PRIVACY_ARCHIVES)
+            mine = (lambda e: e["file"].startswith(name + "!")) if archive else (lambda e: e["file"] == name)
+            if any(mine(e) for e in sub["failures"]):
+                continue
+            fresh[key] = {"files": sub["files_scanned"] if archive else 1,
+                          "allowed": [{"member": e["file"][len(name):], **{k: e[k] for k in ("path", "rule", "file_sha256", "string_sha256")}}
+                                      for e in sub["allowed"] if mine(e)]}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = cache_path.with_name(cache_path.name + ".tmp")
+    save(temp, {"version": PRIVACY_CACHE_VERSION, "fingerprint": fingerprint, "entries": fresh})
+    os.replace(temp, cache_path)
+    report["cache"] = {"file": str(cache_path), "hits": len(files) - len(todo), "scanned": len(todo), "note": note}
+    return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "privacy-release"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
-                 "emu-src", "sevenzip", "repository", "private-rules"]:
+                 "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
     parser.add_argument("--keep-incoming", action="append", default=[])
     # Directories the release checkout must not be in (source trees, backups, production); repeatable.
