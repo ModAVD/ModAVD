@@ -1,26 +1,27 @@
-From b298aafcb31ddd59c300ce83eb698150f65de0ed Mon Sep 17 00:00:00 2001
+From 619f55b4a1b03a423a3d9acf507580acb9d5fc31 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 13:11:40 +0800
-Subject: [PATCH] windows: recover temporary VM images owned by the same AVD
+Subject: [PATCH] windows: pin and recover temporary images allocated by the
+ same AVD
 
-Reserve the temporary hardware INI, read-only drive overlays, and both halves of a temporary cache before handing their paths to QEMU. Pin the files for the session and record the AVD and file identities at exclusive creation. Recover a crashed session only after validating its receipt and obtaining exclusive access to the original file.
+Create private temporary hardware and drive files with read-data pins in the resolved TEMP directory. Keep a user-sealed receipt in the owning AVD and bind it to the original leaf, directories and file identities. Validate the open handles before deleting; preserve legacy and unproven files.
 
-Write the private INI in place to keep its reserved identity. Leave legacy temporary files and unproven ownership alone.
+Write the private INI in place and reserve both cache files before QEMU opens them. Keep absolute backing paths within the Windows block layer byte limit and propagate mirror failures.
 ---
- android-qemu2-glue/CMakeLists.txt             |   1 +
- android-qemu2-glue/drive-share.cpp            |  34 +-
+ android-qemu2-glue/CMakeLists.txt             |   5 +
+ android-qemu2-glue/drive-share.cpp            |  63 ++-
  android-qemu2-glue/main.cpp                   |  34 +-
- android-qemu2-glue/windows-temp-images.cpp    | 291 ++++++++++++++++++
+ android-qemu2-glue/windows-temp-images.cpp    | 460 ++++++++++++++++++
  android-qemu2-glue/windows-temp-images.h      |  16 +
  .../android/base/files/IniFile.h              |   2 +
  android/emu/files/include/android/utils/ini.h |   1 +
  android/emu/files/src/android/utils/ini.cpp   |   4 +
- 8 files changed, 378 insertions(+), 5 deletions(-)
+ 8 files changed, 567 insertions(+), 18 deletions(-)
  create mode 100644 android-qemu2-glue/windows-temp-images.cpp
  create mode 100644 android-qemu2-glue/windows-temp-images.h
 
 diff --git a/android-qemu2-glue/CMakeLists.txt b/android-qemu2-glue/CMakeLists.txt
-index d6965d2b..ff04b818 100644
+index d6965d2b..316d6006 100644
 --- a/android-qemu2-glue/CMakeLists.txt
 +++ b/android-qemu2-glue/CMakeLists.txt
 @@ -23,6 +23,7 @@ set(android-qemu2-glue_src
@@ -31,8 +32,19 @@ index d6965d2b..ff04b818 100644
      dtb.cpp
      emulation/CharSerialLine.cpp
      emulation/DmaMap.cpp
+@@ -98,6 +99,10 @@ target_link_libraries(
+   libqemu2-glue PRIVATE android-grpc-services-stack ui::gl-bridge
+                         android-grpc-interceptors ${android-qemu2-virtio_hdr})
+ 
++if(WIN32)
++  target_link_libraries(libqemu2-glue PRIVATE crypt32 advapi32)
++endif()
++
+ if(WEBRTC)
+   target_link_libraries(libqemu2-glue PRIVATE android-webrtc)
+ endif()
 diff --git a/android-qemu2-glue/drive-share.cpp b/android-qemu2-glue/drive-share.cpp
-index 83e32059..a71c7bfc 100644
+index 83e32059..b4253f4f 100644
 --- a/android-qemu2-glue/drive-share.cpp
 +++ b/android-qemu2-glue/drive-share.cpp
 @@ -28,6 +28,10 @@
@@ -88,6 +100,43 @@ index 83e32059..a71c7bfc 100644
              error_report("%s", error_get_pretty(img_creation_error));
              error_free(img_creation_error);
              return "";
+@@ -328,17 +346,15 @@ static std::string initDrivePath(const char* id,
+ //                  "using qemu-img.");
+ //     return -EINVAL;
+ // }
+-static void mirrorTmpImg(const char* dst, const char* src) {
+-    path_copy_file(dst, src);
+-    Error *local_err = NULL;
++static bool mirrorTmpImg(const char* dst, const char* src, Error** errp) {
++    if (path_copy_file(dst, src) != 0) {
++        error_setg(errp, "Could not copy '%s' to temporary image '%s'", src, dst);
++        return false;
++    }
+ 
+     BlockDriverState* bs = bdrv_open(
+-            dst, nullptr, nullptr, BDRV_O_RDWR | BDRV_O_NO_BACKING, &local_err);
+-    if (!bs) {
+-        error_report("Could not open '%s': ", dst);
+-        error_free(local_err);
+-        return;
+-    }
++            dst, nullptr, nullptr, BDRV_O_RDWR | BDRV_O_NO_BACKING, errp);
++    if (!bs) return false;
+     char* absPath = nullptr;
+     char* backingFile = getConsoleAgents()->settings->hw()->MIRROR_IMG_FIELD;
+     if (!android::base::PathUtils::isAbsolute(backingFile)) {
+@@ -351,9 +367,11 @@ static void mirrorTmpImg(const char* dst, const char* src) {
+     }
+     D("backing " MIRROR_IMG_NAME ".img path: %s\n", backingFile);
+     int res = bdrv_change_backing_file(bs, backingFile, NULL);
++    if (res < 0) error_setg_errno(errp, -res, "Could not set backing file for '%s'", dst);
+     D(MIRROR_IMG_NAME " changing backing file result: %d\n", res);
+     bdrv_unref(bs);
+     free(absPath);
++    return res >= 0;
+ }
+ 
+ // This is for C-style function pointer
 @@ -363,6 +381,10 @@ static int drive_init(void* opaque, QemuOpts* opts, Error** errp) {
      const char* id = opts->id;
      if (id) {
@@ -99,7 +148,18 @@ index 83e32059..a71c7bfc 100644
          qemu_opt_set(opts, "file", path.c_str(), errp);
          if (needCreateTmp(id, param->shareMode, opts) && param->snapshotName) {
              if (strcmp(id, MIRROR_IMG_NAME)) {
-@@ -437,10 +459,18 @@ static int drive_reinit(void* opaque, QemuOpts* opts, Error** errp) {
+@@ -389,8 +411,8 @@ static int drive_init(void* opaque, QemuOpts* opts, Error** errp) {
+                     blk_unref(blkNew);
+                 }
+             } else {
+-                mirrorTmpImg(path.c_str(),
+-                    sDriveShare->srcImagePaths[id].c_str());
++                if (!mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str(), errp))
++                    return 1;
+             }
+         }
+     }
+@@ -437,12 +459,21 @@ static int drive_reinit(void* opaque, QemuOpts* opts, Error** errp) {
          // read
          const char* oldPath = qemu_opt_get(opts, "file");
          D("Closing old image %s\n", oldPath);
@@ -116,8 +176,23 @@ index 83e32059..a71c7bfc 100644
 +        return 1;
 +    }
      if (needCreateTmp(id, param->shareMode, opts) && needsMirror) {
-         mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str());
+-        mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str());
++        if (!mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str(), errp))
++            return 1;
      }
+ 
+     // Mount the drive
+@@ -566,7 +597,9 @@ extern "C" int android_drive_share_init(bool wipe_data,
+             "w", android::base::FileShare::Write, 5000);
+     }
+     sDriveShare->blockDefaultType = blockDefaultType;
+-    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init, &param, NULL)) {
++    Error* error = nullptr;
++    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init, &param, &error)) {
++        if (error) error_report_err(error);
+         if (baseSnapshotNameFile) {
+             fclose(baseSnapshotNameFile);
+         }
 diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
 index 646d0a09..c8cbbfc7 100644
 --- a/android-qemu2-glue/main.cpp
@@ -211,25 +286,30 @@ index 646d0a09..c8cbbfc7 100644
  
 diff --git a/android-qemu2-glue/windows-temp-images.cpp b/android-qemu2-glue/windows-temp-images.cpp
 new file mode 100644
-index 00000000..ae5fb3cb
+index 00000000..3cc1ecd8
 --- /dev/null
 +++ b/android-qemu2-glue/windows-temp-images.cpp
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,460 @@
 +// Copyright 2026 Ji Mao Cai
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "windows-temp-images.h"
 +
 +#ifdef _WIN32
 +#include <windows.h>
++
++#include <dpapi.h>
++#include <sddl.h>
 +#include <winioctl.h>
 +
 +#include <array>
 +#include <cstdlib>
 +#include <cstring>
 +#include <filesystem>
++#include <functional>
 +#include <map>
 +#include <memory>
 +#include <mutex>
++#include <vector>
 +
 +namespace android::tempimages {
 +namespace {
@@ -243,9 +323,10 @@ index 00000000..ae5fb3cb
 +            DWORD access,
 +            DWORD share,
 +            DWORD how,
-+            DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT) {
-+    HANDLE h =
-+            CreateFileW(p.c_str(), access, share, nullptr, how, flags, nullptr);
++            DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT,
++            SECURITY_ATTRIBUTES* security = nullptr) {
++    HANDLE h = CreateFileW(p.c_str(), access, share, security, how, flags,
++                           nullptr);
 +    return Handle(h == INVALID_HANDLE_VALUE ? nullptr : h);
 +}
 +
@@ -296,8 +377,8 @@ index 00000000..ae5fb3cb
 +}
 +
 +struct Receipt {
-+    char magic[8];
 +    FileRef avd;
++    FileRef temp;
 +    Identity receipt;
 +    Identity image;
 +};
@@ -308,10 +389,55 @@ index 00000000..ae5fb3cb
 +    bool overlay;
 +};
 +
++struct Directory {
++    Handle pin;
++    fs::path path;
++    fs::path dosPath;
++    FileRef id{};
++    bool identified = false;
++    DWORD volume = VOLUME_NAME_GUID;
++};
++
++struct FreeLocal {
++    void operator()(void* p) const { LocalFree(p); }
++};
++using LocalMemory = std::unique_ptr<void, FreeLocal>;
++
++// A shared TEMP may grant other accounts write access. Set the DACL atomically
++// on creation: even an empty placeholder must not be writable as a reparse
++// point.
++LocalMemory privateDescriptor() {
++    HANDLE rawToken;
++    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &rawToken))
++        return {};
++    Handle token(rawToken);
++    DWORD bytes = 0;
++    GetTokenInformation(token.get(), TokenUser, nullptr, 0, &bytes);
++    if (!bytes)
++        return {};
++    std::vector<BYTE> buffer(bytes);
++    if (!GetTokenInformation(token.get(), TokenUser, buffer.data(), bytes,
++                             &bytes))
++        return {};
++    LPWSTR sidText = nullptr;
++    if (!ConvertSidToStringSidW(
++                reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid,
++                &sidText))
++        return {};
++    LocalMemory sid(sidText);
++    std::wstring sddl = L"O:" + std::wstring(sidText) + L"D:P(A;;FA;;;" +
++                        sidText + L")(A;;FA;;;SY)";
++    PSECURITY_DESCRIPTOR result = nullptr;
++    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                sddl.c_str(), SDDL_REVISION_1, &result, nullptr))
++        return {};
++    return LocalMemory(result);
++}
++
 +struct Session {
-+    fs::path temp;
-+    FileRef avd{};
-+    std::wstring avdPath;
++    LocalMemory descriptor;
++    Directory avd;
++    Directory temp;
 +    std::mutex mutex;
 +    std::map<std::string, Image> images;
 +};
@@ -320,39 +446,115 @@ index 00000000..ae5fb3cb
 +    return state;
 +}
 +
++Handle createPrivate(const fs::path& path, DWORD access, DWORD share) {
++    if (!session().descriptor) {
++        SetLastError(ERROR_INVALID_SECURITY_DESCR);
++        return {};
++    }
++    SECURITY_ATTRIBUTES security{sizeof(security), session().descriptor.get(),
++                                 FALSE};
++    return open(path, access, share, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT,
++                &security);
++}
++
 +fs::path leasePath(const fs::path& image) {
-+    return fs::path(image).concat(L".lease");
++    return (session().avd.path / image.filename()).concat(L".lease");
 +}
 +
 +constexpr DWORD kAllShares =
 +        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-+constexpr char kMagic[8] = {'M', 'A', 'S', 'T', 'M', 'P', '0', '1'};
 +
-+// A volume-qualified path also distinguishes a mounted clone with the same
-+// filesystem serial and directory index. Resolve the directory actually opened.
-+std::wstring directoryPath(HANDLE dir) {
-+    DWORD length = GetFinalPathNameByHandleW(dir, nullptr, 0, VOLUME_NAME_GUID);
++fs::path finalPath(HANDLE handle, DWORD volume) {
++    DWORD length = GetFinalPathNameByHandleW(handle, nullptr, 0, volume);
 +    if (!length)
 +        return {};
 +    std::wstring path(length, L'\0');
-+    DWORD copied = GetFinalPathNameByHandleW(dir, path.data(), length,
-+                                             VOLUME_NAME_GUID);
++    DWORD copied =
++            GetFinalPathNameByHandleW(handle, path.data(), length, volume);
 +    if (!copied || copied >= length)
 +        return {};
 +    path.resize(copied);
-+    return path;
++    return fs::path(std::move(path));
 +}
 +
-+bool matchesOwnerPath(HANDLE lease) {
-+    const auto& expected = session().avdPath;
-+    std::wstring recorded(expected.size(), L'\0');
-+    DWORD count = static_cast<DWORD>(recorded.size() * sizeof(wchar_t));
++Directory pinDirectory(const std::string& path) {
++    Directory dir;
++    // Resolve junctions once. Subsequent path-based QEMU opens must go back to
++    // this directory even if the caller's TEMP or AVD alias is retargeted.
++    dir.pin = open(fs::u8path(path), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
++                   FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
++    if (dir.pin) {
++        auto dos = finalPath(dir.pin.get(), VOLUME_NAME_DOS).native();
++        if (dos.rfind(LR"(\\?\UNC\)", 0) == 0) {
++            dir.dosPath = LR"(\\)" + dos.substr(8);
++        } else if (dos.size() >= 7 && dos.rfind(LR"(\\?\)", 0) == 0 &&
++                   dos[5] == L':') {
++            dir.dosPath = dos.substr(4);
++        }
++        dir.path = finalPath(dir.pin.get(), VOLUME_NAME_GUID);
++        dir.identified = !dir.path.empty() && fileRef(dir.pin.get(), &dir.id);
++        if (dir.path.empty()) {
++            dir.volume = VOLUME_NAME_DOS;
++            dir.path = finalPath(dir.pin.get(), dir.volume);
++        }
++    }
++    return dir;
++}
++
++// Current-user DPAPI authenticates the contents and this context together.
++// A record read under another leaf, AVD, or TEMP directory cannot authorize a
++// delete.
++std::wstring context(const fs::path& image) {
++    std::wstring key = L"ModAVD temporary images v2";
++    for (const auto& part :
++         {session().avd.path, session().temp.path, image.filename()}) {
++        key.push_back(L'\0');
++        key.append(part.native());
++    }
++    return key;
++}
++
++struct Blob : DATA_BLOB {
++    Blob() : DATA_BLOB{} {}
++    Blob(const Blob&) = delete;
++    Blob& operator=(const Blob&) = delete;
++    ~Blob() { LocalFree(pbData); }
++};
++
++bool writeReceipt(HANDLE lease, const fs::path& image, Receipt& receipt) {
++    auto key = context(image);
++    DATA_BLOB entropy{static_cast<DWORD>(key.size() * sizeof(wchar_t)),
++                      reinterpret_cast<BYTE*>(key.data())};
++    DATA_BLOB plain{sizeof(receipt), reinterpret_cast<BYTE*>(&receipt)};
++    Blob sealed;
 +    DWORD bytes;
++    return CryptProtectData(&plain, nullptr, &entropy, nullptr, nullptr,
++                            CRYPTPROTECT_UI_FORBIDDEN, &sealed) &&
++           WriteFile(lease, sealed.pbData, sealed.cbData, &bytes, nullptr) &&
++           bytes == sealed.cbData && FlushFileBuffers(lease);
++}
++
++bool readReceipt(HANDLE lease, const fs::path& image, Receipt* receipt) {
++    std::array<BYTE, 4096> buffer;
 +    LARGE_INTEGER size;
-+    return GetFileSizeEx(lease, &size) &&
-+           size.QuadPart == static_cast<LONGLONG>(sizeof(Receipt) + count) &&
-+           ReadFile(lease, recorded.data(), count, &bytes, nullptr) &&
-+           bytes == count && recorded == expected;
++    DWORD bytes;
++    if (!GetFileSizeEx(lease, &size) || size.QuadPart <= 0 ||
++        size.QuadPart > static_cast<LONGLONG>(buffer.size()) ||
++        !ReadFile(lease, buffer.data(), static_cast<DWORD>(size.QuadPart),
++                  &bytes, nullptr) ||
++        bytes != size.QuadPart)
++        return false;
++    auto key = context(image);
++    DATA_BLOB entropy{static_cast<DWORD>(key.size() * sizeof(wchar_t)),
++                      reinterpret_cast<BYTE*>(key.data())};
++    DATA_BLOB sealed{bytes, buffer.data()};
++    Blob plain;
++    if (!CryptUnprotectData(&sealed, nullptr, &entropy, nullptr, nullptr,
++                            CRYPTPROTECT_UI_FORBIDDEN, &plain) ||
++        plain.cbData != sizeof(*receipt))
++        return false;
++    memcpy(receipt, plain.pbData, sizeof(*receipt));
++    return true;
 +}
 +
 +void recover(const fs::path& path) {
@@ -361,11 +563,11 @@ index 00000000..ae5fb3cb
 +    auto lease = open(leasePath(path), GENERIC_READ | DELETE, 0, OPEN_EXISTING);
 +    Receipt r{};
 +    Identity id;
-+    DWORD bytes;
-+    if (!lease || !singleRegularFile(lease.get()) ||
-+        !ReadFile(lease.get(), &r, sizeof(r), &bytes, nullptr) ||
-+        bytes != sizeof(r) || memcmp(r.magic, kMagic, sizeof(kMagic)) ||
-+        r.avd != session().avd || !matchesOwnerPath(lease.get()) ||
++    if (!lease ||
++        finalPath(lease.get(), session().avd.volume) != leasePath(path) ||
++        !singleRegularFile(lease.get()) ||
++        !readReceipt(lease.get(), path, &r) || r.avd != session().avd.id ||
++        r.temp != session().temp.id ||
 +        !objectId(lease.get(), FSCTL_GET_OBJECT_ID, &id) ||
 +        !same(id, r.receipt))
 +        return;
@@ -377,41 +579,44 @@ index 00000000..ae5fb3cb
 +        return;
 +    }
 +    if (singleRegularFile(file.get()) &&
++        finalPath(file.get(), session().temp.volume) == path &&
 +        objectId(file.get(), FSCTL_GET_OBJECT_ID, &id) && same(id, r.image) &&
 +        erase(file.get()))
 +        erase(lease.get());
 +}
 +
-+bool reserve(const fs::path& path, bool overlay) {
++enum class Reservation { Ready, Exists, Failed };
++
++Reservation reserve(const fs::path& path, bool overlay) {
 +    // CREATE_NEW is the ownership boundary, including for a cache sidecar.
-+    auto pin = open(path, FILE_READ_ATTRIBUTES,
-+                    FILE_SHARE_READ | FILE_SHARE_WRITE, CREATE_NEW);
++    // Metadata-only handles do not participate in Windows share checks.
++    auto pin = createPrivate(path, FILE_READ_DATA | FILE_READ_ATTRIBUTES,
++                             FILE_SHARE_READ | FILE_SHARE_WRITE);
 +    if (!pin)
-+        return false;
++        return GetLastError() == ERROR_FILE_EXISTS ? Reservation::Exists
++                                                   : Reservation::Failed;
++    if (finalPath(pin.get(), session().temp.volume) !=
++        session().temp.path / path.filename())
++        return Reservation::Failed;
 +    Handle lease;
 +    Receipt r{};
-+    memcpy(r.magic, kMagic, sizeof(kMagic));
-+    r.avd = session().avd;
-+    const auto& avdPath = session().avdPath;
-+    DWORD pathBytes = static_cast<DWORD>(avdPath.size() * sizeof(wchar_t));
-+    if (!avdPath.empty() &&
++    r.avd = session().avd.id;
++    r.temp = session().temp.id;
++    if (session().avd.identified && session().temp.identified &&
 +        objectId(pin.get(), FSCTL_CREATE_OR_GET_OBJECT_ID, &r.image)) {
-+        lease = open(leasePath(path), GENERIC_WRITE | DELETE, 0, CREATE_NEW);
-+        DWORD bytes;
-+        if (lease && !(objectId(lease.get(), FSCTL_CREATE_OR_GET_OBJECT_ID,
-+                                &r.receipt) &&
-+                       WriteFile(lease.get(), &r, sizeof(r), &bytes, nullptr) &&
-+                       bytes == sizeof(r) &&
-+                       WriteFile(lease.get(), avdPath.data(), pathBytes, &bytes,
-+                                 nullptr) &&
-+                       bytes == pathBytes && FlushFileBuffers(lease.get()))) {
++        lease = createPrivate(leasePath(path), GENERIC_WRITE | DELETE, 0);
++        if (lease &&
++            !(finalPath(lease.get(), session().avd.volume) == leasePath(path) &&
++              objectId(lease.get(), FSCTL_CREATE_OR_GET_OBJECT_ID,
++                       &r.receipt) &&
++              writeReceipt(lease.get(), path, r))) {
 +            erase(lease.get());
 +            lease.reset();
 +        }
 +    }
 +    session().images.emplace(path.u8string(),
 +                             Image{std::move(pin), std::move(lease), overlay});
-+    return true;
++    return Reservation::Ready;
 +}
 +
 +bool releaseLocked(const char* path) {
@@ -421,20 +626,20 @@ index 00000000..ae5fb3cb
 +    auto i = images.find(path);
 +    if (i == images.end())
 +        return false;
-+    // Keep the original object alive while upgrading to an exclusive delete
-+    // handle. The temporary pin prevents file-ID reuse if another process
-+    // replaces the name.
++    // Downgrade the no-delete-share pin, then reopen that same kernel object
++    // for deletion. Leave moved files and multiply linked images alone.
 +    HANDLE original = ReOpenFile(i->second.pin.get(), FILE_READ_ATTRIBUTES,
 +                                 kAllShares, 0);
 +    if (original != INVALID_HANDLE_VALUE) {
 +        Handle pin(original);
 +        i->second.pin.reset();
-+        auto file = open(fs::u8path(i->first), FILE_READ_ATTRIBUTES | DELETE, 0,
-+                         OPEN_EXISTING);
-+        FileRef allocated, current;
++        HANDLE writable = ReOpenFile(original, DELETE | FILE_READ_ATTRIBUTES, 0,
++                                     FILE_FLAG_OPEN_REPARSE_POINT);
++        Handle file(writable == INVALID_HANDLE_VALUE ? nullptr : writable);
 +        if (file && singleRegularFile(file.get()) &&
-+            fileRef(original, &allocated) && fileRef(file.get(), &current) &&
-+            allocated == current && erase(file.get())) {
++            finalPath(file.get(), session().temp.volume) ==
++                    (session().temp.path / fs::u8path(i->first).filename()) &&
++            erase(file.get())) {
 +            if (i->second.lease)
 +                erase(i->second.lease.get());
 +        }
@@ -451,43 +656,82 @@ index 00000000..ae5fb3cb
 +
 +void start(const std::string& avd, const std::string& temp) {
 +    auto& s = session();
-+    s.temp = fs::u8path(temp);
-+    auto dir = open(fs::u8path(avd), FILE_READ_ATTRIBUTES, kAllShares,
-+                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS);
-+    if (dir && fileRef(dir.get(), &s.avd))
-+        s.avdPath = directoryPath(dir.get());
++    s.descriptor = privateDescriptor();
++    s.temp = pinDirectory(temp);
++    s.avd = pinDirectory(avd);
 +    std::atexit(releaseAll);
-+    if (s.avdPath.empty())
++    if (!s.avd.identified || !s.temp.identified)
 +        return;
 +    WIN32_FIND_DATAW entry;
-+    HANDLE it =
-+            FindFirstFileW((s.temp / L"modavd-*.tmp*.lease").c_str(), &entry);
++    HANDLE it = FindFirstFileW((s.avd.path / L"m*.tmp*.lease").c_str(), &entry);
 +    if (it == INVALID_HANDLE_VALUE)
 +        return;
 +    do {
 +        if (entry.dwFileAttributes &
 +            (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
 +            continue;
-+        auto path = s.temp / entry.cFileName;
++        auto path = s.temp.path / entry.cFileName;
 +        if (path.extension() == L".lease")
 +            recover(path.replace_extension());
 +    } while (FindNextFileW(it, &entry));
 +    FindClose(it);
 +}
 +
++// mas-37's block layer uses PATH_MAX *bytes* (MAX_PATH on Windows), even for
++// an extended-length path. The cache's raw image and overlay must both fit.
++static fs::path usableDirectory(const std::string& longestLeaf) {
++    const auto& temp = session().temp;
++    for (const auto* dir : {&temp.path, &temp.dosPath}) {
++        if (!dir->empty() && (*dir / longestLeaf).u8string().size() < MAX_PATH)
++            return *dir;
++    }
++    return {};
++}
++
++static std::string compactStem(size_t value) {
++    // Same length as the original GetTempFileName stem. CREATE_NEW arbitrates
++    // collisions; a short name never grants ownership of an existing file.
++    constexpr char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
++    std::string stem = "m000000";
++    for (size_t i = stem.size() - 1; i > 0; --i) {
++        stem[i] = digits[value % 36];
++        value /= 36;
++    }
++    return stem;
++}
++
 +std::string create(const std::string& uuid, Kind kind) {
 +    std::lock_guard<std::mutex> lock(session().mutex);
 +    const char* extension = kind == Kind::DriveOverlay ? ".tmp.qcow2" : ".tmp";
-+    const auto path = session().temp / ("modavd-" + uuid + extension);
-+    if (!reserve(path, false))
++    const char* longest = kind == Kind::HardwareIni ? ".tmp" : ".tmp.qcow2";
++    std::string stem = "modavd-" + uuid;
++    auto dir = usableDirectory(stem + longest);
++    const bool compact = dir.empty();
++    if (compact)
++        dir = usableDirectory(std::string("m000000") + longest);
++    if (dir.empty())
 +        return {};
-+    auto name = path.u8string();
-+    if (kind == Kind::CachePair &&
-+        !reserve(fs::path(path).concat(L".qcow2"), true)) {
++    const size_t seed = std::hash<std::string>{}(uuid);
++    for (unsigned attempt = 0; attempt < (compact ? 32u : 1u); ++attempt) {
++        if (compact)
++            stem = compactStem(seed + attempt);
++        const auto path = dir / (stem + extension);
++        auto result = reserve(path, false);
++        if (result == Reservation::Exists)
++            continue;
++        if (result != Reservation::Ready)
++            return {};
++        auto name = path.u8string();
++        if (kind != Kind::CachePair)
++            return name;
++        result = reserve(fs::path(path).concat(L".qcow2"), true);
++        if (result == Reservation::Ready)
++            return name;
 +        releaseLocked(name.c_str());
-+        return {};
++        if (result != Reservation::Exists)
++            return {};
 +    }
-+    return name;
++    return {};
 +}
 +
 +bool takeReservedOverlay(const char* path) {

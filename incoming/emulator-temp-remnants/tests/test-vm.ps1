@@ -73,7 +73,7 @@ function Finish($run) {
 }
 function Snapshot($phase) {
     $targets = @(Get-ChildItem -LiteralPath $files -File | Where-Object {
-        $_.Name -match '^(TMP|modavd-).*\.tmp(\.qcow2)?$'
+        $_.Name -match '^((TMP|modavd-).*|m[0-9a-z]{6})\.tmp(\.qcow2)?$'
     } | Sort-Object Name)
     $procs = @(Get-CimInstance Win32_Process | Where-Object {
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$Lab\", 'OrdinalIgnoreCase')
