@@ -21,7 +21,7 @@
 // scanner's kPaybackEveryNs cap -- and FlushAndTeardown sets g_shutdown and flushes only when
 // armed; a RECV ENOENT (notification withdrawn before RECV) is counted as an interruption;
 // and the BPF filter program's verdicts (interpreted, no kernel) for
-// fsync/fdatasync/magic/other/arch.
+// fsync (trapped) and fdatasync/magic/other/arch (all allowed).
 #include "../companion/jni/fsync_defer.cc"
 
 #include <cstdarg>
@@ -483,7 +483,7 @@ int main() {
       return d;
     };
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, 0)) == NOTIF);        // plain fsync
-    CHECK(RunFilter(mk(kNrFdatasync, AUDIT_ARCH_X86_64, 0)) == NOTIF);    // fdatasync
+    CHECK(RunFilter(mk(kNrFdatasync, AUDIT_ARCH_X86_64, 0)) == ALLOW);    // fdatasync: not trapped (SQLite)
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, kMagic)) == ALLOW);   // our own payback
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64,
                        (static_cast<uint64_t>(1) << 32) | kMagic)) == NOTIF);  // high bits set

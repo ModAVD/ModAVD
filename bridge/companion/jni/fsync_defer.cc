@@ -20,9 +20,14 @@
  * syscall instruction, not through the libc syscall() it imports; patching the GOT of
  * the translator ("C'", the previous step) was measured to catch nothing. So this
  * module stays out of userspace plumbing and filters the one thing that cannot be
- * bypassed: the host x86_64 fsync(74)/fdatasync(75) system call itself, with a classic
- * seccomp-BPF filter that answers SECCOMP_RET_USER_NOTIF for those two numbers and
- * SECCOMP_RET_ALLOW for everything else (close/rename/etc. are NOT filtered). A
+ * bypassed: the host x86_64 fsync(74) system call itself, with a classic seccomp-BPF
+ * filter that answers SECCOMP_RET_USER_NOTIF for that number and SECCOMP_RET_ALLOW for
+ * everything else -- fdatasync(75), close, rename etc. are NOT filtered. Only fsync,
+ * because on device the download issues nothing but fsync on its *.downloading files
+ * (139k notifications in 50 s, 0 fdatasync) while Android's SQLite issues nothing but
+ * fdatasync (strace: 88 and 30 syncs per run in DELETE and WAL mode, 0 fsync): leaving
+ * fdatasync alone keeps every framework database sync out of the trap entirely, so it can
+ * neither be delayed by the supervisor nor get EINTR from it (see ShouldDefer). A
  * supervisor thread in the same process reads the notifications from the filter's
  * listener fd. The game's arm64 libraries are never modified.
  *
@@ -110,11 +115,13 @@
  *   - A filtered fsync waits in the kernel interruptibly, from the moment it is queued for the
  *     supervisor until our SEND completes it. A signal in that window interrupts it: with an
  *     SA_RESTART handler (or none) the kernel restarts the call transparently; without SA_RESTART
- *     the guest's fsync returns EINTR, which a real ext4 fsync never does, and SQLite does not
- *     retry -> SQLITE_IOERR_FSYNC. Reproduced on device under a signal storm (and none without the
- *     filter or with SA_RESTART; see ShouldDefer). Every interruption is counted, as recv_enoent
- *     (withdrawn before the supervisor read it -- most of them) or send_enoent (after); the sum
- *     bounds the EINTRs the guest can have seen. Watch it on long logged-in runs.
+ *     the guest's fsync returns EINTR, which a real ext4 fsync never does. Reproduced on device
+ *     under a signal storm (none without the filter or with SA_RESTART; see ShouldDefer). Android's
+ *     SQLite syncs with fdatasync, which is not filtered, so it never sees this; a database that
+ *     syncs with fsync (e.g. a SQLite built without HAVE_FDATASYNC) would, and SQLite does not
+ *     retry -> SQLITE_IOERR_FSYNC. Every interruption is counted, as recv_enoent (withdrawn before
+ *     the supervisor read it -- most of them) or send_enoent (after); the sum bounds the EINTRs the
+ *     guest can have seen. Watch it on long logged-in runs.
  */
 
 #include <android/fdsan.h>
@@ -271,8 +278,8 @@ pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;  // guards fd table + matche
 
 // Counters.
 std::atomic<uint64_t> g_c_recv{0};      // notifications received
-std::atomic<uint64_t> g_c_real{0};      // matched (.downloading) fsync/fdatasync seen
-std::atomic<uint64_t> g_c_other{0};     // unmatched fsync/fdatasync seen
+std::atomic<uint64_t> g_c_real{0};      // matched (.downloading) fsync seen
+std::atomic<uint64_t> g_c_other{0};     // unmatched fsync seen
 std::atomic<uint64_t> g_c_foreign{0};   // notification from another pid (forked child)
 std::atomic<uint64_t> g_c_recv_err{0};  // RECV failures other than EINTR/ENOENT
 std::atomic<uint64_t> g_c_send_err{0};  // SEND failures other than ENOENT
@@ -513,15 +520,18 @@ bool DecideDefer(const struct seccomp_notif* req) {
 // The notify path's full decision: observe never defers; active defers only what
 // DecideDefer approves. One function so the call site and the unit test share it.
 //
-// EINTR / SQLite (hardening item 2): the filter traps *every* fsync/fdatasync (classic BPF
-// cannot see the path), so a database fsync is trapped too -- but DecideDefer only ever defers
-// a kMatched *.downloading fd, so a db/SQLite fsync is always CONTINUE'd (run for real), never
-// deferred: "db goes around the deferral" is structural here, not a special case. What CANNOT
-// be removed in a pure-seccomp design is the interruptible wait: from the moment the trapped call
-// is queued until our SEND completes it, a signal whose handler lacks SA_RESTART makes the
-// guest's fsync return EINTR, and SQLite does not retry fsync -> SQLITE_IOERR_FSYNC. An on-device
-// probe (real filter, signal storm on the fsyncing thread) reproduced exactly that: EINTR and
-// SQLITE_IOERR_FSYNC without SA_RESTART, none with SA_RESTART, none without the filter. Linux
+// EINTR / SQLite (hardening item 2): classic BPF cannot see the path, so the filter traps *every*
+// fsync -- but only fsync: fdatasync is not filtered (see WHERE IT HOOKS). Android's SQLite syncs
+// with fdatasync only, so framework databases never enter the trap; that is what removes the
+// SQLITE_IOERR_FSYNC risk for them (the on-device probe: 0 errors with the filter armed). For a
+// trapped fsync that is not a matched download (Java FileDescriptor.sync, a database built to use
+// fsync, ...), DecideDefer never defers: it is always CONTINUE'd (run for real), so "db goes around
+// the deferral" is structural. What CANNOT be removed for a trapped fsync in a pure-seccomp design
+// is the interruptible wait: from the moment the trapped call is queued until our SEND completes
+// it, a signal whose handler lacks SA_RESTART makes the guest's fsync return EINTR (and a SQLite
+// that syncs with fsync does not retry -> SQLITE_IOERR_FSYNC). An on-device probe (real filter,
+// signal storm on the syncing thread) reproduced exactly that while fdatasync was still trapped:
+// EINTR and SQLITE_IOERR_FSYNC without SA_RESTART, none with SA_RESTART, none without the filter. Linux
 // 5.19+ has SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (this 6.1 guest accepts it), but it only covers
 // the wait AFTER the supervisor has received the notification. In the probe it did remove those
 // (send_enoent fell to 0), yet the total EINTR count was no lower -- for a CONTINUE'd fsync most
@@ -529,10 +539,8 @@ bool DecideDefer(const struct seccomp_notif* req) {
 // not used. We keep the window small (cheap CONTINUE decision,
 // one supervisor) and count every interruption: g_c_recv_enoent (withdrawn before RECV, see
 // NoteRecvError) plus g_c_send_enoent (gone at SEND). Their sum is the number of interrupted
-// trapped calls; only those whose handler lacked SA_RESTART became EINTR. Full elimination needs
-// either narrowing the filter to just the syscall the downloader uses, IF on-device shows the
-// downloader and SQLite use different fsync vs fdatasync (untested), or the in-kernel .ko route
-// (no userspace trap at all).
+// trapped calls; only those whose handler lacked SA_RESTART became EINTR. Removing it for fsync
+// too needs the in-kernel .ko route (no userspace trap at all).
 bool ShouldDefer(const struct seccomp_notif* req) {
   return (g_mode == kActive) && DecideDefer(req);
 }
@@ -894,26 +902,20 @@ bool StartThread(void* (*fn)(void*)) {
 // repeated where needed.
 //
 //  0 ld  arch
-//  1 jeq AUDIT_ARCH_X86_64 ? next : ALLOW(6)        (32-bit compat / other arch: allow)
+//  1 jeq AUDIT_ARCH_X86_64 ? next(2) : ALLOW(9)     (32-bit compat / other arch: allow)
 //  2 ld  nr
-//  3 jeq fsync(74)         ? fsync-check(7) : next
-//  4 jeq fdatasync(75)     ? next(5) : ALLOW(6)
-//  5 ret USER_NOTIF                                  (fdatasync)
-//  6 ret ALLOW                                       (everything else)
-//  7 ld  args[1] high
-//  8 jeq 0                 ? next(9) : NOTIF(11)     (high != 0 -> not our magic)
-//  9 ld  args[1] low
-// 10 jeq kMagic            ? ALLOW(12) : next(11)
-// 11 ret USER_NOTIF                                  (ordinary guest fsync)
-// 12 ret ALLOW                                       (our own payback fsync)
+//  3 jeq fsync(74)         ? next(4) : ALLOW(9)      (fdatasync and everything else: allow)
+//  4 ld  args[1] high
+//  5 jeq 0                 ? next(6) : NOTIF(8)      (high != 0 -> not our magic)
+//  6 ld  args[1] low
+//  7 jeq kMagic            ? ALLOW(9) : next(8)
+//  8 ret USER_NOTIF                                  (ordinary guest fsync)
+//  9 ret ALLOW                                       (our own payback fsync, and all else)
 struct sock_filter g_filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 4),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 7),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrFsync, 3, 0),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrFdatasync, 0, 1),
-    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrFsync, 0, 5),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 28),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 2),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),
@@ -921,7 +923,7 @@ struct sock_filter g_filter[] = {
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 };
-static_assert(sizeof(g_filter) / sizeof(g_filter[0]) == 13, "filter layout comment is out of date");
+static_assert(sizeof(g_filter) / sizeof(g_filter[0]) == 10, "filter layout comment is out of date");
 
 // Install the filter on every thread and return the listener fd, or -1 (nothing
 // installed). On TSYNC_ESRCH failure the kernel returns -1/ESRCH instead of a tid; both
