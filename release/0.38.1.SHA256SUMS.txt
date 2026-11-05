@@ -1,0 +1,2 @@
+d395accd952a29502bdd5a7ce2b4897e1ff7da74d167c1865b6865efa01c1671  ModAVD-0.38.1-sources.zip
+72580c22d0c71b83d12d6c6f38bca960ce7dd6a81564afc1c7d8fcfdd467ba01  ModAVD-0.38.1-win-x64.zip
