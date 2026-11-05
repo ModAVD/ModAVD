@@ -315,7 +315,8 @@ function Test-ComponentFiles($C, [string]$Dir) {
             if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $false }
             if ((Get-Item -LiteralPath $p).Length -le 0) { return $false }
         }
-        if ($C.KeyHashes) {
+        # 只有平台工具钉了哈希。系统镜像那一项没有 KeyHashes 这个键，严格模式下直接取会抛异常（ModAVD/ModAVD#118）
+        if ($C.ContainsKey('KeyHashes')) {
             foreach ($entry in $C.KeyHashes.GetEnumerator()) {
                 $hash = (Get-Sha256 (Join-Path $Dir $entry.Key))
                 if ($hash -ine $entry.Value) { return $false }
@@ -327,6 +328,8 @@ function Test-ComponentFiles($C, [string]$Dir) {
         }
         return $true
     } catch {
+        # 出错照旧算不齐全，但把原因记进日志，不再悄悄吞掉
+        Write-Log ('  校验 ' + $C.Name + ' 时出错：' + $_.Exception.Message)
         return $false
     }
 }
