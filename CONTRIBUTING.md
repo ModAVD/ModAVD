@@ -12,7 +12,7 @@
 
 - ModAVD 只有一个维护者，回复可能要几天。大一点的改动请先开 issue 商量，没商量过的大 PR 可能不合。
 - 动手前在 issue 里说一声；issue 已经指派给谁，就是有人在做。
-- 最需要的是在你的电脑上试：装好跑一轮日常，用「复制配置信息.bat」把配置贴到置顶的「兼容性报告」帖。见[游戏实测和兼容性报告](https://modavd.github.io/develop/testing)。
+- 最需要的是在你的电脑上试：装好跑一轮日常，在 [Issues](https://github.com/ModAVD/ModAVD/issues) 新开 issue，并附上「复制配置信息.bat」的输出。见[游戏实测和兼容性报告](https://modavd.github.io/develop/testing)。
 
 ## 报问题
 
