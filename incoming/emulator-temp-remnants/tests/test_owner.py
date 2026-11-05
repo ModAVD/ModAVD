@@ -41,7 +41,7 @@ class OwnerTest(unittest.TestCase):
     def recover(self, avd):
         subprocess.run([self.exe, avd, self.temp, "recover"], check=True, timeout=15)
 
-    def start(self, avd, tag, temp=None, mode="hold"):
+    def start(self, avd, tag, temp=None, mode="hold", ready="ready"):
         p = subprocess.Popen([self.exe, avd, temp or self.temp, tag, mode],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         def close():
@@ -51,7 +51,7 @@ class OwnerTest(unittest.TestCase):
             p.stdin.close()
             p.stdout.close()
         self.addCleanup(close)
-        self.assertEqual(p.stdout.readline().strip(), "ready")
+        self.assertEqual(p.stdout.readline().strip(), ready)
         return p
 
     def stop(self, p, *, crash):
@@ -69,6 +69,49 @@ class OwnerTest(unittest.TestCase):
     def payloads(self, tag):
         return {p: p.read_bytes() for p in self.temp.glob("modavd-" + tag + "*.tmp*")
                 if p.suffix != ".lease"}
+
+    def test_recovery_and_directory_pins_begin_at_first_allocation(self):
+        stale = self.start(self.a, "before-demand")
+        self.stop(stale, crash=True)
+        keep = self.payloads("before-demand")
+        idle = self.start(self.a, "lazy", mode="lazy", ready="idle")
+        # Ordinary drive queries do not scan old receipts or pin directories.
+        for directory in (self.a, self.temp):
+            moved = directory.with_name(directory.name + "-moved")
+            directory.rename(moved)
+            moved.rename(directory)
+        self.assertEqual({p: p.read_bytes() for p in keep}, keep)
+        idle.stdin.write("allocate\n")
+        idle.stdin.flush()
+        self.assertEqual(idle.stdout.readline().strip(), "ready")
+        self.assertFalse(self.payloads("before-demand"))
+        self.assertEqual(len(self.payloads("lazy")), 4)
+        # Initialization/recovery must not rerun when the same process later
+        # allocates another image, as a snapshot share-mode change can do.
+        later = self.start(self.a, "after-demand")
+        self.stop(later, crash=True)
+        keep = self.payloads("after-demand")
+        idle.stdin.write("allocate-again\n")
+        idle.stdin.flush()
+        self.assertEqual(idle.stdout.readline().strip(), "ready-again")
+        self.assertEqual({p: p.read_bytes() for p in keep}, keep)
+        self.assertEqual(len(self.payloads("lazy")), 5)
+        self.stop(idle, crash=False)
+        self.recover(self.a)
+        self.assertFalse(list(self.temp.iterdir()))
+
+    def test_later_allocation_cannot_retarget_session(self):
+        other_avd = Path(str(self.a) + "-other")
+        other_temp = Path(str(self.temp) + "-other")
+        other_avd.mkdir()
+        other_temp.mkdir()
+        p = self.start(self.a, "bound")
+        p.stdin.write("retarget\n")
+        p.stdin.flush()
+        self.assertEqual(p.wait(timeout=15), 0)
+        self.assertFalse(list(other_avd.iterdir()))
+        self.assertFalse(list(other_temp.iterdir()))
+        self.assertFalse(list(self.temp.iterdir()))
 
     def test_process_exit_and_owner_boundaries(self):
         stray = {}

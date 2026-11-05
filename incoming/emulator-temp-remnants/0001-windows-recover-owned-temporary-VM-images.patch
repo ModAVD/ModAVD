@@ -1,22 +1,32 @@
-From a4dbfb3e7fcb81ec195f637b0a85c4cdc3ad8b3a Mon Sep 17 00:00:00 2001
+From 20a561c90c23877366fa80da72e51918d86f0a26 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 13:11:40 +0800
-Subject: [PATCH] windows: pin and recover temporary images allocated by the
- same AVD
+Subject: [PATCH] windows: allocate and recover owned temporary VM files on
+ demand
 
-Create private temporary hardware and drive files with read-data pins in the resolved TEMP directory. Keep a user-sealed receipt in the owning AVD and bind it to the original leaf, directories and file identities. Validate the open handles before deleting; preserve legacy and unproven files.
+Initialize ownership tracking only when creating a temporary hardware INI,
+cache pair or read-only drive overlay. Ordinary drive queries do not pin
+directories or scan receipts. Bind later allocations to the original
+launch paths and retain the session across runtime share-mode changes.
 
-Write the private INI in place and reserve both cache files before QEMU opens them. Keep absolute backing paths within the Windows block layer byte limit and propagate mirror failures.
+Reserve private files with read-data pins in the resolved TEMP directory.
+Keep user-sealed receipts in the owning AVD and validate directory, leaf
+and file identities before deletion. Preserve legacy and unproven files.
+Write private INIs in place, reserve both cache files, and keep backing
+paths within the Windows block layer byte limit.
+
+Retain existing non-Windows and permanent-drive error behavior. Report
+failed Windows temporary allocations through their existing callers.
 ---
  android-qemu2-glue/CMakeLists.txt             |   5 +
- android-qemu2-glue/drive-share.cpp            |  63 ++-
- android-qemu2-glue/main.cpp                   |  34 +-
- android-qemu2-glue/windows-temp-images.cpp    | 463 ++++++++++++++++++
- android-qemu2-glue/windows-temp-images.h      |  16 +
+ android-qemu2-glue/drive-share.cpp            |  45 +-
+ android-qemu2-glue/main.cpp                   |  35 +-
+ android-qemu2-glue/windows-temp-images.cpp    | 476 ++++++++++++++++++
+ android-qemu2-glue/windows-temp-images.h      |  18 +
  .../android/base/files/IniFile.h              |   2 +
  android/emu/files/include/android/utils/ini.h |   1 +
  android/emu/files/src/android/utils/ini.cpp   |   4 +
- 8 files changed, 570 insertions(+), 18 deletions(-)
+ 8 files changed, 581 insertions(+), 5 deletions(-)
  create mode 100644 android-qemu2-glue/windows-temp-images.cpp
  create mode 100644 android-qemu2-glue/windows-temp-images.h
 
@@ -44,21 +54,22 @@ index d6965d2b..316d6006 100644
    target_link_libraries(libqemu2-glue PRIVATE android-webrtc)
  endif()
 diff --git a/android-qemu2-glue/drive-share.cpp b/android-qemu2-glue/drive-share.cpp
-index 83e32059..b4253f4f 100644
+index 83e32059..942d9c8e 100644
 --- a/android-qemu2-glue/drive-share.cpp
 +++ b/android-qemu2-glue/drive-share.cpp
-@@ -28,6 +28,10 @@
+@@ -28,6 +28,11 @@
  #include "android/utils/eintr_wrapper.h"
  #include "android/utils/path.h"
  #include "android/utils/tempfile.h"
 +#include "windows-temp-images.h"
 +#ifdef _WIN32
 +#include "aemu/base/Uuid.h"
++#include "android/base/system/System.h"
 +#endif
  #include "android/utils/file_io.h"
  
  extern "C" {
-@@ -180,8 +184,11 @@ static bool parseQemuOptForQcow2(bool wipeData) {
+@@ -180,8 +185,11 @@ static bool parseQemuOptForQcow2(bool wipeData) {
          }
  
          Error* img_creation_error = NULL;
@@ -72,14 +83,20 @@ index 83e32059..b4253f4f 100644
              const char* fmt = "raw";
              uint8_t buf[BLOCK_PROBE_BUF_SIZE];
              BlockDriver* drv;
-@@ -256,8 +263,15 @@ static std::string initDrivePath(const char* id,
+@@ -256,8 +264,21 @@ static std::string initDrivePath(const char* id,
      if (needCreateTmp(id, shareMode, opts)) {
          // Create a temp qcow2-on-qcow2
          Error* img_creation_error = NULL;
 +#ifdef _WIN32
-+        const auto name = android::tempimages::create(android::base::Uuid::generate().toString(),
++        const auto name = android::tempimages::create(
++                avdInfo_getContentPath(getConsoleAgents()->settings->avdInfo()),
++                android::base::System::get()->getTempDir(),
++                android::base::Uuid::generate().toString(),
 +                android::tempimages::Kind::DriveOverlay);
-+        if (name.empty()) return "";
++        if (name.empty()) {
++            error_report("Could not reserve temporary drive %s", id);
++            return "";
++        }
 +        const char* imgPath = name.c_str();
 +#else
          TempFile* img = tempfile_create_with_ext(".qcow2");
@@ -88,7 +105,7 @@ index 83e32059..b4253f4f 100644
          if (skipInitQCow2) {
              return imgPath;
          }
-@@ -265,7 +279,11 @@ static std::string initDrivePath(const char* id,
+@@ -265,7 +286,11 @@ static std::string initDrivePath(const char* id,
                          sDriveShare->srcImagePaths[id].c_str(), "qcow2",
                          nullptr, -1, 0, true, &img_creation_error);
          if (img_creation_error) {
@@ -100,66 +117,20 @@ index 83e32059..b4253f4f 100644
              error_report("%s", error_get_pretty(img_creation_error));
              error_free(img_creation_error);
              return "";
-@@ -328,17 +346,15 @@ static std::string initDrivePath(const char* id,
- //                  "using qemu-img.");
- //     return -EINVAL;
- // }
--static void mirrorTmpImg(const char* dst, const char* src) {
--    path_copy_file(dst, src);
--    Error *local_err = NULL;
-+static bool mirrorTmpImg(const char* dst, const char* src, Error** errp) {
-+    if (path_copy_file(dst, src) != 0) {
-+        error_setg(errp, "Could not copy '%s' to temporary image '%s'", src, dst);
-+        return false;
-+    }
- 
-     BlockDriverState* bs = bdrv_open(
--            dst, nullptr, nullptr, BDRV_O_RDWR | BDRV_O_NO_BACKING, &local_err);
--    if (!bs) {
--        error_report("Could not open '%s': ", dst);
--        error_free(local_err);
--        return;
--    }
-+            dst, nullptr, nullptr, BDRV_O_RDWR | BDRV_O_NO_BACKING, errp);
-+    if (!bs) return false;
-     char* absPath = nullptr;
-     char* backingFile = getConsoleAgents()->settings->hw()->MIRROR_IMG_FIELD;
-     if (!android::base::PathUtils::isAbsolute(backingFile)) {
-@@ -351,9 +367,11 @@ static void mirrorTmpImg(const char* dst, const char* src) {
-     }
-     D("backing " MIRROR_IMG_NAME ".img path: %s\n", backingFile);
-     int res = bdrv_change_backing_file(bs, backingFile, NULL);
-+    if (res < 0) error_setg_errno(errp, -res, "Could not set backing file for '%s'", dst);
-     D(MIRROR_IMG_NAME " changing backing file result: %d\n", res);
-     bdrv_unref(bs);
-     free(absPath);
-+    return res >= 0;
- }
- 
- // This is for C-style function pointer
-@@ -363,6 +381,10 @@ static int drive_init(void* opaque, QemuOpts* opts, Error** errp) {
+@@ -363,6 +388,12 @@ static int drive_init(void* opaque, QemuOpts* opts, Error** errp) {
      const char* id = opts->id;
      if (id) {
          std::string path = initDrivePath(id, param->shareMode, opts, false);
-+        if (path.empty()) {
-+            error_setg(errp, "Could not prepare drive %s", id);
++#ifdef _WIN32
++        if (needCreateTmp(id, param->shareMode, opts) && path.empty()) {
++            error_setg(errp, "Could not prepare temporary drive %s", id);
 +            return 1;
 +        }
++#endif
          qemu_opt_set(opts, "file", path.c_str(), errp);
          if (needCreateTmp(id, param->shareMode, opts) && param->snapshotName) {
              if (strcmp(id, MIRROR_IMG_NAME)) {
-@@ -389,8 +411,8 @@ static int drive_init(void* opaque, QemuOpts* opts, Error** errp) {
-                     blk_unref(blkNew);
-                 }
-             } else {
--                mirrorTmpImg(path.c_str(),
--                    sDriveShare->srcImagePaths[id].c_str());
-+                if (!mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str(), errp))
-+                    return 1;
-             }
-         }
-     }
-@@ -437,12 +459,21 @@ static int drive_reinit(void* opaque, QemuOpts* opts, Error** errp) {
+@@ -437,10 +468,20 @@ static int drive_reinit(void* opaque, QemuOpts* opts, Error** errp) {
          // read
          const char* oldPath = qemu_opt_get(opts, "file");
          D("Closing old image %s\n", oldPath);
@@ -171,30 +142,17 @@ index 83e32059..b4253f4f 100644
      }
      // Don't write file contents if it needs mirroring
      std::string path = initDrivePath(id, param->shareMode, opts, needsMirror);
-+    if (path.empty()) {
-+        error_setg(errp, "Could not prepare drive %s", id);
++#ifdef _WIN32
++    if (needCreateTmp(id, param->shareMode, opts) && path.empty()) {
++        error_setg(errp, "Could not prepare temporary drive %s", id);
 +        return 1;
 +    }
++#endif
      if (needCreateTmp(id, param->shareMode, opts) && needsMirror) {
--        mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str());
-+        if (!mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str(), errp))
-+            return 1;
+         mirrorTmpImg(path.c_str(), sDriveShare->srcImagePaths[id].c_str());
      }
- 
-     // Mount the drive
-@@ -566,7 +597,9 @@ extern "C" int android_drive_share_init(bool wipe_data,
-             "w", android::base::FileShare::Write, 5000);
-     }
-     sDriveShare->blockDefaultType = blockDefaultType;
--    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init, &param, NULL)) {
-+    Error* error = nullptr;
-+    if (qemu_opts_foreach(qemu_find_opts("drive"), drive_init, &param, &error)) {
-+        if (error) error_report_err(error);
-         if (baseSnapshotNameFile) {
-             fclose(baseSnapshotNameFile);
-         }
 diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
-index 646d0a09..c8cbbfc7 100644
+index 646d0a09..68aa7112 100644
 --- a/android-qemu2-glue/main.cpp
 +++ b/android-qemu2-glue/main.cpp
 @@ -76,6 +76,7 @@
@@ -222,27 +180,26 @@ index 646d0a09..c8cbbfc7 100644
 +    // A private, newly reserved INI must keep its file identity for crash recovery.
 +    int saveError = temporary ? iniFile_writeToReservedFileClean(hwIni.get(), coreHwIniPath)
 +                              : iniFile_saveToFileClean(hwIni.get(), coreHwIniPath);
-+    if (saveError != 0) {
++    if (saveError < 0) {
          derror("Could not write hardware.ini to %s: %s", coreHwIniPath,
                 strerror(errno));
          return 2;
-@@ -2025,6 +2029,10 @@ extern "C" int main(int argc, char** argv) {
+@@ -2025,6 +2029,7 @@ extern "C" int main(int argc, char** argv) {
      }
      // Lock the AVD as soon as we can to make sure other copy won't do anything
      // stupid before detecting that the AVD is already in use.
 +    std::string temporaryHwIni;
-+#ifdef _WIN32
-+    android::tempimages::start(avdInfo_getContentPath(avd), System::get()->getTempDir());
-+#endif
      const char* coreHwIniPath = avdInfo_getCoreHwIniPath(avd);
  
      // Before that, check for a snapshot lock to see if there is any pending
-@@ -2041,8 +2049,18 @@ extern "C" int main(int argc, char** argv) {
+@@ -2041,8 +2046,20 @@ extern "C" int main(int argc, char** argv) {
          return 1;
      }
      if (opts->read_only) {
 +#ifdef _WIN32
-+        temporaryHwIni = android::tempimages::create(android::base::Uuid::generate().toString(),
++        temporaryHwIni = android::tempimages::create(
++                avdInfo_getContentPath(avd), System::get()->getTempDir(),
++                android::base::Uuid::generate().toString(),
 +                android::tempimages::Kind::HardwareIni);
 +        if (temporaryHwIni.empty()) {
 +            derror("Could not reserve temporary hardware configuration");
@@ -256,12 +213,14 @@ index 646d0a09..c8cbbfc7 100644
          is_multi_instance = true;
          opts->no_snapshot_save = true;
          args.add("-read-only");
-@@ -2804,8 +2822,18 @@ extern "C" int main(int argc, char** argv) {
+@@ -2804,8 +2821,20 @@ extern "C" int main(int argc, char** argv) {
      // Make sure there's a temp cache partition if there wasn't a permanent one
      if ((!hw->disk_cachePartition_path ||
           strcmp(hw->disk_cachePartition_path, "") == 0)) {
 +#ifdef _WIN32
-+        const auto cache = android::tempimages::create(android::base::Uuid::generate().toString(),
++        const auto cache = android::tempimages::create(
++                avdInfo_getContentPath(avd), System::get()->getTempDir(),
++                android::base::Uuid::generate().toString(),
 +                android::tempimages::Kind::CachePair);
 +        if (cache.empty()) {
 +            derror("Could not reserve temporary cache image and overlay");
@@ -275,7 +234,7 @@ index 646d0a09..c8cbbfc7 100644
          createEmptyCacheFile = true;
      }
  
-@@ -3742,7 +3770,7 @@ extern "C" int main(int argc, char** argv) {
+@@ -3742,7 +3771,7 @@ extern "C" int main(int argc, char** argv) {
      android_report_session_phase(ANDROID_SESSION_PHASE_INITGENERAL);
  
      // Generate a hardware-qemu.ini for this AVD.
@@ -286,10 +245,10 @@ index 646d0a09..c8cbbfc7 100644
  
 diff --git a/android-qemu2-glue/windows-temp-images.cpp b/android-qemu2-glue/windows-temp-images.cpp
 new file mode 100644
-index 00000000..f678e6ac
+index 00000000..7cc6a587
 --- /dev/null
 +++ b/android-qemu2-glue/windows-temp-images.cpp
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,476 @@
 +// Copyright 2026 Ji Mao Cai
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include "windows-temp-images.h"
@@ -435,6 +394,9 @@ index 00000000..f678e6ac
 +}
 +
 +struct Session {
++    bool initialized = false;
++    std::string avdInput;
++    std::string tempInput;
 +    LocalMemory descriptor;
 +    Directory avd;
 +    Directory temp;
@@ -655,9 +617,7 @@ index 00000000..f678e6ac
 +    while (!session().images.empty())
 +        releaseLocked(session().images.begin()->first.c_str());
 +}
-+}  // namespace
-+
-+void start(const std::string& avd, const std::string& temp) {
++void initialize(const std::string& avd, const std::string& temp) {
 +    auto& s = session();
 +    s.descriptor = privateDescriptor();
 +    s.temp = pinDirectory(temp);
@@ -679,6 +639,7 @@ index 00000000..f678e6ac
 +    } while (FindNextFileW(it, &entry));
 +    FindClose(it);
 +}
++}  // namespace
 +
 +// mas-37's block layer uses PATH_MAX *bytes* (MAX_PATH on Windows), even for
 +// an extended-length path. The cache's raw image and overlay must both fit.
@@ -703,8 +664,19 @@ index 00000000..f678e6ac
 +    return stem;
 +}
 +
-+std::string create(const std::string& uuid, Kind kind) {
-+    std::lock_guard<std::mutex> lock(session().mutex);
++std::string create(const std::string& avd, const std::string& temp,
++                   const std::string& uuid, Kind kind) {
++    auto& s = session();
++    std::lock_guard<std::mutex> lock(s.mutex);
++    if (!s.initialized) {
++        s.initialized = true;
++        s.avdInput = avd;
++        s.tempInput = temp;
++        initialize(avd, temp);
++    } else if (s.avdInput != avd || s.tempInput != temp) {
++        // Never redirect a live session to a different root or TEMP.
++        return {};
++    }
 +    const char* extension = kind == Kind::DriveOverlay ? ".tmp.qcow2" : ".tmp";
 +    const char* longest = kind == Kind::HardwareIni ? ".tmp" : ".tmp.qcow2";
 +    std::string stem = "modavd-" + uuid;
@@ -755,10 +727,10 @@ index 00000000..f678e6ac
 +#endif
 diff --git a/android-qemu2-glue/windows-temp-images.h b/android-qemu2-glue/windows-temp-images.h
 new file mode 100644
-index 00000000..2295e5e2
+index 00000000..1f783d47
 --- /dev/null
 +++ b/android-qemu2-glue/windows-temp-images.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,18 @@
 +// Copyright 2026 Ji Mao Cai
 +// SPDX-License-Identifier: GPL-2.0-only
 +#pragma once
@@ -767,10 +739,12 @@ index 00000000..2295e5e2
 +#include <string>
 +
 +namespace android::tempimages {
-+// Call once before setting up the QEMU drives.
-+void start(const std::string& avd, const std::string& temp);
 +enum class Kind { HardwareIni, DriveOverlay, CachePair };
-+std::string create(const std::string& uuid, Kind kind);
++// The first allocation pins the launch directories and recovers this AVD's
++// receipts. Later allocations must use the same launch paths. Queries and
++// releases alone never initialize recovery or pin a directory.
++std::string create(const std::string& avd, const std::string& temp,
++                   const std::string& uuid, Kind kind);
 +bool takeReservedOverlay(const char* path);
 +bool release(const char* path);
 +}  // namespace android::tempimages

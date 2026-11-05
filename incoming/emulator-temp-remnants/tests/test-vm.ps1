@@ -111,10 +111,11 @@ try {
     if ($params[0] -ne '-avd' -or $params[1] -ne 'mas_0' -or
         "$PortBase,$($PortBase+1)" -notin $params) { throw 'Unexpected recorded Manager arguments' }
     $pending = @()
-    foreach ($mode in 'ro-normal','ro-crash','cache-normal','cache-crash','config-cache-normal','default-normal') {
+    foreach ($mode in 'ro-normal','ro-crash','cache-normal','cache-crash','default-after-crash','config-cache-normal','default-normal') {
         $before = @(Snapshot "$mode-before")
         $ro = $mode.StartsWith('ro')
         $cache = $mode.StartsWith('cache')
+        $forceExit = $mode -in @('ro-crash','cache-crash')
         $configCache = $mode -eq 'config-cache-normal'
         $temporaryCache = $cache -or $configCache
         $configPath = "$avd\mas_0.avd\config.ini"
@@ -151,8 +152,13 @@ try {
             $new = @($during | Where-Object { $_ -notin $before })
             $count = if ($ro) {4} elseif ($temporaryCache) {2} else {0}
             if ($new.Count -ne $count) { throw "$mode created $($new.Count), expected $count" }
-            if ($Patched -and @($pending | Where-Object {$_ -in $during}).Count) { throw 'Recovery missed a file' }
-            if ($mode.EndsWith('crash')) {
+            if ($Patched -and $count -gt 0 -and @($pending | Where-Object {$_ -in $during}).Count) {
+                throw 'Recovery missed a file'
+            }
+            if ($count -eq 0 -and @($pending | Where-Object {$_ -notin $during}).Count) {
+                throw 'A launch without temporary files performed recovery'
+            }
+            if ($forceExit) {
                 $guest.Kill()
             } else {
                 Device @('shell','sync') "$mode-sync"
@@ -160,12 +166,16 @@ try {
             }
             Finish $run
             $after = @(Snapshot "$mode-after")
-            $pending = @($new | Where-Object { $_ -in $after })
-            $expected = if ($mode.EndsWith('crash')) {$count} elseif ($temporaryCache -and !$Patched) {1} else {0}
-            if ($pending.Count -ne $expected) { throw "$mode left $($pending.Count), expected $expected" }
-            if ($temporaryCache -and !$Patched -and $expected -eq 1 -and !$pending[0].EndsWith('.qcow2')) {
+            $leftNew = @($new | Where-Object { $_ -in $after })
+            $expected = if ($forceExit) {$count} elseif ($temporaryCache -and !$Patched) {1} else {0}
+            if ($leftNew.Count -ne $expected) { throw "$mode left $($leftNew.Count), expected $expected" }
+            if ($temporaryCache -and !$Patched -and $expected -eq 1 -and !$leftNew[0].EndsWith('.qcow2')) {
                 throw 'Unexpected cache remnant'
             }
+            if ($count -eq 0 -and @($pending | Where-Object {$_ -notin $after}).Count) {
+                throw 'A launch without temporary files removed previous remnants'
+            }
+            $pending = @(($pending + $new) | Where-Object {$_ -in $after} | Select-Object -Unique)
         } finally {
             if ($run -and !$run.p.HasExited) {
                 # Graceful cleanup of the privately addressed VM on any failed assertion.
