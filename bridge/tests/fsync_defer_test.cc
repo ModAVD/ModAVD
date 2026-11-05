@@ -13,14 +13,18 @@
 // (unknown) fsync, an unmatched fd, a foreign (forked-child) pid, and an fd whose file
 // changed; payback pays a dirty slot once per cap, is a no-op when paid recently, and (via
 // the handle dup'd at match time) still flushes a file after it is renamed out of
-// *.downloading; an idle fully-paid slot is retired; a full matched list never defers;
+// *.downloading -- each payback really issues one fsync on the private handle with the magic
+// (syscall() is interposed below to see it); an idle fully-paid slot is retired, but a slot
+// that still owes a payback is never retired; a full matched list never defers;
 // AccountFsync counts a foreign pid; ForgetAfterFork wipes the tables; exit-flush
 // (FlushAllDeferred / FlushAndTeardown) flushes every unpaid slot immediately -- ignoring the
 // scanner's kPaybackEveryNs cap -- and FlushAndTeardown sets g_shutdown and flushes only when
-// armed; and the BPF filter program's verdicts (interpreted, no kernel) for
+// armed; a RECV ENOENT (notification withdrawn before RECV) is counted as an interruption;
+// and the BPF filter program's verdicts (interpreted, no kernel) for
 // fsync/fdatasync/magic/other/arch.
 #include "../companion/jni/fsync_defer.cc"
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +33,42 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+// The module issues its payback / exit-flush fsync as syscall(__NR_fsync, handle, kMagic).
+// The counters alone cannot tell whether that call really went out, with the magic (without it
+// the filter would trap our own payback and, on a matched file, defer it again), on the right
+// handle. So this executable interposes libc's syscall(): every fsync it sees is recorded, then
+// performed for real with the raw instruction. References inside this executable bind here.
+namespace {
+struct SysFsync {
+  long fd;
+  long arg1;
+};
+SysFsync g_sys_fsync[64];
+int g_sys_fsync_n = 0;
+}  // namespace
+
+extern "C" long syscall(long nr, ...) {
+  va_list ap;
+  va_start(ap, nr);
+  const long a0 = va_arg(ap, long), a1 = va_arg(ap, long), a2 = va_arg(ap, long);
+  const long a3 = va_arg(ap, long), a4 = va_arg(ap, long), a5 = va_arg(ap, long);
+  va_end(ap);
+  if (nr == __NR_fsync && g_sys_fsync_n < 64) g_sys_fsync[g_sys_fsync_n++] = {a0, a1};
+  long ret;
+  register long r10 __asm__("r10") = a3;
+  register long r8 __asm__("r8") = a4;
+  register long r9 __asm__("r9") = a5;
+  __asm__ volatile("syscall"
+                   : "=a"(ret)
+                   : "a"(nr), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                   : "rcx", "r11", "memory");
+  if (ret < 0 && ret > -4096) {
+    errno = static_cast<int>(-ret);
+    return -1;
+  }
+  return ret;
+}
 
 namespace {
 int failures = 0;
@@ -123,6 +163,14 @@ void SetUp(int mode) {
   g_c_payback_err.store(0);
   g_shutdown.store(false);
   g_installed.store(false);
+  g_sys_fsync_n = 0;
+}
+
+// The last fsync syscall() saw went to `fd` and carried the payback magic.
+bool LastFsyncWasMagicOn(int fd) {
+  if (g_sys_fsync_n == 0) return false;
+  const SysFsync& s = g_sys_fsync[g_sys_fsync_n - 1];
+  return s.fd == fd && s.arg1 == static_cast<long>(kMagic);
 }
 }  // namespace
 
@@ -172,6 +220,8 @@ int main() {
     const int fd = OpenUnder(dir, match_rel);
     CHECK(fd >= 0);
     CHECK(Classify(fd, nullptr, 0) == kMatched);
+    CHECK(g_fds[fd].matched_idx.load() == -1);  // observe takes no payback slot ...
+    for (int i = 0; i < kMaxMatched; ++i) CHECK(g_matched[i].payback_fd.load() == -1);  // ... holds no handle
     const struct seccomp_notif req = MakeReq(fd, me);
     CHECK(!ShouldDefer(&req));  // observe: always continue
     close(fd);
@@ -224,18 +274,25 @@ int main() {
     CHECK(Classify(fd, nullptr, 0) == kMatched);
     const int idx = g_fds[fd].matched_idx.load();
     CHECK(idx >= 0);
-    CHECK(g_matched[idx].payback_fd.load() >= 0);  // a private handle was dup'd at match time
+    const int handle = g_matched[idx].payback_fd.load();
+    CHECK(handle >= 0);                      // a private handle was dup'd at match time
+    CHECK(handle != fd);                     // ... and it is not the game's own fd
     const long now = NowNs();
     g_matched[idx].deferred_ns.store(now);   // one unpaid deferred fsync
     g_matched[idx].paid_ns.store(0);
     CHECK(PaybackSlotIfDue(idx, now));       // paid=0 -> due
     CHECK(g_c_payback.load() == 1);          // real fsync ran on the file
     CHECK(g_c_payback_err.load() == 0);
+    CHECK(g_sys_fsync_n == 1);               // exactly one fsync went out ...
+    CHECK(LastFsyncWasMagicOn(handle));      // ... on our handle, with the magic the filter lets by
     CHECK(!PaybackSlotIfDue(idx, now));      // deferred <= paid now -> nothing unpaid
     g_matched[idx].deferred_ns.store(now + 1);               // new defer, paid too recently
     CHECK(!PaybackSlotIfDue(idx, now + 1));
+    CHECK(g_sys_fsync_n == 1);               // neither no-op issued an fsync
     CHECK(PaybackSlotIfDue(idx, now + kPaybackEveryNs + 1));  // cap elapsed -> due again
     CHECK(g_c_payback.load() == 2);
+    CHECK(g_sys_fsync_n == 2);
+    CHECK(LastFsyncWasMagicOn(handle));
     // 96-2: after the download renames the file out of *.downloading, the deferred tail is
     // STILL flushed through the handle dup'd at match time -- not lost, not an error.
     const long paid2 = now + kPaybackEveryNs + 1;  // == current paid_ns
@@ -243,9 +300,28 @@ int main() {
     MakeDirs(dir + "/files/Bundles");
     CHECK(rename(full.c_str(), (dir + "/files/Bundles/renamed.ab").c_str()) == 0);
     g_matched[idx].deferred_ns.store(paid2 + 1);
+    close(fd);                               // the download closes its own fd after the rename
     CHECK(PaybackSlotIfDue(idx, paid2 + kPaybackEveryNs + 1));
     CHECK(g_c_payback.load() == 3);          // held handle flushed the renamed file
     CHECK(g_c_payback_err.load() == 0);
+    CHECK(LastFsyncWasMagicOn(handle));
+  }
+
+  // --- retire never frees a slot that still owes a payback, however long it is idle -----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const long now = NowNs();
+    g_matched[idx].paid_ns.store(now);
+    g_matched[idx].deferred_ns.store(now + 1);       // one deferred fsync after the last payback
+    RetireSlotIfIdle(idx, now + 10 * kRetireIdleNs);  // long idle, but the tail is unpaid
+    CHECK(g_matched[idx].fd == fd);                  // kept
+    CHECK(g_matched[idx].payback_fd.load() >= 0);    // handle kept for the payback
+    CHECK(g_fds[fd].state.load() == kMatched);
     close(fd);
   }
 
@@ -333,9 +409,12 @@ int main() {
     FlushAllDeferred();                         // exit flush ignores the cap -> flushes it anyway
     CHECK(g_c_payback.load() == 1);
     CHECK(g_c_payback_err.load() == 0);
+    CHECK(g_sys_fsync_n == 1);
+    CHECK(LastFsyncWasMagicOn(g_matched[idx].payback_fd.load()));  // really issued, with the magic
     CHECK(g_matched[idx].paid_ns.load() >= now + 1);  // marked paid
     FlushAllDeferred();                         // a clean slot (deferred <= paid) is left alone
     CHECK(g_c_payback.load() == 1);             // nothing new flushed
+    CHECK(g_sys_fsync_n == 1);
     close(fd);
   }
 
@@ -369,13 +448,27 @@ int main() {
     FlushAndTeardown();            // not armed -> no-op: no shutdown, no flush
     CHECK(!g_shutdown.load());
     CHECK(g_c_payback.load() == 0);
+    CHECK(g_sys_fsync_n == 0);
     g_installed.store(true);
     FlushAndTeardown();            // armed -> sets shutdown and flushes the unpaid slot
     CHECK(g_shutdown.load());
     CHECK(g_c_payback.load() == 1);
+    CHECK(LastFsyncWasMagicOn(g_matched[idx].payback_fd.load()));
     g_installed.store(false);      // reset the global for any later case
     g_shutdown.store(false);
     close(fd);
+  }
+
+  // --- RECV errors: a withdrawn notification (ENOENT) is counted as an interruption, our own
+  // EINTR is just retried, anything else is a real error that backs off --------------------
+  {
+    const uint64_t enoent0 = g_c_recv_enoent.load();
+    CHECK(!NoteRecvError(ENOENT));               // retry at once ...
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);  // ... and counted
+    CHECK(!NoteRecvError(EINTR));                // retry, not counted as an interruption
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);
+    CHECK(NoteRecvError(EBADF));                 // listener broken: count/log/back off path
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);
   }
 
   // --- the BPF filter program's verdicts (interpreted; checks offsets + jumps) ------

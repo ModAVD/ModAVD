@@ -107,10 +107,14 @@
  *     (set here if the process lacked it — to be confirmed on device); /proc/<pid>/fd has
  *     one >= 900 anon_inode:[seccomp notify]; /proc/<pid>/task has 2-3 extra threads named
  *     like the process (supervisor, watchdog, and in active the scanner).
- *   - A filtered fsync waits in the kernel interruptibly; a signal delivered without
- *     SA_RESTART can make the guest's fsync return EINTR, which a real ext4 fsync would
- *     not. The window is microseconds, but SQLite does not retry and would surface
- *     SQLITE_IOERR_FSYNC; watch for it on long logged-in runs.
+ *   - A filtered fsync waits in the kernel interruptibly, from the moment it is queued for the
+ *     supervisor until our SEND completes it. A signal in that window interrupts it: with an
+ *     SA_RESTART handler (or none) the kernel restarts the call transparently; without SA_RESTART
+ *     the guest's fsync returns EINTR, which a real ext4 fsync never does, and SQLite does not
+ *     retry -> SQLITE_IOERR_FSYNC. Reproduced on device under a signal storm (and none without the
+ *     filter or with SA_RESTART; see ShouldDefer). Every interruption is counted, as recv_enoent
+ *     (withdrawn before the supervisor read it -- most of them) or send_enoent (after); the sum
+ *     bounds the EINTRs the guest can have seen. Watch it on long logged-in runs.
  */
 
 #include <android/fdsan.h>
@@ -273,6 +277,7 @@ std::atomic<uint64_t> g_c_foreign{0};   // notification from another pid (forked
 std::atomic<uint64_t> g_c_recv_err{0};  // RECV failures other than EINTR/ENOENT
 std::atomic<uint64_t> g_c_send_err{0};  // SEND failures other than ENOENT
 std::atomic<uint64_t> g_c_send_enoent{0};  // SEND found the notification already gone
+std::atomic<uint64_t> g_c_recv_enoent{0};  // RECV found none left: one was withdrawn before we read it
 std::atomic<uint64_t> g_c_stuck{0};     // watchdog stuck reports
 std::atomic<uint64_t> g_c_deferred{0};     // (active) fsync answered val=0, real call skipped
 std::atomic<uint64_t> g_c_payback{0};      // (active) payback fsyncs issued by the scanner
@@ -512,21 +517,42 @@ bool DecideDefer(const struct seccomp_notif* req) {
 // cannot see the path), so a database fsync is trapped too -- but DecideDefer only ever defers
 // a kMatched *.downloading fd, so a db/SQLite fsync is always CONTINUE'd (run for real), never
 // deferred: "db goes around the deferral" is structural here, not a special case. What CANNOT
-// be removed in a pure-seccomp design is the EINTR window: while the guest thread waits for our
-// SEND, a signal without SA_RESTART makes the trapped fsync return EINTR to the guest, and
-// SQLite does not retry fsync -> SQLITE_IOERR_FSYNC. The kernel makes the USER_NOTIF wait
-// interruptible and offers no "uninterruptible"/auto-restart filter flag on mainline / this
-// kernel, and BPF cannot tell a db fsync from a download fsync by path to spare it the trap. We
-// only minimize the window (the CONTINUE decision is cheap; one fast supervisor); g_c_send_enoent
-// already counts how often a trapped fsync was interrupted/gone before SEND -- the on-device
-// EINTR exposure. Full elimination needs either narrowing the filter to just the syscall the
-// downloader uses, IF on-device shows the downloader and SQLite use different fsync vs fdatasync
-// (untested), or the in-kernel .ko route (no userspace trap at all).
+// be removed in a pure-seccomp design is the interruptible wait: from the moment the trapped call
+// is queued until our SEND completes it, a signal whose handler lacks SA_RESTART makes the
+// guest's fsync return EINTR, and SQLite does not retry fsync -> SQLITE_IOERR_FSYNC. An on-device
+// probe (real filter, signal storm on the fsyncing thread) reproduced exactly that: EINTR and
+// SQLITE_IOERR_FSYNC without SA_RESTART, none with SA_RESTART, none without the filter. Linux
+// 5.19+ has SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (this 6.1 guest accepts it), but it only covers
+// the wait AFTER the supervisor has received the notification. In the probe it did remove those
+// (send_enoent fell to 0), yet the total EINTR count was no lower -- for a CONTINUE'd fsync most
+// interruptions land before RECV anyway, while the supervisor is still being woken -- so it is
+// not used. We keep the window small (cheap CONTINUE decision,
+// one supervisor) and count every interruption: g_c_recv_enoent (withdrawn before RECV, see
+// NoteRecvError) plus g_c_send_enoent (gone at SEND). Their sum is the number of interrupted
+// trapped calls; only those whose handler lacked SA_RESTART became EINTR. Full elimination needs
+// either narrowing the filter to just the syscall the downloader uses, IF on-device shows the
+// downloader and SQLite use different fsync vs fdatasync (untested), or the in-kernel .ko route
+// (no userspace trap at all).
 bool ShouldDefer(const struct seccomp_notif* req) {
   return (g_mode == kActive) && DecideDefer(req);
 }
 
 // ---- supervisor thread --------------------------------------------------------
+
+// NOTIF_RECV failed with errno e; returns true only for a real error (count, log, back off).
+// ENOENT: the kernel's semaphore said a notification was queued but none is left to read -- it
+// was withdrawn before we got to it, i.e. the trapped fsync was interrupted by a signal (or its
+// thread died) while still waiting for the supervisor. Such a call never reaches SEND, so this is
+// the part of the interruption count that g_c_send_enoent cannot see (on device, most of it).
+// EINTR: our own thread was interrupted; just retry.
+bool NoteRecvError(int e) {
+  if (e == EINTR) return false;
+  if (e == ENOENT) {
+    g_c_recv_enoent.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  return true;
+}
 
 void* SupervisorMain(void*) {
   // Park until install() has either handed us the listener or given up.
@@ -588,7 +614,7 @@ void* SupervisorMain(void*) {
     }
     if (ioctl(listener, SECCOMP_IOCTL_NOTIF_RECV, req) != 0) {
       const int e = errno;
-      if (e == EINTR || e == ENOENT) continue;  // transient: retry at once
+      if (!NoteRecvError(e)) continue;  // transient (EINTR / withdrawn ENOENT): retry at once
       // Anything else (listener closed/invalid, ...): count, log sparsely, back off a
       // little so a persistent error cannot spin, and keep looping.
       const uint64_t n = g_c_recv_err.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -669,13 +695,15 @@ void* WatchdogMain(void*) {
     if (now - last_summary >= kSummaryEveryNs) {
       last_summary = now;
       FD_LOGI("summary pkg=%s mode=%s recv=%llu real=%llu other=%llu foreign=%llu deferred=%llu "
-              "payback=%llu payback_err=%llu recv_err=%llu send_err=%llu send_enoent=%llu stuck=%llu idle_ms=%ld",
+              "payback=%llu payback_err=%llu recv_err=%llu send_err=%llu recv_enoent=%llu send_enoent=%llu "
+              "stuck=%llu idle_ms=%ld",
               g_pkg, g_mode == kActive ? "active" : "observe",
               (unsigned long long)g_c_recv.load(), (unsigned long long)g_c_real.load(),
               (unsigned long long)g_c_other.load(), (unsigned long long)g_c_foreign.load(),
               (unsigned long long)g_c_deferred.load(), (unsigned long long)g_c_payback.load(),
               (unsigned long long)g_c_payback_err.load(), (unsigned long long)g_c_recv_err.load(),
-              (unsigned long long)g_c_send_err.load(), (unsigned long long)g_c_send_enoent.load(),
+              (unsigned long long)g_c_send_err.load(), (unsigned long long)g_c_recv_enoent.load(),
+              (unsigned long long)g_c_send_enoent.load(),
               (unsigned long long)g_c_stuck.load(),
               (now - g_last_recv_ns.load(std::memory_order_relaxed)) / 1000000L);
     }
