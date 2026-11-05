@@ -41,7 +41,7 @@ def load_rule_specs(private_file):
 
 def use_rules(private_file):
     """Build the matchers from the public rules plus `private_file` (None: public rules only)."""
-    global RULE_SPECS, PRIVATE_RULES_LOADED, PRIVATE_RULES_FILE, RULES, ANY_RULE, ASCII_CANDIDATE, U16_CANDIDATE, NEEDLES
+    global RULE_SPECS, PRIVATE_RULES_LOADED, PRIVATE_RULES_FILE, RULES, ANY_RULE, ASCII_CANDIDATE, U16_CANDIDATE, UTF8_PREFIX, NEEDLES
     RULE_SPECS, PRIVATE_RULES_LOADED = load_rule_specs(private_file)
     PRIVATE_RULES_FILE = Path(private_file) if private_file is not None else None
     RULES = {name: re.compile(pattern, re.I) for name, (pattern, _) in RULE_SPECS.items()}
@@ -50,10 +50,62 @@ def use_rules(private_file):
     # UTF-16 prefix prefilter; full matching still uses RULES on decoded printable strings.
     PREFIXES = [prefix for _, prefixes in RULE_SPECS.values() for prefix in prefixes]
     U16_CANDIDATE = re.compile(b"|".join(re.escape(s.encode("utf-16le")) for s in PREFIXES), re.I)
+    UTF8_PREFIX = re.compile(b"|".join(re.escape(s.encode("ascii")) for s in PREFIXES), re.I)
     NEEDLES = [s.lower().encode(e) for s in PREFIXES for e in ["ascii", "utf-16le"]]
 
 
 use_rules(os.environ.get(PRIVATE_RULES_ENV) or None)
+
+
+def printable_end(data, pos, encoding):
+    """Return the next complete printable character boundary, or None."""
+    if encoding == "utf-8":
+        first = data[pos]
+        width = (1 if first < 0x80 else 2 if 0xc2 <= first <= 0xdf else
+                 3 if 0xe0 <= first <= 0xef else 4 if 0xf0 <= first <= 0xf4 else 0)
+    else:
+        if pos + 2 > len(data):
+            return None
+        unit = int.from_bytes(data[pos:pos+2], "little")
+        width = 4 if 0xd800 <= unit <= 0xdbff else 2
+    if not width or pos + width > len(data):
+        return None
+    try:
+        char = data[pos:pos+width].decode(encoding)
+    except UnicodeDecodeError:
+        return None
+    return pos + width if char.isprintable() else None
+
+
+def unicode_strings(data):
+    # Keep legacy ASCII candidates and allowlist hashes. Add only strings
+    # whose rule match contains non-ASCII text, using complete characters.
+    # Keep UTF-16LE only; a BE pass would duplicate shifted ASCII LE strings.
+    for rx, encoding, step in [(UTF8_PREFIX, "utf-8", 1), (U16_CANDIDATE, "utf-16le", 2)]:
+        previous_end = [-1] * step
+        for match in rx.finditer(data):
+            lo, hi = match.span()
+            alignment = lo % step
+            if lo < previous_end[alignment]:
+                continue
+            while lo >= step:
+                starts = [lo-step] if step == 2 else range(max(0, lo-4), lo)
+                start = next((p for p in starts if printable_end(data, p, encoding) == lo), None)
+                if start is None and step == 2 and lo >= 4:
+                    start = lo-4 if printable_end(data, lo-4, encoding) == lo else None
+                if start is None:
+                    break
+                lo = start
+            while hi < len(data):
+                end = printable_end(data, hi, encoding)
+                if end is None:
+                    break
+                hi = end
+            # Overlapping strings suppress only prefixes on the same UTF-16 alignment.
+            previous_end[alignment] = hi
+            text = data[lo:hi].decode(encoding)
+            if any(any(ord(c) > 127 for c in match.group()) for match in ANY_RULE.finditer(text)):
+                yield text
 
 
 def strings(data):
@@ -74,7 +126,17 @@ def strings(data):
                     hi += 2
             if (lo, hi) not in seen:
                 seen.add((lo, hi))
-                yield data[lo:hi].decode(encoding)
+                try:
+                    yield data[lo:hi].decode(encoding)
+                except UnicodeDecodeError:
+                    # The ASCII bytes regex can swallow non-ASCII bytes.
+                    # Preserve its printable prefix; Unicode is scanned below.
+                    end = lo
+                    while end < hi and 32 <= data[end] <= 126:
+                        end += 1
+                    if end > lo:
+                        yield data[lo:end].decode("ascii")
+    yield from unicode_strings(data)
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:

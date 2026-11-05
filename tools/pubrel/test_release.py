@@ -122,6 +122,103 @@ class ReleaseChecks(unittest.TestCase):
         self.assertTrue(any(e["file"] == "wide" and e["rule"] == "realname" for e in report["failures"]))
         self.assertTrue(any("!" in e["file"] and e["rule"] == "user-path" for e in report["failures"]))
 
+    def test_privacy_ascii_fallback_keeps_odd_length_usernames(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        allow.write_text('{"exceptions": []}', encoding="utf-8")
+        for user in ["a", "ab", "abc"]:
+            text = " C:" + chr(92) + "Users" + chr(92) + user
+            with self.subTest(user=user):
+                file.write_bytes(text.encode() + b"\x00\x90")
+                report = privacy.scan_files([(file, file.name)], allow)
+                self.assertEqual(len(report["failures"]), 1)
+                self.assertEqual(report["failures"][0]["string_sha256"], hashlib.sha256(text.encode()).hexdigest())
+
+    def test_privacy_unicode_users_in_binary_at_both_alignments(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        allow.write_text('{"exceptions": []}', encoding="utf-8")
+        for user in ["张三", "éclair", "🚀", "𝄞", "محمد", "A张三"]:
+            text = "C:" + chr(92) + "Users" + chr(92) + user + chr(92) + "project"
+            for encoding in ["utf-8", "utf-16le"]:
+                for prefix in [b"\x00\x00", b"\x90\x00\x00", b"\xff\xfe"]:
+                    with self.subTest(user=user, encoding=encoding, prefix=prefix):
+                        file.write_bytes(prefix + text.encode(encoding) + b"\x00\x00\xfe")
+                        report = privacy.scan_files([(file, file.name)], allow)
+                        self.assertTrue(any(user in e["sample"] for e in report["failures"]))
+
+    def test_privacy_invalid_unicode_sequences_bound_candidates(self):
+        text = "C:" + chr(92) + "Users" + chr(92) + "张三" + chr(92) + "project"
+        boundaries = {
+            "utf-8": [(b"\xff", b"\xff"), (b"\x80", b"\xc0\xaf"),
+                      (b"\xed\xa0\x80", b"\xf4\x90\x80\x80"), (b"\xe2\x82", b"\xe2\x82"),
+                      (b"\x01", b"\xc2\x80")],
+            "utf-16le": [(b"\x00\xd8", b"\x00\xdc"), (b"\xff\xfe", b"\x00\x00"),
+                         (b"\x00\x00", b"\x80\x00"), (b"\x00\x00", b"\x00\xd8"),
+                         (b"\x00\x00", b"\xff")],
+        }
+        for encoding, cases in boundaries.items():
+            for prefix, suffix in cases:
+                with self.subTest(encoding=encoding, prefix=prefix, suffix=suffix):
+                    candidates = list(privacy.strings(prefix + text.encode(encoding) + suffix))
+                    self.assertIn(text, candidates)
+                    self.assertFalse(any("\ufffd" in candidate for candidate in candidates))
+
+    def test_privacy_ascii_boundaries_and_allowlist_digests_stay_exact(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        text = "prefix C:" + chr(92) + "Users" + chr(92) + "Example" + chr(92) + "project tail"
+        for encoding in ["ascii", "utf-16le"]:
+            with self.subTest(encoding=encoding):
+                data = b"\x00\xff\x01\x00" + text.encode(encoding) + b"\x00\x00\xff"
+                file.write_bytes(data)
+                allow.write_text('{"exceptions": []}', encoding="utf-8")
+                report = privacy.scan_files([(file, file.name)], allow)
+                expected = {"file": file.name, "path": file.name, "rule": "user-path",
+                            "file_sha256": hashlib.sha256(data).hexdigest(),
+                            "string_sha256": hashlib.sha256(text.encode()).hexdigest(), "sample": text}
+                self.assertEqual(report["failures"], [expected])
+                allow.write_text(json.dumps({"exceptions": [expected]}), encoding="utf-8")
+                allowed = privacy.scan_files([(file, file.name)], allow)
+                self.assertEqual(allowed["failures"], [])
+                self.assertEqual(allowed["allowed"], [{k: v for k, v in expected.items() if k != "sample"}])
+
+    def test_privacy_utf16_prefix_on_other_alignment_does_not_hide_path(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        allow.write_text('{"exceptions": []}', encoding="utf-8")
+        text = "C:" + chr(92) + "Users" + chr(92) + "张三"
+        # The odd-offset prefix can decode across the even-offset path as unrelated printable code points.
+        file.write_bytes(b"\x90" + "Users".encode("utf-16le") + b"\x00" + text.encode("utf-16le") + b"\x00\x00")
+        report = privacy.scan_files([(file, file.name)], allow)
+        self.assertTrue(any(text in e["sample"] for e in report["failures"]))
+
+    def test_privacy_utf8_prefixes_follow_rule_changes(self):
+        self.folder()
+        for prefix in ["Token:", "Marker:"]:
+            rules = {"rules": {"token": {"pattern": re.escape(prefix) + r"[^\s\x00]+", "prefixes": [prefix]}}}
+            text = prefix + "张三"
+            data = b"\xff\x00" + text.encode() + b"\x00\xfe"
+            with self.subTest(prefix=prefix), self.private_rules(rules):
+                self.assertIn(text, list(privacy.strings(data)))
+            self.assertNotIn(text, list(privacy.strings(data)))
+
+    def test_privacy_unicode_allowlist_matches_complete_string(self):
+        path = self.folder()
+        file, allow = path / "binary", path / "allow.json"
+        text = "C:" + chr(92) + "Users" + chr(92) + "张三"
+        for encoding in ["utf-8", "utf-16le"]:
+            with self.subTest(encoding=encoding):
+                file.write_bytes(b"\x00\x00" + text.encode(encoding) + b"\x00\x00")
+                allow.write_text('{"exceptions": []}', encoding="utf-8")
+                report = privacy.scan_files([(file, file.name)], allow)
+                self.assertTrue(report["failures"])
+                entries = [{k: v for k, v in e.items() if k != "file_sha256"} for e in report["failures"]]
+                allow.write_text(json.dumps({"exceptions": entries}), encoding="utf-8")
+                self.assertEqual(privacy.scan_files([(file, file.name)], allow)["failures"], [])
+                file.write_bytes(b"\x00\x00" + (text + "x").encode(encoding) + b"\x00\x00")
+                self.assertTrue(privacy.scan_files([(file, file.name)], allow)["failures"])
+
     def test_private_rules_loaded_from_outside_or_release_scan_stops(self):
         """The private rules come from a file outside the repository (--private-rules / MODAVD_PRIVATE_RULES); a
         named file that is missing is an error, and the release scan refuses to run with the public rules only."""
