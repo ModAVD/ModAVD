@@ -648,7 +648,9 @@ class ReleaseChecks(unittest.TestCase):
         s = {"repo": "external/example", "base": "a" * 40, "head": "b" * 40, "dir": "example/mas36", "count": 1}
         release.save(tools / "patches/series.json", [{**s, "dir": "example/mas34"}])
         release.save(repo / "patches/series.json", [{**s, "dir": "example/mas35"}])
-        release.save(out / "patches/series.json", [s])
+        # this build's own series come from the export log; patches/series.json is the checkout's, every version
+        release.save(out / "logs/patch-series.json", [{**s, "tree": "c" * 40, "trees": ["c" * 40], "authors": [], "path": "patches/" + s["dir"]}])
+        release.save(out / "patches/series.json", [{**s, "dir": "example/mas33"}, {**s, "dir": "example/mas35"}])
         template = (f'<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
                     f'  <!-- {s["repo"]}：AOSP 基准 {s["base"]}，本地分支 old = 基准 + 1 个提交，HEAD {s["head"]} -->\n'
                     f'  <project path="{s["repo"]}" revision="{s["base"]}"/>\n</manifest>\n')
@@ -845,6 +847,146 @@ class ReleaseChecks(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.export_patches(SimpleNamespace(output=str(dest), emu_src=str(root)))
 
+    def published_checkout(self, root):
+        """Two source repositories and a release checkout that published them as 0.38.0: one/mas38 (2 patches) and
+        two/v22 (1 patch). Returns (snapshot series for a mas39 build, checkout); one gets a third commit, two stays."""
+        commits = {"one": ["base", "fix a", "fix b"], "two": ["base", "fix c"]}
+        bases = {}
+        for name, messages in commits.items():
+            for n, message in enumerate(messages):
+                self.commit_patch(root / name, f"{name}.txt", f"{n}\n", message, checks.MAINTAINER)
+                if n == 0:
+                    bases[name] = release.git(root / name, "rev-parse", "HEAD")
+        series = lambda dirs: [{"repo": name, "dir": dirs[name], "base": bases[name], "head": release.git(root / name, "rev-parse", "HEAD"),
+                                "upstream": f"platform/{name}"} for name in commits]
+        out38 = root / "out38"
+        release.save(out38 / "snapshot.json", {"build": "mas38", "series": series({"one": "one/mas38", "two": "two/mas38"})})
+        release.export_patches(SimpleNamespace(output=str(out38), emu_src=str(root)))
+        published = release.load(out38 / "patches/series.json")
+        published[1]["dir"] = "two/v22"
+        rows = "\n".join(f"| `{s['dir']}` | `{s['upstream']}` | `{s['base']}` | {s['count']} | `{s['head']}` | Apache-2.0 |" for s in published)
+        base_md = ("# ModAVD 补丁\n\n各版本用的目录：\n\n| 版本 | one | two |\n| --- | --- | --- |\n"
+                   "| 0.38.0（`Pkg.BuildId=mas-38`） | one/mas38 | two/v22 |\n\n"
+                   "| 目录 | AOSP 仓库 | 基准（AOSP 公开提交） | 补丁数 | 回放后的树 = 编译时分支头 | 许可证 |\n"
+                   "| --- | --- | --- | --- | --- | --- |\n" + rows + "\n\n"
+                   "- `one/mas38` 的 0001–0002 是 mas-38 的。\n- 其余说明。\n\n## 许可证\n\n正文。\n")
+        files = {"README.md": b"# ModAVD\n", "patches/BASE.md": base_md.encode(),
+                 "patches/series.json": (json.dumps(published, ensure_ascii=False, indent=2) + "\n").encode()}
+        for old, new in [("one/mas38", "one/mas38"), ("two/mas38", "two/v22")]:
+            for p in sorted((out38 / "patches" / old).glob("*.patch")):
+                files[f"patches/{new}/{p.name}"] = p.read_bytes()
+        self.commit_files(root / "pub", files)
+        self.commit_patch(root / "one", "one.txt", "3\n", "fix d", checks.MAINTAINER)
+        return series({"one": "one/mas39", "two": "two/mas39"}), root / "pub"
+
+    def export_into(self, root, name, series, checkout, version="0.39.0"):
+        out = root / name
+        release.save(out / "snapshot.json", {"build": "mas39", "version": version, "series": series,
+                                             "own": {"modavd": {"repo": str(checkout)}}})
+        release.export_patches(SimpleNamespace(output=str(out), emu_src=str(root)))
+        return out
+
+    def test_patch_records_add_to_the_published_ones(self):
+        """0.38.0: the release commit took the export's own short BASE.md and series.json, which dropped every older
+        row and the license section, and exported the unchanged Crashpad series again as crashpad/mas38."""
+        root = self.folder()
+        series, checkout = self.published_checkout(root)
+        published = release.load(checkout / "patches/series.json")
+        before = (checkout / "patches/BASE.md").read_text(encoding="utf-8")
+        out = self.export_into(root, "out", series, checkout)
+        records = release.load(out / "patches/series.json")
+        self.assertEqual([s["dir"] for s in records], ["one/mas39", "one/mas38", "two/v22"])
+        self.assertEqual(records[1:], published)
+        self.assertEqual((records[0]["count"], records[0]["head"]), (3, series[0]["head"]))
+        self.assertNotIn("path", records[0])
+        self.assertEqual(release.load(out / "logs/patch-dirs.json"),
+                         {"one": {"dir": "one/mas39", "new": True}, "two": {"dir": "two/v22", "new": False}})
+        # only the new directory is left to copy; the unchanged series was exported for the replay, elsewhere
+        self.assertEqual(sorted(p.relative_to(out / "patches").as_posix() for p in (out / "patches").rglob("*") if p.is_dir()),
+                         ["one", "one/mas39"])
+        self.assertEqual(len(list((out / "work/patches-reused/two/mas39").glob("*.patch"))), 1)
+        log = release.load(out / "logs/patch-series.json")
+        self.assertEqual([s["path"] for s in log], ["patches/one/mas39", "work/patches-reused/two/mas39"])
+        text = (out / "patches/BASE.md").read_text(encoding="utf-8")
+        lines = text.split("\n")
+        # nothing published is lost or moved: the old text is the new one with lines added
+        remaining = iter(lines)
+        self.assertTrue(all(line in remaining for line in before.split("\n")))
+        self.assertEqual(lines[lines.index("| --- | --- | --- |") + 1], "| 0.39.0（`Pkg.BuildId=mas-39`） | one/mas39 | two/v22 |")
+        row = next(i for i, line in enumerate(lines) if line.startswith("| `one/mas39` |"))
+        self.assertTrue(lines[row + 1].startswith("| `one/mas38` |"))
+        self.assertIn(release.PLACEHOLDER, lines[row])
+        self.assertIn("- `one/mas39` 的 0001–0002 与 `one/mas38` 是同一批提交（补丁文件头里的序号不同），0003–0003 是 mas-39 新增的："
+                      + release.PLACEHOLDER, text)
+        self.assertIn("- 0.39.0 的 two 补丁和已发布的 `two/v22` 是同一批提交（基准、分支头都相同），沿用这个目录", text)
+        self.assertLess(text.index("- `one/mas39` 的"), text.index("- `one/mas38` 的"))
+        for s in records:
+            checks.check_base_row(text, s)
+        # the public check refuses it until the new rows are filled in
+        (root / "filled/patches").mkdir(parents=True)
+        (root / "filled/patches/BASE.md").write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, release.PLACEHOLDER):
+            checks.check_base(root / "filled")
+        (root / "filled/patches/BASE.md").write_text(text.replace(release.PLACEHOLDER, "Apache-2.0"), encoding="utf-8")
+        checks.check_base(root / "filled")
+        # the release commit took them; running again on that adds nothing
+        files = {"patches/BASE.md": text.replace(release.PLACEHOLDER, "已填").encode(),
+                 "patches/series.json": (out / "patches/series.json").read_bytes()}
+        for p in sorted((out / "patches/one/mas39").glob("*.patch")):
+            files[f"patches/one/mas39/{p.name}"] = p.read_bytes()
+        self.commit_files(checkout, files)
+        again = self.export_into(root, "again", series, checkout)
+        self.assertEqual(release.load(again / "patches/series.json"), records)
+        self.assertEqual((again / "patches/BASE.md").read_text(encoding="utf-8"), text.replace(release.PLACEHOLDER, "已填"))
+        self.assertEqual(release.load(again / "logs/patch-dirs.json"),
+                         {"one": {"dir": "one/mas39", "new": False}, "two": {"dir": "two/v22", "new": False}})
+        # a repack of the same build only names its version in that row
+        repack = self.export_into(root, "repack", series, checkout, "0.39.1")
+        repacked = (repack / "patches/BASE.md").read_text(encoding="utf-8")
+        self.assertIn("| 0.39.0（`Pkg.BuildId=mas-39`；0.39.1 相同） | one/mas39 | two/v22 |", repacked)
+        self.assertEqual(repacked.replace("；0.39.1 相同", ""), (again / "patches/BASE.md").read_text(encoding="utf-8"))
+        self.assertEqual(release.load(repack / "patches/series.json"), records)
+
+    def test_patch_records_update_the_qemu_license_section(self):
+        """A new qemu series that continues the previous one: the license section's list of commits and the replay
+        example follow (0.38.0 did both by hand)."""
+        old = {"repo": "external/qemu", "upstream": "platform/external/qemu", "base": "a" * 40, "head": "b" * 40,
+               "dir": "qemu/mas38", "count": 2, "tree": "c" * 40}
+        s = {**old, "head": "d" * 40, "dir": "qemu/mas39", "count": 3, "tree": "e" * 40, "trees": [], "authors": [], "path": "patches/qemu/mas39"}
+        base_md = ("| 版本 | qemu |\n| --- | --- |\n| 0.38.0（`Pkg.BuildId=mas-38`） | qemu/mas38 |\n\n"
+                   "| 目录 | AOSP 仓库 | 基准 | 补丁数 | 分支头 | 许可证 |\n| --- | --- | --- | --- | --- | --- |\n"
+                   f"| `qemu/mas38` | `platform/external/qemu` | `{'a' * 40}` | 2 | `{'b' * 40}` | GPL-2.0 |\n\n- 说明。\n\n"
+                   "## qemu 补丁的许可证\n\n这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0002 按 `bbbbbbbb`）。\n\n"
+                   "回放示例（以 mas-38 的 qemu 为例）：\n\n```sh\ngit checkout -b mas38 " + "a" * 40 +
+                   "\ngit am --keep-cr ../patches/qemu/mas38/*.patch\n```\n")
+        root = self.folder()
+        with mock.patch.object(release, "leading_same", return_value=2):
+            records, text, dirs = release.merge_patch_records([s], [old], base_md, root, root, "0.39.0", 39)
+        self.assertIn("（0001–0002 按 `bbbbbbbb`，0003–0003 按 `dddddddd`）。", text)
+        self.assertIn("回放示例（以 mas-39 的 qemu 为例）：", text)
+        self.assertIn("git checkout -b mas39 " + "a" * 40 + "\ngit am --keep-cr ../patches/qemu/mas39/*.patch\n", text)
+        self.assertEqual([r["dir"] for r in records], ["qemu/mas39", "qemu/mas38"])
+        # a series that starts over (nothing in common with the previous one) leaves both for a person
+        with mock.patch.object(release, "leading_same", return_value=0):
+            _, text, _ = release.merge_patch_records([s], [old], base_md, root, root, "0.39.0", 39)
+        self.assertIn("（0001–0002 按 `bbbbbbbb`）。", text)
+        self.assertIn("回放示例（以 mas-38 的 qemu 为例）：", text)
+
+    def test_patch_records_refuse_a_stale_directory(self):
+        root = self.folder()
+        series, checkout = self.published_checkout(root)
+        stale = release.load(checkout / "patches/series.json")
+        stale.insert(0, {**stale[0], "dir": "one/mas39", "head": "f" * 40, "count": 7})
+        self.commit_files(checkout, {"patches/series.json": (json.dumps(stale, ensure_ascii=False, indent=2) + "\n").encode()})
+        with self.assertRaisesRegex(ValueError, "already in series.json"):
+            self.export_into(root, "out", series, checkout)
+        # a published series whose base and head match but whose count or tree does not is refused too
+        broken = release.load(checkout / "patches/series.json")[1:]
+        broken[1]["tree"] = "0" * 40
+        self.commit_files(checkout, {"patches/series.json": (json.dumps(broken, ensure_ascii=False, indent=2) + "\n").encode()})
+        with self.assertRaisesRegex(ValueError, "another count or tree"):
+            self.export_into(root, "out2", series, checkout)
+
     CONTRIBUTOR = "A Contributor <12345+example-user@users.noreply.github.com>"
 
     def commit_patch(self, repo, name, content, message, author):
@@ -917,6 +1059,46 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual(sorted(release.git(pub, "diff", "--cached", "--name-only").splitlines()),
                          ["incoming/fix-a/0001-fix.patch", "incoming/fix-b/0001-fix.patch", "incoming/fix-b/tests/probe.py"])
 
+    def test_incoming_removed_from_crlf_checkout(self):
+        """0.38.0: the release checkout was cloned with core.autocrlf=true, so the text files of a topic other than
+        its patches (*.patch -text) were CRLF in the work tree. git rm under GIT_ENV's core.autocrlf=false took them
+        for local modifications and refused; the removal must use the checkout's own line-ending settings."""
+        root = self.folder()
+        src = root / "src"
+        self.commit_patch(src, "f.txt", "0\n", "base", "Local Worker <worker@localhost>")
+        base = release.git(src, "rev-parse", "HEAD")
+        outside = self.commit_patch(src, "f.txt", "1\n", "outside fix", self.CONTRIBUTOR)
+        out = root / "out"
+        release.save(out / "snapshot.json", {"build": "mas39", "series": [
+            {"repo": "src", "dir": "test/one", "base": base, "head": release.git(src, "rev-parse", "HEAD"), "upstream": "platform/test"}]})
+        release.export_patches(SimpleNamespace(output=str(out), emu_src=str(root)))
+        self.commit_files(root / "pub", {".gitattributes": b"*.patch -text\n", "README.md": b"# ModAVD\n", "patches/BASE.md": b"x\n",
+                                         "incoming/fix-a/0001-fix.patch": outside,
+                                         "incoming/fix-a/tests/probe.py": b"line one\nline two\n"})
+        clone = root / "clone"
+        release.run("git", "-c", "core.autocrlf=true", "clone", "-q", "-c", "core.autocrlf=true", root / "pub", clone,
+                    env=release.STATUS_ENV)
+        probe = clone / "incoming/fix-a/tests/probe.py"
+        self.assertIn(b"\r\n", probe.read_bytes())
+        # make git compare the content instead of trusting the index, as it does for a fresh clone
+        later = probe.stat().st_mtime + 60
+        os.utime(probe, (later, later))
+        release.incoming(SimpleNamespace(output=str(out), repository=str(clone), keep_incoming=[]))
+        self.assertFalse((clone / "incoming/fix-a").exists())
+        self.assertEqual(sorted(release.git(clone, "diff", "--cached", "--name-only").splitlines()),
+                         ["incoming/fix-a/0001-fix.patch", "incoming/fix-a/tests/probe.py"])
+        # a real local change still stops the removal
+        self.commit_files(root / "pub2", {".gitattributes": b"*.patch -text\n", "README.md": b"# ModAVD\n", "patches/BASE.md": b"x\n",
+                                          "incoming/fix-a/0001-fix.patch": outside,
+                                          "incoming/fix-a/tests/probe.py": b"line one\n"})
+        changed_clone = root / "clone2"
+        release.run("git", "-c", "core.autocrlf=true", "clone", "-q", "-c", "core.autocrlf=true", root / "pub2", changed_clone,
+                    env=release.STATUS_ENV)
+        (changed_clone / "incoming/fix-a/tests/probe.py").write_bytes(b"edited by hand\r\n")
+        with self.assertRaisesRegex(RuntimeError, "local modifications"):
+            release.incoming(SimpleNamespace(output=str(out), repository=str(changed_clone), keep_incoming=[]))
+        self.assertTrue((changed_clone / "incoming/fix-a/tests/probe.py").exists())
+
     def notes_text(self, changes=None, upper="## 更新内容\n\n- x", version="v0.33.0"):
         data = {"version": version, "build": checks.build_of(version), "upstream": "37.2.10", "min_automas": "5.7.0",
                 "changes": changes or {version: {"修复": ["修好一处"]}, "v0.32.0": {"变更": ["读写更快"]}}}
@@ -940,6 +1122,42 @@ class ReleaseChecks(unittest.TestCase):
             checks.check_announcement(self.notes_text(), "v0.34.0", 34)
         with self.assertRaises(ValueError):
             checks.machine_line({"changes": {"v0.33.0": {"修复": ["a -- b"]}}})
+
+    def test_notes_budget_before_packaging(self):
+        """0.38.0: the machine line (9157) and the announcement (4532) were over their limits, which only step 7 said,
+        after packaging. preflight and notes-budget measure them from changes.md and changelog.json alone."""
+        path = self.folder()
+        changes, changelog = path / "changes.md", path / "changelog.json"
+        changes.write_text("".join(f"## {t}\n\n- 内容\n\n" for t in release.UPPER_SECTIONS + release.LOWER_SECTIONS), encoding="utf-8")
+        entry = lambda b, item: {"version": f"v0.{b}.0", "build": b, "min_automas": None, "changes": {"修复": [item]}}
+        release.save(changelog, [entry(39, "修好一处")] + [entry(b, "旧版") for b in range(38, 29, -1)])
+        machine, upper = release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
+        fields = release.text_fields("0.39.0", 39, "37.2.10", changes, changelog)
+        self.assertEqual(machine, len(fields["MACHINE"]))
+        self.assertLess(upper, 400)
+        # the same numbers step 7 would measure: the asset rows only sit below the separator
+        text = release.render_notes({**fields, **release.SAMPLE_ASSETS})
+        self.assertEqual(checks.check_announcement(text, "v0.39.0", 39)["version"], "v0.39.0")
+        rendered = text.split("\n")
+        self.assertEqual((machine, upper), (len(rendered[0]), sum(len(line) + 1 for line in rendered[1:rendered.index(checks.SEPARATOR)]) - 1))
+        self.assertNotIn("WARNING", release.describe_budget(machine, upper))
+        self.assertIn("WARNING: announcement", release.describe_budget(machine, 3700))
+        # this version's items count in both; older ones only in the machine line
+        release.save(changelog, [entry(39, "长" * 3990)] + [entry(b, "旧版") for b in range(38, 29, -1)])
+        with self.assertRaisesRegex(ValueError, r"announcement above the separator would be \d+ chars, limit 4000"):
+            release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
+        release.save(changelog, [entry(39, "修好一处")] + [entry(b, "旧" * 900) for b in range(38, 29, -1)])
+        with self.assertRaisesRegex(ValueError, r"machine-readable line would be \d+ chars, limit 8000"):
+            release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
+        with self.assertRaisesRegex(ValueError, r"Machine-readable line is \d+ chars"):
+            checks.check_announcement(release.render_notes({**release.text_fields("0.39.0", 39, "37.2.10", changes, changelog),
+                                                            **release.SAMPLE_ASSETS}))
+        # the command needs no SDK or output directory
+        release.save(changelog, [entry(39, "修好一处")])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            release.notes_budget_command(SimpleNamespace(build="mas39", patch=0, sdk=None, changes=str(changes), changelog=str(changelog)))
+        self.assertRegex(printed.getvalue(), r"v0\.39\.0: machine line \d+/8000, announcement \d+/4000")
 
     def test_changes_and_changelog(self):
         path = self.folder()
