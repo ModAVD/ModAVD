@@ -95,7 +95,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 
 `config/sdk-inventory.csv` 是审核过的包装政策：目前 SDK 文件集固定，移除 103 个文件。新 SDK 增减文件会停止，需先审核并更新政策。
 其中 `resources/modavd/` 三行是我们自研的 arm64 执行桥载荷（AGPL-3.0-or-later），由 `tools/gate/stage-payload.ps1` 放进 SDK 树；
-它们在 `sdk/emulator` 下面，所以内测「只发 `sdk\emulator`」那条规矩不用改。包里的 `tools/modavd-bridge.ps1`（装 / 卸 / 核对执行桥）和另外三个随包脚本、三个 .bat
+它们在 `sdk/emulator` 下面，所以内测「只发 `sdk\emulator`」那条规矩不用改。包里的 `tools/modavd-bridge.ps1`（装 / 卸 / 核对执行桥）、`tools/components-sources.txt`（补全组件.bat 的下载源菜单）和三个 .bat
 一起按提交从发版克隆的 `package/` 取原字节（那边 `package/** -text`，存的就是包里的字节）。
 
 0.36.0 起包里还有 `ModAVD.exe`（管理器）和 `tools/modavd.exe`（命令行、MCP），取自 `-Manager` 那个 Release 包（ModAVDManager 自己的发版流程可复现编译并核对过）。

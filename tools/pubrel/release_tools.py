@@ -40,8 +40,13 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # there, the entries appended to Part 2 (NOTICE.txt / NOTICE.csv), and a section for 说明.txt.
 NOTICE_MORE_FILES = {
     "ModAVD program icon (fan art)": ["(package root) ModAVD.exe"],
-    "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1", "(package root) tools/report-config.ps1",
+    "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1", "(package root) tools/components-sources.txt",
                                      "(package root) 复制配置信息.bat"],
+}
+# Files the reviewed NOTICE still names but the package no longer ships: the batch files call tools/modavd.exe instead
+# of these scripts (ModAVD/ModAVD#45). Each is taken out of its entry, where it has to be exactly once.
+NOTICE_GONE_FILES = {
+    "ModAVD scripts and documents": ["(package root) tools/fetch-components.ps1", "(package root) tools/collect-info.ps1"],
 }
 NOTICE_ADDITIONS = HERE / "config/notice-additions.txt"
 NOTICE_ADDITIONS_CSV = HERE / "config/notice-additions.csv"
@@ -50,9 +55,10 @@ README_TOOLS = HERE / "config/readme-tools.txt"
 # at tag v<version> of a ModAVDManager checkout (--manager-repo): path in the ZIP -> package path.
 MODAVD_FILES = {"tools/modavd.exe": "tools/modavd.exe", "ModAVD.exe": "ModAVD.exe"}
 MANAGER_ZIP = re.compile(r"ModAVDManager-(\d+\.\d+\.\d+)-win-x64\.zip")
-# The bundled scripts, read from package/ of the ModAVD release checkout (--repository) at its HEAD, where package/**
-# is stored byte for byte (-text): these go to tools/, the batch files to the package root.
-PACKAGE_TOOLS = ["collect-info.ps1", "fetch-components.ps1", "modavd-bridge.ps1", "report-config.ps1"]
+# The bundled files, read from package/ of the ModAVD release checkout (--repository) at its HEAD, where package/**
+# is stored byte for byte (-text): these go to tools/ (the bridge script and the download-source menu of 补全组件.bat),
+# the batch files to the package root. The batch files call tools/modavd.exe (ModAVD/ModAVD#45).
+PACKAGE_TOOLS = ["modavd-bridge.ps1", "components-sources.txt"]
 PACKAGE_ROOT = ["补全组件.bat", "收集问题信息.bat", "复制配置信息.bat"]
 # ModAVD's own programs in the package (AGPL-3.0-or-later) go into the source bundle as OWN_SOURCES_NAME: each public
 # repository exactly as published, under its own folder: ModAVDManager at the tag of the shipped ZIP, ModAVDHostIME
@@ -576,12 +582,24 @@ def render_csv(rows):
 
 
 def extend_texts(dest, go):
-    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: NOTICE_MORE_FILES
-    into entries already there, config/notice-additions.* at the end of Part 2 (`go`: the Go version the manager was
-    built with), config/readme-tools.txt before the troubleshooting section of 说明.txt. Every anchor has to be there
-    exactly once."""
+    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: NOTICE_GONE_FILES out
+    of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
+    (`go`: the Go version the manager was built with), config/readme-tools.txt before the troubleshooting section of
+    说明.txt. Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
+    for lib, files in NOTICE_GONE_FILES.items():
+        anchor = f"\nThe notices is included for the library: {lib}\n"
+        if text.count(anchor) != 1:
+            raise ValueError(f"NOTICE.txt: entry {lib!r} not found exactly once")
+        for name in files:
+            # the entry's own file list: from its "Notices for file(s):" line to its anchor
+            end = text.index(anchor)
+            start = text.rfind("\nNotices for file(s):\n", 0, end)
+            line = f"\n{name}\n"
+            if start < 0 or text.count(line) != 1 or not start < text.index(line) < end:
+                raise ValueError(f"NOTICE.txt: {name!r} not found exactly once in entry {lib!r}")
+            text = text.replace(line, "\n")
     for lib, files in NOTICE_MORE_FILES.items():
         anchor = f"\nThe notices is included for the library: {lib}\n"
         if text.count(anchor) != 1:
@@ -599,6 +617,17 @@ def extend_texts(dest, go):
     if render_csv(rows) != original:
         raise ValueError("NOTICE.csv does not read back the way it was written; refusing to rewrite it")
     name_col, files_col = rows[0].index("External Library Name"), rows[0].index("Binaries using the license")
+    for lib, files in NOTICE_GONE_FILES.items():
+        hits = [r for r in rows[1:] if r[name_col] == lib]
+        if len(hits) != 1:
+            raise ValueError(f"NOTICE.csv: entry {lib!r} not found exactly once")
+        # the field is the names joined by single spaces, and a "(package root) <path>" name has a space of its own
+        field = " " + hits[0][files_col] + " "
+        for name in files:
+            if field.count(f" {name} ") != 1:
+                raise ValueError(f"NOTICE.csv: {name!r} not found exactly once in entry {lib!r}")
+            field = field.replace(f" {name} ", " ")
+        hits[0][files_col] = field[1:-1]
     for lib, files in NOTICE_MORE_FILES.items():
         hits = [r for r in rows[1:] if r[name_col] == lib]
         if len(hits) != 1:

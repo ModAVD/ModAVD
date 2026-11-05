@@ -408,8 +408,10 @@ class ReleaseChecks(unittest.TestCase):
         sep = "=" * 59
         def entry(lib, files):
             return "\n".join([sep, "Notices for file(s):", *files, f"The notices is included for the library: {lib}", "", sep, "body", "", ""])
-        icon_files, script_files = ["./emulator.exe"], ["(package root) 说明.txt", "(package root) LICENSES/NOTICE.txt",
-                                                         "(package root) LICENSES/NOTICE.csv"]
+        # the reviewed texts still name the two scripts the batch files no longer use (NOTICE_GONE_FILES)
+        icon_files, script_files = ["./emulator.exe"], ["(package root) tools/fetch-components.ps1",
+                                                         "(package root) tools/collect-info.ps1", "(package root) 说明.txt",
+                                                         "(package root) LICENSES/NOTICE.txt", "(package root) LICENSES/NOTICE.csv"]
         notice = ("header\n\n" + entry("ModAVD program icon (fan art)", icon_files) +
                   entry("ModAVD scripts and documents", script_files) + "#" * 79 + "\n# PART 3. Full license texts\n")
         (tree / "LICENSES").mkdir()
@@ -421,7 +423,7 @@ class ReleaseChecks(unittest.TestCase):
         (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "LICENSES/Apache-2.0.txt").write_text("license text", encoding="utf-8")
         (tree / "说明.txt").write_text("安装\n\n====================\n出问题怎么办\n====================\n", encoding="utf-8")
-        shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1", "tools/report-config.ps1", "复制配置信息.bat",
+        shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1", "tools/components-sources.txt", "复制配置信息.bat",
                    "sdk/emulator/emulator.exe", *(f"sdk/emulator/resources/modavd/{n}" for n in
                                                   ["libmodavd_bridge.so", "libmodavd_gate.so", "modavd_bridge.rc"])]
         for rel in shipped:
@@ -440,7 +442,30 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual(csv_rows[1][5], "a, quoted note")
         self.assertTrue(csv_rows[1][3].endswith("(package root) ModAVD.exe"))
         self.assertEqual(len(csv_rows), 6)
+        # the scripts that are gone are out of the entry, in both texts; the rest of it stays in order
+        self.assertNotIn("fetch-components.ps1", text)
+        self.assertNotIn("collect-info.ps1", text)
+        self.assertIn("Notices for file(s):\n(package root) 说明.txt\n(package root) LICENSES/NOTICE.txt\n", text)
+        self.assertIn("(package root) tools/components-sources.txt\n", text)
+        self.assertTrue(csv_rows[2][3].startswith("(package root) 说明.txt (package root) LICENSES/NOTICE.txt "), csv_rows[2][3])
+        self.assertNotIn(".ps1 (package root) tools/collect", csv_rows[2][3])
+        self.assertNotIn("fetch-components.ps1", csv_rows[2][3])
+        self.assertIn("(package root) tools/components-sources.txt", csv_rows[2][3])
         self.assertIn("管理器和命令行", (tree / "说明.txt").read_text(encoding="utf-8"))
+        # a file to take out that the reviewed texts do not name (any more): refuse rather than guess, in either text
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
+        (tree / "说明.txt").write_text("安装\n\n====================\n出问题怎么办\n====================\n", encoding="utf-8")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice.replace("(package root) tools/collect-info.ps1\n", ""), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "NOTICE.txt.*collect-info.ps1"):
+            release.extend_texts(tree, "go1.26.5")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+        rows_gone = [list(r) for r in rows]
+        rows_gone[2][3] = rows_gone[2][3].replace(" (package root) tools/collect-info.ps1", "")
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows_gone), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "NOTICE.csv.*collect-info.ps1"):
+            release.extend_texts(tree, "go1.26.5")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         # an entry the texts were reviewed with is gone: refuse rather than guess
         (tree / "说明.txt").write_text("安装\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "说明.txt"):
@@ -544,7 +569,7 @@ class ReleaseChecks(unittest.TestCase):
                                 ({"repository": str(root / "mgr")}, "ModAVD checkout")]:
             with self.assertRaisesRegex(ValueError, message):
                 release.public_sources(SimpleNamespace(**{**vars(args), **change}))
-        (root / "pub/package/collect-info.ps1").write_bytes(b"changed\r\n")
+        (root / "pub/package/modavd-bridge.ps1").write_bytes(b"changed\r\n")
         with self.assertRaisesRegex(ValueError, "uncommitted changes under package/"):
             release.public_sources(args)
 

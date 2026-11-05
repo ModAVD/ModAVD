@@ -5,7 +5,7 @@
 ## 改哪里
 
 - 能直接提 PR 的：`README.md`、随包脚本 `package/`、`incoming/<主题>/` 下的补丁。
-  - `package/` 要在 Windows 自带的 PowerShell 5.1 上也能跑：`.ps1` 存成 UTF-8 带 BOM，`.bat` 只用 ASCII、换行用 CRLF，别改动文件原来的换行和 BOM（见 `package/README.md`）。
+  - `package/` 要在 Windows 自带的 PowerShell 5.1 上也能跑：`.ps1` 存成 UTF-8 带 BOM，`.bat` 只用 ASCII、换行用 CRLF，别改动文件原来的换行和 BOM（见 `package/README.md`）。三个 `.bat` 只调 `tools\modavd.exe`，补全组件、收集问题信息、复制配置信息的逻辑改在 ModAVDManager 里，不在这里另写一份 PowerShell。
   - `incoming/` 的补丁就是要收的样子，测试脚本不放进补丁本身（见 CONTRIBUTING.md）。
   - `README.md` 和 `README.en.md`、`CONTRIBUTING.md` 和 `CONTRIBUTING.en.md` 是同一份文档的中文和英文，逐节对应：改一份就在同一个 PR 里改另一份，英文照意思写，不逐字硬译。
 - 先开 issue 商量再改的：arm64 执行桥 `bridge/`，发版和编译工具 `tools/`，CI 检查 `scripts/`。

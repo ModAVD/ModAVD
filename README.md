@@ -67,7 +67,7 @@
 
 - **除 `package/`、`bridge/`、`assets/` 和 `patches/` 下的 `.patch` 补丁以外，本仓库的内容**（README 等文档、`docs/`、`scripts/`、发版和编译工具 `tools/`、`.github/` 等）：Apache License 2.0，见根目录的 [LICENSE](LICENSE)。Copyright 2026 qiyinxi。文件头另写了许可证的按文件头（`tools/gate/stage-payload.ps1` 是 AGPL-3.0-or-later）。`package/` 和 `bridge/` 按 AGPL-3.0-or-later（见下一条），补丁按各自所改文件的许可证（见「补丁」一条），`assets/` 下的图片和程序图标见[图标与美术](#图标与美术)。
 - **ModAVD 自己的程序**：0.36.0 起都是 GNU Affero General Public License 第 3 版或更新版本（AGPL-3.0-or-later）。
-  - 包里的脚本（补全组件、收集问题信息、复制配置信息、装执行桥）：本仓库的 [package/](package/)，许可证全文见 [package/LICENSE](package/LICENSE)。0.35.0 及更早的包里的脚本按 Apache License 2.0 发布。
+  - 包里的批处理和脚本（补全组件、收集问题信息、复制配置信息这三个 `.bat`，以及装执行桥的脚本）：本仓库的 [package/](package/)，许可证全文见 [package/LICENSE](package/LICENSE)。三个 `.bat` 调的命令行在 ModAVDManager 里。0.35.0 及更早的包里的脚本按 Apache License 2.0 发布。
   - arm64 执行桥（`sdk\emulator\resources\modavd\`，0.36.0 起）：本仓库的 [bridge/](bridge/)，许可证全文见 [bridge/LICENSE](bridge/LICENSE)；也在同一个 Release 的源码包里（见下面「源码」一条）。
   - 管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`（0.36.0 起）：在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) 仓库。
   - 宿主输入法 `components\modavd-ime.apk`（0.36.0 起）：在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) 仓库。
