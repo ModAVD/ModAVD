@@ -19,9 +19,11 @@
 // AccountFsync counts a foreign pid; ForgetAfterFork wipes the tables; exit-flush
 // (FlushAllDeferred / FlushAndTeardown) flushes every unpaid slot immediately -- ignoring the
 // scanner's kPaybackEveryNs cap -- and FlushAndTeardown sets g_shutdown and flushes only when
-// armed; a RECV ENOENT (notification withdrawn before RECV) is counted as an interruption;
-// and the BPF filter program's verdicts (interpreted, no kernel) for
-// fsync (trapped) and fdatasync/magic/other/arch (all allowed).
+// armed; a rename (active) first pays back every unpaid deferred file (real fsync on our handle,
+// with the magic) and does nothing in observe, for a forked child or when nothing is owed; a RECV
+// ENOENT (notification withdrawn before RECV) is counted as an interruption; and the BPF filter
+// program's verdicts (interpreted, no kernel): fsync and the three renames trapped,
+// fdatasync/magic fsync/other/foreign arch allowed.
 #include "../companion/jni/fsync_defer.cc"
 
 #include <cstdarg>
@@ -459,6 +461,38 @@ int main() {
     close(fd);
   }
 
+  // --- rename (active): every unpaid deferred file is paid back BEFORE the rename is let through,
+  // so a finished download is on disk before its final name can be; nothing to do otherwise ------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const int handle = g_matched[idx].payback_fd.load();
+    const long now = NowNs();
+    g_matched[idx].paid_ns.store(now);           // "just paid": the scanner would wait kPaybackEveryNs
+    g_matched[idx].deferred_ns.store(now + 1);   // the download's last fsync, deferred
+    CHECK(IsRenameNr(__NR_rename) && IsRenameNr(__NR_renameat) && IsRenameNr(__NR_renameat2));
+    CHECK(!IsRenameNr(__NR_fsync) && !IsRenameNr(__NR_fdatasync));
+    struct seccomp_notif rn = MakeReq(-1, me, __NR_renameat);
+    CHECK(PayBackBeforeRename(&rn));             // unpaid -> flushed now, ignoring the cap
+    CHECK(g_sys_fsync_n == 1);
+    CHECK(LastFsyncWasMagicOn(handle));          // a real fsync on our handle, with the magic
+    CHECK(g_matched[idx].paid_ns.load() >= now + 1);
+    CHECK(!PayBackBeforeRename(&rn));            // nothing unpaid any more -> no fsync
+    CHECK(g_sys_fsync_n == 1);
+    g_matched[idx].deferred_ns.store(g_matched[idx].paid_ns.load() + 1);
+    struct seccomp_notif foreign = MakeReq(-1, 0x7fffffff, __NR_rename);
+    CHECK(!PayBackBeforeRename(&foreign));       // a forked child's rename: not our slots
+    CHECK(g_sys_fsync_n == 1);
+    g_mode = kObserve;
+    CHECK(!PayBackBeforeRename(&rn));            // observe never defers, never pays back here
+    CHECK(g_sys_fsync_n == 1);
+    close(fd);
+  }
+
   // --- RECV errors: a withdrawn notification (ENOENT) is counted as an interruption, our own
   // EINTR is just retried, anything else is a real error that backs off --------------------
   {
@@ -484,6 +518,11 @@ int main() {
     };
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, 0)) == NOTIF);        // plain fsync
     CHECK(RunFilter(mk(kNrFdatasync, AUDIT_ARCH_X86_64, 0)) == ALLOW);    // fdatasync: not trapped (SQLite)
+    CHECK(RunFilter(mk(kNrRename, AUDIT_ARCH_X86_64, 0)) == NOTIF);       // renames: trapped (pay back first)
+    CHECK(RunFilter(mk(kNrRenameat, AUDIT_ARCH_X86_64, 0)) == NOTIF);
+    CHECK(RunFilter(mk(kNrRenameat2, AUDIT_ARCH_X86_64, 0)) == NOTIF);
+    CHECK(RunFilter(mk(kNrRenameat2, AUDIT_ARCH_X86_64, kMagic)) == NOTIF);  // the magic only spares fsync
+    CHECK(RunFilter(mk(kNrRename, AUDIT_ARCH_AARCH64, 0)) == ALLOW);      // wrong arch
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, kMagic)) == ALLOW);   // our own payback
     CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64,
                        (static_cast<uint64_t>(1) << 32) | kMagic)) == NOTIF);  // high bits set

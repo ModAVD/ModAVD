@@ -21,8 +21,9 @@
  * the translator ("C'", the previous step) was measured to catch nothing. So this
  * module stays out of userspace plumbing and filters the one thing that cannot be
  * bypassed: the host x86_64 fsync(74) system call itself, with a classic seccomp-BPF
- * filter that answers SECCOMP_RET_USER_NOTIF for that number and SECCOMP_RET_ALLOW for
- * everything else -- fdatasync(75), close, rename etc. are NOT filtered. Only fsync,
+ * filter that answers SECCOMP_RET_USER_NOTIF for that number and for the three renames
+ * (rename 82, renameat 264, renameat2 316 -- see MODES, active) and SECCOMP_RET_ALLOW for
+ * everything else -- fdatasync(75), close etc. are NOT filtered. Of the syncs only fsync,
  * because on device the download issues nothing but fsync on its *.downloading files
  * (139k notifications in 50 s, 0 fdatasync) while Android's SQLite issues nothing but
  * fdatasync (strace: 88 and 30 syncs per run in DELETE and WAL mode, 0 fsync): leaving
@@ -50,10 +51,16 @@
  * bounding a hard-kill's loss for an in-flight file to that window. The payback fsync
  * targets a handle dup'd from the game's fd when the file was first matched (active mode
  * only; it shares the game's open file, so it is not read-only), so the deferred tail is
- * flushed even after the download's final step renames the file out of *.downloading and
- * closes its own fd — this shrinks the window in which a hard-kill can still lose a completed
- * file's tail from normal writeback (~30 s) to at most kPaybackEveryNs, not to zero. close
- * and rename are not filtered; a slot that is fully paid (or was only ever continued, never
+ * flushed even after the download closes its own fd. The download finishes a file with
+ * write -> fsync -> close -> rename(*.downloading -> final name) and unpacks it right away, so
+ * "renamed" means "complete" to the game: renames are trapped too, and before the kernel runs
+ * a rename from this process the supervisor pays back every file that still has a deferred
+ * tail (PayBackBeforeRename). A renamed file is therefore on disk before its new name can be,
+ * as with the game's own fsync; only a file still named *.downloading can lose its last
+ * <=kPaybackEveryNs to a power cut, and the download resumes such a file from its length.
+ * (Without this, a hard-kill a few seconds after a rename left the renamed file at full size
+ * with an unwritten tail, and the game failed its unzip CRC -- error 302 -- on every retry.)
+ * close is not filtered; a slot that is fully paid (or was only ever continued, never
  * deferred) and idle for kRetireIdleNs is freed and its handle closed, so the 32 slots and
  * their fds cannot leak. The FIRST fsync on each fd, an fd whose identity cannot be
  * confirmed, a foreign (forked-child) pid, or a full matched list all CONTINUE — the safe
@@ -77,7 +84,10 @@
  *     same dependency the real fsync it replaces already has. The supervisor is serial, so
  *     a FUSE request stuck there would delay the fsyncs queued behind it (including ones on
  *     /data); not worse than today's fsync, but worth noting. Any per-notification error is
- *     counted and swallowed; the loop never exits. (A persistent error on the listener fd
+ *     counted and swallowed; the loop never exits. The one deliberate exception is a rename
+ *     in active mode with unpaid deferred files: those are paid back (real fsyncs on our own
+ *     handles) before the rename is let through -- the renaming thread waits for it, which is
+ *     the point (see MODES). (A persistent error on the listener fd
  *     only slows the loop with a short sleep so it cannot spin.) A separate watchdog thread
  *     reports a supervisor that is stuck or gone, and prints the periodic summary, so the
  *     supervisor never logs on a timer.
@@ -122,6 +132,10 @@
  *     retry -> SQLITE_IOERR_FSYNC. Every interruption is counted, as recv_enoent (withdrawn before
  *     the supervisor read it -- most of them) or send_enoent (after); the sum bounds the EINTRs the
  *     guest can have seen. Watch it on long logged-in runs.
+ *   - Every rename/renameat/renameat2 of the process goes through the supervisor as well (observe:
+ *     let through at once; active: after paying back unpaid deferred files, so a rename during a
+ *     download waits for one real fsync per file still owing one). A trapped rename has the same
+ *     interruptible wait, so the same EINTR caveat applies to it; counted the same way.
  */
 
 #include <android/fdsan.h>
@@ -190,6 +204,12 @@ namespace {
 constexpr uint32_t kNrFsync = 74;
 constexpr uint32_t kNrFdatasync = 75;
 static_assert(__NR_fsync == 74 && __NR_fdatasync == 75, "x86_64 only");
+// Renames are trapped too: in active mode a rename first pays back unpaid deferred files
+// (PayBackBeforeRename), so a finished download is on disk before its final name can be.
+constexpr uint32_t kNrRename = 82;
+constexpr uint32_t kNrRenameat = 264;
+constexpr uint32_t kNrRenameat2 = 316;
+static_assert(__NR_rename == 82 && __NR_renameat == 264 && __NR_renameat2 == 316, "x86_64 only");
 
 // Magic second argument that marks an fsync issued by our own payback code (the scanner):
 // the filter lets such a call through without a notification. fsync(2) only uses its
@@ -289,6 +309,8 @@ std::atomic<uint64_t> g_c_stuck{0};     // watchdog stuck reports
 std::atomic<uint64_t> g_c_deferred{0};     // (active) fsync answered val=0, real call skipped
 std::atomic<uint64_t> g_c_payback{0};      // (active) payback fsyncs issued by the scanner
 std::atomic<uint64_t> g_c_payback_err{0};  // (active) payback open/fsync failures (file gone)
+std::atomic<uint64_t> g_c_rename{0};        // rename/renameat/renameat2 notifications (any pid)
+std::atomic<uint64_t> g_c_rename_flush{0};  // (active) renames that first paid back unpaid deferred files
 
 // Supervisor progress, for the watchdog.
 std::atomic<bool> g_sup_alive{false};
@@ -545,6 +567,42 @@ bool ShouldDefer(const struct seccomp_notif* req) {
   return (g_mode == kActive) && DecideDefer(req);
 }
 
+// ---- renames: pay the deferred tails back first (active) ------------------------------
+
+void FlushAllDeferred();  // below, with the scanner
+
+bool IsRenameNr(int nr) {
+  return nr == static_cast<int>(kNrRename) || nr == static_cast<int>(kNrRenameat) ||
+         nr == static_cast<int>(kNrRenameat2);
+}
+
+// A rename from this process (active mode): before the kernel runs it, pay back every matched file
+// that still has a deferred, never-flushed tail. The download finishes a file with write -> fsync
+// (deferred) -> close -> rename(*.downloading -> final name) and unpacks it at once, so to the game
+// the new name means "complete". Seen on device without this: a power cut a few seconds after such a
+// rename left the renamed file at its full size with an unwritten tail -- the rename (metadata) was
+// in the journal, the deferred data was not -- and the game failed its unzip CRC (error 302) on every
+// retry. Paying back first makes the data durable before the new name can be, exactly as when the
+// game's own fsync runs. ALL unpaid slots are flushed, not just the renamed file: no path is read
+// from the caller's memory (no EFAULT / TOCTOU), and a rename of some other file (SharedPreferences'
+// backup, ...) costs at most a payback the scanner would do within kPaybackEveryNs anyway. Runs on
+// the notify path BEFORE SEND, so the renaming thread waits for the flush -- that is the point.
+// Returns true if anything was flushed. A forked child's rename is let through untouched.
+bool PayBackBeforeRename(const struct seccomp_notif* req) {
+  if (g_mode != kActive) return false;
+  char taskp[64];
+  snprintf(taskp, sizeof(taskp), "/proc/self/task/%d", static_cast<int>(req->pid));
+  if (access(taskp, F_OK) != 0) return false;
+  bool unpaid = false;
+  for (int i = 0; i < kMaxMatched && !unpaid; ++i) {
+    const long deferred = g_matched[i].deferred_ns.load(std::memory_order_acquire);
+    unpaid = deferred != 0 && deferred > g_matched[i].paid_ns.load(std::memory_order_relaxed);
+  }
+  if (!unpaid) return false;
+  FlushAllDeferred();
+  return true;
+}
+
 // ---- supervisor thread --------------------------------------------------------
 
 // NOTIF_RECV failed with errno e; returns true only for a real error (count, log, back off).
@@ -637,9 +695,17 @@ void* SupervisorMain(void*) {
     g_handling_since_ns.store(t0, std::memory_order_release);
     g_c_recv.fetch_add(1, std::memory_order_relaxed);
 
-    // Decide (active) whether to defer; observe always continues. This is the ONLY work
-    // before SEND and is deliberately cheap so the guest thread is never held up.
-    const bool defer = ShouldDefer(req);
+    // A rename: (active) pay back unpaid deferred files first, then always let it run. An fsync:
+    // decide (active) whether to defer; observe always continues. The fsync decision is the ONLY
+    // work before SEND and is deliberately cheap so the guest thread is never held up.
+    const bool rename = IsRenameNr(req->data.nr);
+    bool defer = false;
+    if (rename) {
+      g_c_rename.fetch_add(1, std::memory_order_relaxed);
+      if (PayBackBeforeRename(req)) g_c_rename_flush.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      defer = ShouldDefer(req);
+    }
     // defer: answer the guest with val=0/error=0 and no CONTINUE -> the kernel returns 0
     // to the guest WITHOUT running fsync (deferred). Otherwise CONTINUE -> run it for real.
     memset(resp, 0, resp_size);
@@ -663,7 +729,7 @@ void* SupervisorMain(void*) {
     g_handling_phase.store(1, std::memory_order_relaxed);
 
     // ---- off the critical path: the guest has already been released ------------
-    AccountFsync(req);
+    if (!rename) AccountFsync(req);  // args[0] of a rename is not an fd
     g_handling_since_ns.store(0, std::memory_order_release);
   }
   return nullptr;
@@ -702,13 +768,15 @@ void* WatchdogMain(void*) {
     }
     if (now - last_summary >= kSummaryEveryNs) {
       last_summary = now;
-      FD_LOGI("summary pkg=%s mode=%s recv=%llu real=%llu other=%llu foreign=%llu deferred=%llu "
-              "payback=%llu payback_err=%llu recv_err=%llu send_err=%llu recv_enoent=%llu send_enoent=%llu "
-              "stuck=%llu idle_ms=%ld",
+      FD_LOGI("summary pkg=%s mode=%s recv=%llu real=%llu other=%llu foreign=%llu rename=%llu deferred=%llu "
+              "payback=%llu rename_flush=%llu payback_err=%llu recv_err=%llu send_err=%llu recv_enoent=%llu "
+              "send_enoent=%llu stuck=%llu idle_ms=%ld",
               g_pkg, g_mode == kActive ? "active" : "observe",
               (unsigned long long)g_c_recv.load(), (unsigned long long)g_c_real.load(),
               (unsigned long long)g_c_other.load(), (unsigned long long)g_c_foreign.load(),
+              (unsigned long long)g_c_rename.load(),
               (unsigned long long)g_c_deferred.load(), (unsigned long long)g_c_payback.load(),
+              (unsigned long long)g_c_rename_flush.load(),
               (unsigned long long)g_c_payback_err.load(), (unsigned long long)g_c_recv_err.load(),
               (unsigned long long)g_c_send_err.load(), (unsigned long long)g_c_recv_enoent.load(),
               (unsigned long long)g_c_send_enoent.load(),
@@ -835,7 +903,9 @@ void* ScannerMain(void*) {
 // g_lock, no open-by-path) so it is safe to call from an atexit handler while other threads run;
 // a slot whose handle was never captured keeps at most its <=kPaybackEveryNs tail, which the
 // downloader re-fetches on resume. Called before g_shutdown stops the scanner, so nothing is
-// left unflushed when the process exits cleanly.
+// left unflushed when the process exits cleanly. The supervisor calls it too, before letting a
+// rename through (PayBackBeforeRename); it may then race the scanner's payback of the same slot,
+// which only means one extra fsync.
 void FlushAllDeferred() {
   for (int i = 0; i < kMaxMatched; ++i) {
     const long deferred = g_matched[i].deferred_ns.load(std::memory_order_acquire);
@@ -902,20 +972,26 @@ bool StartThread(void* (*fn)(void*)) {
 // repeated where needed.
 //
 //  0 ld  arch
-//  1 jeq AUDIT_ARCH_X86_64 ? next(2) : ALLOW(9)     (32-bit compat / other arch: allow)
+//  1 jeq AUDIT_ARCH_X86_64 ? next(2) : ALLOW(12)    (32-bit compat / other arch: allow)
 //  2 ld  nr
-//  3 jeq fsync(74)         ? next(4) : ALLOW(9)      (fdatasync and everything else: allow)
-//  4 ld  args[1] high
-//  5 jeq 0                 ? next(6) : NOTIF(8)      (high != 0 -> not our magic)
-//  6 ld  args[1] low
-//  7 jeq kMagic            ? ALLOW(9) : next(8)
-//  8 ret USER_NOTIF                                  (ordinary guest fsync)
-//  9 ret ALLOW                                       (our own payback fsync, and all else)
+//  3 jeq fsync(74)         ? fsync-check(7) : next(4)
+//  4 jeq rename(82)        ? NOTIF(11) : next(5)
+//  5 jeq renameat(264)     ? NOTIF(11) : next(6)
+//  6 jeq renameat2(316)    ? NOTIF(11) : ALLOW(12)   (fdatasync and everything else: allow)
+//  7 ld  args[1] high
+//  8 jeq 0                 ? next(9) : NOTIF(11)     (high != 0 -> not our magic)
+//  9 ld  args[1] low
+// 10 jeq kMagic            ? ALLOW(12) : next(11)
+// 11 ret USER_NOTIF                                  (ordinary guest fsync, any rename)
+// 12 ret ALLOW                                       (our own payback fsync, and all else)
 struct sock_filter g_filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 7),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 10),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrFsync, 0, 5),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrFsync, 3, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrRename, 6, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrRenameat, 5, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kNrRenameat2, 4, 5),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 28),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 2),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),
@@ -923,7 +999,7 @@ struct sock_filter g_filter[] = {
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 };
-static_assert(sizeof(g_filter) / sizeof(g_filter[0]) == 10, "filter layout comment is out of date");
+static_assert(sizeof(g_filter) / sizeof(g_filter[0]) == 13, "filter layout comment is out of date");
 
 // Install the filter on every thread and return the listener fd, or -1 (nothing
 // installed). On TSYNC_ESRCH failure the kernel returns -1/ESRCH instead of a tid; both
