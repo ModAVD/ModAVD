@@ -16,6 +16,8 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Test release tooling
+        run: python3 -I tools/pubrel/test_release.py --work "$RUNNER_TEMP/modavd-release-tests"
       - name: Replay all patch series from shallow AOSP bases
         run: python3 scripts/checks.py patches --work "$RUNNER_TEMP/modavd-patch-check"
       - name: Check release sizes, checksums and patch attributes
