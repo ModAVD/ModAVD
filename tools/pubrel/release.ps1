@@ -37,6 +37,13 @@ param(
     # privacy-private-rules.json, kept outside this repository (PrivateRules, else MODAVD_PRIVATE_RULES): the release
     # privacy scan refuses to run without it
     [string]$PrivateRules,
+    # step 8 skips files that the last scan found clean and that have not changed since (same SHA-256 at the same path,
+    # same scanner and rules, every exception they need still in the allowlist). The cache is local, outside the
+    # repository and the output: PrivacyCache in the local configuration, else <OutputRoot>\privacy-cache.json.
+    # -NoPrivacyCache scans everything. With -DraftRelease (the run that uploads) step 8 does not read the cache: it
+    # scans everything and only writes the cache.
+    [string]$PrivacyCache,
+    [switch]$NoPrivacyCache,
     # free space required before writing, GiB (MinFreeGB; 120 when neither)
     [int]$MinFreeGB,
     [string]$Python,
@@ -83,6 +90,13 @@ $protect = @(@(Use-Local ProtectedRoots $null '' -Optional) + @($EmuSrc, $Sdk) |
 $hit = Test-Inside $root ($protect + @($Repository))
 if ($hit) { throw "OutputRoot 必须使用独立的临时数据目录，不能在源码、发版克隆或生产目录里：$root 在 $hit 下" }
 $protectArgs = @($protect | ForEach-Object { '--protect', $_ })
+if ($NoPrivacyCache) { $PrivacyCache = '' }
+else {
+    if (-not $PrivacyCache) { $PrivacyCache = Use-Local PrivacyCache $null '' -Optional }
+    if (-not $PrivacyCache) { $PrivacyCache = Join-Path $root 'privacy-cache.json' }
+    if (Test-Inside $PrivacyCache @($out, $Repository)) { throw "隐私扫描缓存不能放在输出目录或发版克隆里：$PrivacyCache" }
+}
+Write-Host "隐私扫描缓存：$(if (-not $PrivacyCache) { '不用（-NoPrivacyCache），第 8 步全部重扫' } elseif ($DraftRelease) { "$PrivacyCache（-DraftRelease：第 8 步不读，全部重扫，扫完只写）" } else { $PrivacyCache })"
 
 if (-not $Python) { $Python = $env:MODAVD_PYTHON }
 if (-not $Python) { $Python = Use-Local Python $null '-Python' -Optional }
@@ -149,7 +163,12 @@ Step 5 '复用源码、打不压缩的源码总包、同步仓库清单' {
 }
 Step 6 '生成两份 SHA256SUMS' { Run-Python (@('sums') + $common) }
 Step 7 '从模板生成 Release 说明并校验公告、表格' { Run-Python (@('notes') + $common + $texts) }
-Step 8 '隐私扫描（含全部源码包成员，加上仓库外的私有规则）' { Run-Python (@('privacy-release', '--private-rules', $PrivateRules) + $common) }
+Step 8 '隐私扫描（含全部源码包成员，加上仓库外的私有规则；上次扫过干净、没变的文件按缓存跳过）' {
+    $cacheArgs = if ($PrivacyCache) { @('--privacy-cache', $PrivacyCache) } else { @() }
+    # 真要上传的这一轮不信缓存：照格式写的「干净」记录（手改的，或者缓存逻辑以后出了错）不能决定发出去的东西
+    if ($DraftRelease -and $PrivacyCache) { $cacheArgs += '--privacy-cache-write-only' }
+    Run-Python (@('privacy-release', '--private-rules', $PrivateRules, '--repository', $Repository) + $cacheArgs + $common)
+}
 if ($DraftRelease) {
     Write-Host '[9] 创建 GitHub 草稿（不会发布）'
     $upload = @($zip, $sourcesZip, (Join-Path $out 'SHA256SUMS.txt'))
