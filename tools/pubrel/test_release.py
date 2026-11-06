@@ -623,8 +623,10 @@ class ReleaseChecks(unittest.TestCase):
         sep = "=" * 59
         def entry(lib, files):
             return "\n".join([sep, "Notices for file(s):", *files, f"The notices is included for the library: {lib}", "", sep, "body", "", ""])
-        icon_files, script_files = ["./emulator.exe"], ["(package root) 说明.txt", "(package root) LICENSES/NOTICE.txt",
-                                                         "(package root) LICENSES/NOTICE.csv"]
+        # the reviewed texts still name the batch files and scripts the package no longer ships (NOTICE_GONE_FILES)
+        gone = ["tools/fetch-components.ps1", "tools/collect-info.ps1", "补全组件.bat", "收集问题信息.bat"]
+        icon_files, script_files = ["./emulator.exe"], [*(f"(package root) {n}" for n in gone), "(package root) 说明.txt",
+                                                         "(package root) LICENSES/NOTICE.txt", "(package root) LICENSES/NOTICE.csv"]
         notice = ("header\n\n" + entry("ModAVD program icon (fan art)", icon_files) +
                   entry("ModAVD scripts and documents", script_files) + "#" * 79 + "\n# PART 3. Full license texts\n")
         (tree / "LICENSES").mkdir()
@@ -635,15 +637,26 @@ class ReleaseChecks(unittest.TestCase):
                  " ".join(script_files), "", ""]]
         (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "LICENSES/Apache-2.0.txt").write_text("license text", encoding="utf-8")
-        (tree / "说明.txt").write_text("安装\n\n====================\n出问题怎么办\n====================\n", encoding="utf-8")
-        shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1", "tools/report-config.ps1", "复制配置信息.bat",
+        # the reviewed 说明.txt has each passage README_EDITS rewrites
+        step, trouble, licence = (old for old, _ in release.README_EDITS)
+        readme = ("安装\n\n1. 解压。\n\n" + step + "\n3. 新建实例。\n\n====================\n出问题怎么办\n====================\n\n" +
+                  trouble + "\n====================\n许可证\n====================\n\n" + licence + "AGPL-3.0-or-later 发布。\n")
+        (tree / "说明.txt").write_text(readme, encoding="utf-8")
+        shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1",
                    "sdk/emulator/emulator.exe", *(f"sdk/emulator/resources/modavd/{n}" for n in
                                                   ["libmodavd_bridge.so", "libmodavd_gate.so", "modavd_bridge.rc"])]
         for rel in shipped:
             (tree / rel).parent.mkdir(parents=True, exist_ok=True)
             (tree / rel).write_bytes(b"x")
-        with self.assertRaisesRegex(ValueError, "ModAVD.exe.*libmodavd_bridge.so.*tools/modavd.exe"):
+        # the reviewed NOTICE names files this package does not have
+        with self.assertRaisesRegex(ValueError, "does not have: tools/collect-info.ps1, tools/fetch-components.ps1, 收集问题信息.bat, 补全组件.bat$"):
             release.check_notice_coverage(tree)
+        for rel in gone:
+            (tree / rel).write_bytes(b"x")
+        with self.assertRaisesRegex(ValueError, "no entry for: ModAVD.exe.*libmodavd_bridge.so.*tools/modavd.exe"):
+            release.check_notice_coverage(tree)
+        for rel in gone:
+            (tree / rel).unlink()
         release.extend_texts(tree, "go1.26.5")
         release.check_notice_coverage(tree)
         text = (tree / "LICENSES/NOTICE.txt").read_text(encoding="utf-8")
@@ -655,7 +668,46 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual(csv_rows[1][5], "a, quoted note")
         self.assertTrue(csv_rows[1][3].endswith("(package root) ModAVD.exe"))
         self.assertEqual(len(csv_rows), 6)
-        self.assertIn("管理器和命令行", (tree / "说明.txt").read_text(encoding="utf-8"))
+        # the files that are gone are out of the entry, in both texts; the rest of it stays in order
+        for name in gone:
+            self.assertNotIn(name, text)
+            self.assertNotIn(name, csv_rows[2][3])
+        self.assertIn("Notices for file(s):\n(package root) 说明.txt\n(package root) LICENSES/NOTICE.txt\n", text)
+        self.assertIn("(package root) LICENSES/NOTICE.csv\n(package root) tools/modavd-bridge.ps1\nThe notices", text)
+        self.assertEqual(csv_rows[2][3], "(package root) 说明.txt (package root) LICENSES/NOTICE.txt "
+                                         "(package root) LICENSES/NOTICE.csv (package root) tools/modavd-bridge.ps1")
+        # 说明.txt: the batch files are gone from it, the manager and the CLI take their place
+        shown = (tree / "说明.txt").read_text(encoding="utf-8")
+        self.assertIn("管理器和命令行", shown)
+        self.assertNotIn(".bat", shown)
+        for _, new in release.README_EDITS:
+            self.assertEqual(shown.count(new), 1)
+        self.assertIn("tools\\modavd.exe components fetch", shown)
+        self.assertIn("tools\\modavd.exe collect-info", shown)
+        self.assertLess(shown.index("1. 解压。"), shown.index("2. 双击 ModAVD.exe"))
+        self.assertLess(shown.index("2. 双击 ModAVD.exe"), shown.index("3. 新建实例。"))
+        # each passage has to be there exactly once: refuse rather than guess
+        for old, _ in release.README_EDITS:
+            for broken in [readme.replace(old, ""), readme + old]:
+                (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+                (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
+                (tree / "说明.txt").write_text(broken, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "说明.txt: the passage " + re.escape(repr(old.splitlines()[0]))):
+                    release.extend_texts(tree, "go1.26.5")
+        # a file to take out that the reviewed texts do not name (any more): refuse rather than guess, in either text
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
+        (tree / "说明.txt").write_text(readme, encoding="utf-8")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice.replace("(package root) tools/collect-info.ps1\n", ""), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "NOTICE.txt.*collect-info.ps1"):
+            release.extend_texts(tree, "go1.26.5")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+        rows_gone = [list(r) for r in rows]
+        rows_gone[2][3] = rows_gone[2][3].replace(" (package root) tools/collect-info.ps1", "")
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows_gone), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "NOTICE.csv.*collect-info.ps1"):
+            release.extend_texts(tree, "go1.26.5")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         # an entry the texts were reviewed with is gone: refuse rather than guess
         (tree / "说明.txt").write_text("安装\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "说明.txt"):
@@ -664,9 +716,20 @@ class ReleaseChecks(unittest.TestCase):
         (tree / "LICENSES/NOTICE.txt").write_text(notice.replace("ModAVD scripts and documents", "Scripts"), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "ModAVD scripts and documents"):
             release.extend_texts(tree, "go1.26.5")
-        # a file nobody listed
+        # from good texts again: a file nobody listed
+        for rel, data in [("LICENSES/NOTICE.txt", notice), ("LICENSES/NOTICE.csv", release.render_csv(rows)), ("说明.txt", readme)]:
+            (tree / rel).write_text(data, encoding="utf-8")
+        release.extend_texts(tree, "go1.26.5")
+        release.check_notice_coverage(tree)
         (tree / "tools/new.ps1").write_bytes(b"x")
-        with self.assertRaisesRegex(ValueError, "tools/new.ps1"):
+        with self.assertRaisesRegex(ValueError, "no entry for: tools/new.ps1$"):
+            release.check_notice_coverage(tree)
+        # a listed file the package does not have
+        (tree / "tools/new.ps1").unlink()
+        extended = (tree / "LICENSES/NOTICE.txt").read_text(encoding="utf-8")
+        (tree / "LICENSES/NOTICE.txt").write_text(extended.replace("(package root) 说明.txt\n", "(package root) 说明.txt\n(package root) tools/old.ps1\n"),
+                                                  encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "does not have: tools/old.ps1$"):
             release.check_notice_coverage(tree)
 
     def test_license_package_needs_agpl_full_text(self):
@@ -719,7 +782,9 @@ class ReleaseChecks(unittest.TestCase):
         self.commit_files(root / "pub", {".gitattributes": b"package/** -text\nbridge/** -text\n", "README.md": b"# ModAVD\n",
                                          "patches/BASE.md": b"x\n", "bridge/nbshim/modavd_bridge.rc": b"service modavd\r\n",
                                          "bridge/nbshim/jni/native_bridge_shim.cc": b"int x;\n",
-                                         **{f"package/{n}": f"{n}\r\n".encode() for n in release.PACKAGE_TOOLS + release.PACKAGE_ROOT}})
+                                         # a batch file left in package/ is not shipped
+                                         "package/补全组件.bat": b"bat\r\n",
+                                         **{f"package/{n}": f"{n}\r\n".encode() for n in release.PACKAGE_TOOLS}})
         return SimpleNamespace(manager=str(manager), manager_repo=str(root / "mgr"), ime_apk=str(apk), ime_repo=str(root / "ime"),
                                repository=str(root / "pub"))
 
@@ -734,8 +799,9 @@ class ReleaseChecks(unittest.TestCase):
         dest = root / "tree"
         release.copy_public_files(own, args.manager, dest)
         self.assertEqual((dest / "tools/modavd.exe").read_bytes(), b"cli")
-        self.assertEqual((dest / "补全组件.bat").read_bytes(), "补全组件.bat\r\n".encode())
         self.assertEqual((dest / "tools/modavd-bridge.ps1").read_bytes(), b"modavd-bridge.ps1\r\n")
+        self.assertEqual(sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()),
+                         ["ModAVD.exe", "tools/modavd-bridge.ps1", "tools/modavd.exe"])
         # a rebuilt ZIP under the published name
         other = root / "other" / Path(args.manager).name
         other.parent.mkdir()
@@ -759,7 +825,7 @@ class ReleaseChecks(unittest.TestCase):
                                 ({"repository": str(root / "mgr")}, "ModAVD checkout")]:
             with self.assertRaisesRegex(ValueError, message):
                 release.public_sources(SimpleNamespace(**{**vars(args), **change}))
-        (root / "pub/package/collect-info.ps1").write_bytes(b"changed\r\n")
+        (root / "pub/package/modavd-bridge.ps1").write_bytes(b"changed\r\n")
         with self.assertRaisesRegex(ValueError, "uncommitted changes under package/"):
             release.public_sources(args)
 

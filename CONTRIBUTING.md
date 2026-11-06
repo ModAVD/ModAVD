@@ -12,12 +12,12 @@
 
 - ModAVD 只有一个维护者，回复可能要几天。大一点的改动请先开 issue 商量，没商量过的大 PR 可能不合。
 - 动手前在 issue 里说一声；issue 已经指派给谁，就是有人在做。
-- 最需要的是在你的电脑上试：装好跑一轮日常，在 [Issues](https://github.com/ModAVD/ModAVD/issues) 新开 issue，并附上「复制配置信息.bat」的输出。见[游戏实测和兼容性报告](https://modavd.github.io/develop/testing)。
+- 最需要的是在你的电脑上试：装好跑一轮日常，在 [Issues](https://github.com/ModAVD/ModAVD/issues) 新开 issue，并附上「复制配置信息」的输出（管理器「设置」→「组件与问题反馈」，或 `tools\modavd.exe report-config`）。见[游戏实测和兼容性报告](https://modavd.github.io/develop/testing)。
 
 ## 报问题
 
 - 各组件的问题都在本仓库的 [Issues](https://github.com/ModAVD/ModAVD/issues) 提：模拟器本体，也包括管理器和命令行、宿主输入法、文档站、发版前回归。开 issue 时选上是哪个组件。
-- 附「收集问题信息.bat」生成的问题包。哪些能公开贴、崩溃转储怎么私下发，见[反馈问题](https://modavd.github.io/guide/feedback)。
+- 附「收集问题信息」生成的问题包（管理器「设置」→「组件与问题反馈」，或 `tools\modavd.exe collect-info`）。哪些能公开贴、崩溃转储怎么私下发，见[反馈问题](https://modavd.github.io/guide/feedback)。
 - AUTO-MAS 的界面、任务、调度问题，请到 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS/issues) 提。
 - 安全问题不要公开发，请发邮件到 qiyinxi@foxmail.com。
 
@@ -25,7 +25,7 @@
 
 - 文档：使用说明和开发说明都在文档站的仓库 [modavd.github.io](https://github.com/ModAVD/modavd.github.io)，每页底部有「在 GitHub 上改这一页」。本仓库的 README 写错了直接提 PR。
 - 中英两版：README 和这份说明都有中文（`README.md`、`CONTRIBUTING.md`）和英文（`README.en.md`、`CONTRIBUTING.en.md`）两份，逐节对应，中文是主语言。改了一份，就在同一个 PR 里把另一份也改了；只会写一种语言的，在 PR 里说一声，由维护者补上。文档站的英文页也是这样，见[文档和本站](https://modavd.github.io/develop/docs)。
-- 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。
+- 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。补全组件、收集问题信息、复制配置信息在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager) 里改。
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
 - 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。
 - `patches/`、`manifests/`、`release/` 是发版工具（`tools/pubrel/`）导出的：PR 不直接改这些，有问题先开 issue。

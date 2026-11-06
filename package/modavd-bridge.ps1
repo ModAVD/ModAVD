@@ -177,7 +177,7 @@ function Die([string]$Text, [int]$Code) {
     exit $Code
 }
 
-# 不用 Get-FileHash：经 cmd 调起的 Windows PowerShell 5.1 有时找不到它（同 fetch-components.ps1）
+# 不用 Get-FileHash：经 cmd 调起的 Windows PowerShell 5.1 有时找不到它
 function Sha256File([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create()
     $stream = [IO.File]::OpenRead($Path)
@@ -445,7 +445,7 @@ if (-not $Adb) { $Adb = Join-Path $Root 'sdk\platform-tools\adb.exe' }
 if (-not $Payload) { $Payload = Join-Path $Root 'sdk\emulator\resources\modavd' }
 
 if (-not (Test-Path -LiteralPath $Adb)) {
-    Die "找不到 adb：$Adb`n包里的 adb 要先双击「补全组件.bat」下载；也可以用 -Adb 指一个。" 2
+    Die "找不到 adb：$Adb`n包里的 adb 要先下载：在管理器里点「补全组件」，或运行 tools\modavd.exe components fetch；也可以用 -Adb 指一个。" 2
 }
 $script:AdbExe = (Resolve-Path -LiteralPath $Adb).Path
 

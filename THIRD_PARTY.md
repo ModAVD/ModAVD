@@ -81,13 +81,13 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 | `components\modavd-ime.apk`（宿主输入法），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi。源码在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) |
 | `sdk\emulator\resources\modavd\*`（arm64 执行桥：`libmodavd_bridge.so`、`libmodavd_gate.so`、`modavd_bridge.rc`），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；`libmodavd_gate.so` 静态链接的 Android NDK 的 LLVM libc++ / libc++abi 是 Apache-2.0 WITH LLVM-exception。源码在本仓库的 [bridge/](bridge/) |
 
-`补全组件.bat` 那一行是 `37.2.10-mas30` 的情况。0.36.0 起，其中包根的 `.bat` 和 `tools\*.ps1`（源码在本仓库的 [package/](package/)）改按 AGPL-3.0-or-later 发布；见 README 的[许可证与源码](README.md#许可证与源码)。
+`补全组件.bat` 那一行是 `37.2.10-mas30` 的情况。0.36.0 起，其中包根的 `.bat` 和 `tools\*.ps1`（源码在本仓库的 [package/](package/)）改按 AGPL-3.0-or-later 发布；见 README 的[许可证与源码](README.md#许可证与源码)。0.38.2 起包里不再有 `.bat`，`tools\` 下的脚本只剩装执行桥的 `modavd-bridge.ps1`，补全组件、收集问题信息由管理器和命令行做。
 
 最后三行是 ModAVD 自己的程序，源码都在同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里的 `modavd-src-<提交>.tar.xz`，`LICENSE` 和 `NOTICE` 在归档里；许可证全文是包里的 `LICENSES\AGPL-3.0.txt`。
 
 ## 不在包里的
 
-- **adb 和系统镜像**：Google 的软件，受《Android 软件开发套件许可协议》约束，由「补全组件.bat」在你同意协议后从官方渠道下载。
+- **adb 和系统镜像**：Google 的软件，受《Android 软件开发套件许可协议》约束，由管理器的「补全组件」或 `tools\modavd.exe components fetch` 在你同意协议后从官方渠道下载（0.38.1 及更早的包里是「补全组件.bat」）。
 - **官方构建里有、我们拿掉的**：`bin64\`（Cygwin 版 e2fsprogs 及其 DLL）、`drivers\`、`resources\` 里的虚拟场景、宏示例和 Pixel 10 皮肤、FlatBuffers 开发文件、ARM 和 32 位 x86 的 `qemu-system`。
 - **x264**：FFmpeg 没有启用它，包里任何文件都没有链接 x264。
 

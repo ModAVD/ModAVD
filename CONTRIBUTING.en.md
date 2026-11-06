@@ -12,12 +12,12 @@ What follows are the points that matter most before you open an issue or a PR.
 
 - ModAVD has one maintainer, and replies can take a few days. For anything bigger, open an issue and talk it over first; a large PR that was not discussed may not be merged.
 - Say so in the issue before you start work. If an issue is assigned to someone, that person is working on it.
-- What helps most is testing on your own computer: install it and run a normal day of tasks. Open an issue in [Issues](https://github.com/ModAVD/ModAVD/issues) and include the output of `复制配置信息.bat` (copies your system and game info). See [Game testing and compatibility reports](https://modavd.github.io/en/develop/testing).
+- What helps most is testing on your own computer: install it and run a normal day of tasks. Open an issue in [Issues](https://github.com/ModAVD/ModAVD/issues) and include the output of **复制配置信息** (Copy system info; in the manager under **设置** (Settings) → **组件与问题反馈** (Components and feedback), or `tools\modavd.exe report-config`). See [Game testing and compatibility reports](https://modavd.github.io/en/develop/testing).
 
 ## Reporting problems
 
 - Problems with every component go to this repository's [Issues](https://github.com/ModAVD/ModAVD/issues): the emulator itself, and also the manager and CLI, the host IME, the docs site and the pre-release regression. Pick the component when you open the issue.
-- Attach the problem report made by `收集问题信息.bat` (collects a problem report). What you may post publicly and how to send crash dumps privately is in [Report a problem](https://modavd.github.io/en/guide/feedback).
+- Attach the problem report made by **收集问题信息** (Collect a problem report; in the manager under **设置** (Settings) → **组件与问题反馈** (Components and feedback), or `tools\modavd.exe collect-info`). What you may post publicly and how to send crash dumps privately is in [Report a problem](https://modavd.github.io/en/guide/feedback).
 - For problems with AUTO-MAS's interface, tasks or scheduling, please go to [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS/issues).
 - Do not post security problems in public; e-mail them to qiyinxi@foxmail.com.
 
@@ -25,7 +25,7 @@ What follows are the points that matter most before you open an issue or a PR.
 
 - Documentation: the user and developer docs are in the docs site's repository, [modavd.github.io](https://github.com/ModAVD/modavd.github.io), and every page has an "Edit this page on GitHub" link at the bottom. If this repository's README is wrong, open a PR directly.
 - Both languages: the README and this guide each come in a Chinese file (`README.md`, `CONTRIBUTING.md`) and an English file (`README.en.md`, `CONTRIBUTING.en.md`) that match section by section; Chinese is the primary language. If you change one, change the other in the same PR. If you only write one of the two languages, say so in the PR and the maintainer will add the other. The English pages of the docs site work the same way; see [Documentation and this site](https://modavd.github.io/en/develop/docs).
-- Bundled scripts in `package/`: PRs are welcome and ship with the next release once merged. How to write them is in [package/README.md](package/README.md) (in Chinese).
+- Bundled scripts in `package/`: PRs are welcome and ship with the next release once merged. How to write them is in [package/README.md](package/README.md) (in Chinese). Fetching the components, collecting a problem report and copying the system info are changed in [ModAVDManager](https://github.com/ModAVD/ModAVDManager).
 - The arm64 execution bridge in `bridge/`: open an issue first. It decides directly whether a game can start, so every version is regression-tested by running games on an instance that has the bridge installed.
 - Emulator patches: open an issue first, then export a `.patch` as described in [The emulator itself](https://modavd.github.io/en/develop/emulator) and attach it to the issue, or open a PR that only adds `incoming/<topic>/*.patch`. A patch should already be in the shape we will take: keep test scripts out of the patch itself (put them in the PR description, or in `incoming/<topic>/tests/`). Once reviewed it is merged, and merged means accepted: it ships unchanged with the next release, with your authorship kept. You do not have to be able to build or run the regression tests.
 - `patches/`, `manifests/` and `release/` are exported by the release tools (`tools/pubrel/`): PRs do not change them directly; if something is wrong, open an issue first.
