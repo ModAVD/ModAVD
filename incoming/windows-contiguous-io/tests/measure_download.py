@@ -30,6 +30,10 @@ def main():
     if args.seconds < 10 or args.seconds > 600:
         p.error("Sampling duration must be 10 through 600 seconds")
     config = json.loads((args.root / "mas-avd.json").read_text(encoding="utf-8-sig"))
+    sdk_override = config.get("sdkRoot")
+    sdk = ((args.root / sdk_override.strip()).resolve()
+           if isinstance(sdk_override, str) and sdk_override.strip()
+           else (args.root / "sdk").resolve())
     port = int(config.get("scriptAdbServerPort", 20049))
     if port == 5037:
         p.error("Default adb server is forbidden")
@@ -40,13 +44,14 @@ def main():
     expected_avd = (args.root / "avd" / (info["name"] + ".avd")).resolve()
     if Path(info["path"]).resolve() != expected_avd:
         raise RuntimeError("Instance path does not belong to the requested root")
-    exe = args.root / "sdk/emulator/qemu/windows-x86_64/qemu-system-x86_64.exe"
     process = json.loads(run(["powershell.exe", "-NoProfile", "-Command",
         f"Get-CimInstance Win32_Process -Filter 'ProcessId = {int(info['pid'])}' | "
         "Select-Object ExecutablePath | ConvertTo-Json -Compress"]))
     if not process or not process.get("ExecutablePath"):
         raise RuntimeError("Cannot verify the selected emulator process")
-    if Path(process["ExecutablePath"]).resolve() != exe.resolve():
+    exe = Path(process["ExecutablePath"]).resolve()
+    if (exe.parent != (sdk / "emulator/qemu/windows-x86_64").resolve() or
+            exe.name.lower() not in ("qemu-system-x86_64.exe", "qemu-system-x86_64-headless.exe")):
         raise RuntimeError("Running emulator executable differs from the requested root")
     if exe.stat().st_mtime * 1000 > info["started_at_ms"]:
         raise RuntimeError("Emulator executable changed after launch; restart before measuring")
@@ -54,11 +59,12 @@ def main():
         actual = hashlib.file_digest(f, "sha256").hexdigest()
     if actual != args.expected_exe_sha256.lower():
         raise RuntimeError("Emulator build does not match the expected executable")
-    adb = args.root / "sdk/platform-tools/adb.exe"
+    adb = sdk / "platform-tools/adb.exe"
     serial = info["adb_address"]
     run([adb, "-P", port, "connect", serial])
     prefix = [adb, "-P", port, "-s", serial, "shell"]
     script = '\n'.join([
+        'echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"',
         'echo "uptime=$(cat /proc/uptime)"',
         'echo "rx=$(cat /sys/class/net/eth0/statistics/rx_bytes)"',
         'echo "disk=$(cat /sys/block/vdc/stat)"',
@@ -74,18 +80,25 @@ def main():
         if not fields.get("pid"):
             raise RuntimeError("Game is not running; refusing an empty download measurement")
         disk = fields["disk"].split()
-        return {"guest_seconds": float(fields["uptime"].split()[0]),
+        return {"boot_id": fields["boot_id"], "game_pids": sorted(int(x) for x in fields["pid"].split()),
+                "guest_seconds": float(fields["uptime"].split()[0]),
                 "rx_bytes": int(fields["rx"]), "written_sectors": int(disk[6]),
                 "external_kib": int(fields["external"].split()[0]) if fields["external"] else None,
                 "internal_kib": int(fields["internal"].split()[0]) if fields["internal"] else None,
                 "clocksource": fields["clock"], "write_cache": fields["cache"]}
     data = {"build_label": args.build_label, "emulator_sha256": actual,
-            "package": args.package, "scope": "Observed installed build only; not candidate patch validation",
+            "package": args.package,
+            "scope": "Executable verified by hash; source-to-binary provenance must be recorded separately",
             "samples": []}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     begin = time.monotonic()
     while True:
-        s = sample(); data["samples"].append(s)
+        s = sample()
+        if data["samples"]:
+            first = data["samples"][0]
+            if s["boot_id"] != first["boot_id"] or s["game_pids"] != first["game_pids"]:
+                raise RuntimeError("Guest or game restarted during measurement")
+        data["samples"].append(s)
         print(json.dumps(s), flush=True)
         args.out.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         elapsed = time.monotonic() - begin

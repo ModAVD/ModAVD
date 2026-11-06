@@ -1,0 +1,49 @@
+{
+  "scope": "Initial resource-version request timeout on a fresh candidate installation; recovered without settings changes or restart",
+  "qemu_sha256": "e51c956b2a9fc1f5e9e7661a18eb6c39d0b4aa5a45aff0121c6f77212c30da05",
+  "package": "com.shenlan.m.reverse1999",
+  "primary_abi": "x86_64",
+  "initial_version_errors": [
+    {
+      "guest_utc": "2026-11-06T13:11:12.825Z",
+      "endpoint": "https://hotupdate.sl916.com/patch/50001/version",
+      "reported_error": "HotUpdateInfoMgr.DoRequestRemoteVersion: Request timeout"
+    },
+    {
+      "guest_utc": "2026-11-06T13:11:17.954Z",
+      "endpoint": "https://hotupdate-bak.sl916.com/patch/50001/version",
+      "reported_error": "HotUpdateInfoMgr.DoRequestRemoteVersion: Request timeout"
+    }
+  ],
+  "separate_sdk_dns_error": {
+    "guest_utc": "2026-11-06T13:10:32.902Z",
+    "host": "usdk.dailygn.com",
+    "error": "UnknownHostException: Unable to resolve host; no address associated with hostname"
+  },
+  "resolver_counts": {
+    "total": 128,
+    "NOERROR": 75,
+    "TIMEOUT": 53,
+    "reported_average_rtt_ms": 2093,
+    "limit": "All retained queries on this network, not attribution of the two version-request failures"
+  },
+  "observed_configuration": {
+    "private_dns_mode": "off",
+    "private_dns_specifier": "null",
+    "http_proxy": "null",
+    "guest_utc": "2026-11-06T13:15:44Z",
+    "guest_clock_vs_host": "Within approximately 3 seconds of the host capture midpoint; whole-second timestamp and command duration limit accuracy"
+  },
+  "current_resolved_peers": {
+    "hotupdate.sl916.com": "114.117.133.26",
+    "hotupdate-bak.sl916.com": "114.80.250.150",
+    "evidence": "Host DNS A records match addresses of game-owned TCP sockets with several KiB received; this does not establish a successful HTTP response"
+  },
+  "tls_and_http_limits": "The two failed version requests report timeout without an HTTP status or explicit certificate/handshake error. TCP bytes received cannot identify the failed protocol stage.",
+  "natural_recovery": {
+    "state": "Resource selection reached after checking 16883/16883 files; normal download proceeded",
+    "game_process_restart": false,
+    "configuration_changed": false
+  },
+  "conclusion": "Record one transient pre-download version-metadata timeout. DNS instability is a plausible contributor, but the exact timeout stage is unproven. No evidence here establishes a candidate I/O patch fault."
+}

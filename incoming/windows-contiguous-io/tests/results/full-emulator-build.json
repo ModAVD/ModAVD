@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-06",
+  "scope": "Local complete Windows headless emulator builds; runtime validation is recorded separately",
+  "compiler": "Clang 22.0.2 (clang-r596125) with MSVC 14.51 and Windows SDK",
+  "cmake": "4.4.3",
+  "variants": {
+    "candidate": {
+      "source_commit": "9fb9d94b4e1efab3bd97fb3db3c6c31b9c687f47",
+      "source_tree": "c93b081547c8703747e0a45b6bc85e63243186ee",
+      "source_clean": true,
+      "configuration": {
+        "flags": [
+          "-DCMAKE_BUILD_TYPE=Release",
+          "-DOPTION_MINBUILD=ON",
+          "-DOPTION_AEMU_LIBS_ONLY=OFF",
+          "-DWEBRTC=OFF",
+          "-DQTWEBENGINE=OFF",
+          "-DOPTION_CRASHUPLOAD=NONE",
+          "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+          "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+        ],
+        "target": "qemu-system-x86_64-headless",
+        "generator": "Ninja",
+        "ninja_sha256": "9546466f0feca6d62d7d4ea9b7fbc381f8e302cb7f02f4ce327a39d8577bb293",
+        "toolchain": "toolchain-windows_msvc-x86_64.cmake"
+      },
+      "configuration_sha256": "9a2abf8e0adf4ade268393b9e56362efb43035e01111a7c8ee1e7948b8abd84a",
+      "dependency_manifest_sha256": "14481d92be5b9c9c1bc27dd32c51b59187e73506c4221b3d7faae6c9718665b1",
+      "headless_exe_sha256": "e51c956b2a9fc1f5e9e7661a18eb6c39d0b4aa5a45aff0121c6f77212c30da05",
+      "file_win32_source_sha256": "395537fc4ab3dcf640c9adbb74ae1ff0576e1d688ef2d0e629765354acee16a2",
+      "file_win32_object_sha256": "db533d189673695b8ccdd4f9a73d63edd2a3020037144e5e4b4525cd07a9d51a",
+      "file_win32_compile_commands_sha256": "d505f60ad939c8c74fe7424424ce58e3022498224a200a4cf1ee9c7f469b5533",
+      "build_record_sha256": "0c9c067d86d65138f1581ec88c907abbfdafa94cd45d3b44da3ff5fb549b54cd",
+      "build_log_sha256": "873a6f48e4c14b67074dbeadbc8205d64cbedc0106f8ee71ff2ce2d69646ed4e"
+    },
+    "baseline": {
+      "source_commit": "1f25f112ab717ae87dec34b734937b922eb64e15",
+      "source_tree": "3add52e94eee2430ea3baf89b44b29dbd1752028",
+      "source_clean": true,
+      "configuration": {
+        "flags": [
+          "-DCMAKE_BUILD_TYPE=Release",
+          "-DOPTION_MINBUILD=ON",
+          "-DOPTION_AEMU_LIBS_ONLY=OFF",
+          "-DWEBRTC=OFF",
+          "-DQTWEBENGINE=OFF",
+          "-DOPTION_CRASHUPLOAD=NONE",
+          "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
+          "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+        ],
+        "target": "qemu-system-x86_64-headless",
+        "generator": "Ninja",
+        "ninja_sha256": "9546466f0feca6d62d7d4ea9b7fbc381f8e302cb7f02f4ce327a39d8577bb293",
+        "toolchain": "toolchain-windows_msvc-x86_64.cmake"
+      },
+      "configuration_sha256": "9a2abf8e0adf4ade268393b9e56362efb43035e01111a7c8ee1e7948b8abd84a",
+      "dependency_manifest_sha256": "14481d92be5b9c9c1bc27dd32c51b59187e73506c4221b3d7faae6c9718665b1",
+      "headless_exe_sha256": "40cced30a7aa31afc8515640caabb960c44454aedd66fb91379f20c83fbe70c6",
+      "file_win32_source_sha256": "b2b3f272986005d1642fc8a9b8f2d2c6eb58918d2e03d65cbb682ebce1cffdc8",
+      "file_win32_object_sha256": "9cf64ccdf7b422407aff620158b538fce6853768ae54761dabd5832203eddd4c",
+      "file_win32_compile_commands_sha256": "d505f60ad939c8c74fe7424424ce58e3022498224a200a4cf1ee9c7f469b5533",
+      "build_record_sha256": "37738f5546921b81f90a24430c8c2a19b3a54a0c6779eb739dee2b6063e9085a",
+      "build_log_sha256": "671fe844ec57cb79bf6ba3a660ff6dd5b693252f1bae581aefd5a6f799690dc8"
+    }
+  },
+  "incremental_link_note": "The build passes qemu2-common through raw wholearchive flags, so changing the archive did not trigger an executable relink. The stale output was rejected. The candidate executable was then explicitly relinked through the unchanged build target; its hash and object hash differ from baseline.",
+  "dependency_scope": "Pinned emulator components and necessary Windows build inputs only. No complete Android checkout or system image download. Installed runtime files were reused only after matching pinned Git blob IDs.",
+  "host": {
+    "os": "Windows 11 Pro",
+    "os_version": "10.0.26200",
+    "cpu": "Intel Core i7-13700KF",
+    "os_reported_physical_memory_bytes": 34138894336,
+    "storage_model": "WD_BLACK SN850X 2000GB",
+    "storage_bus": "NVMe",
+    "gpu": "NVIDIA GeForce RTX 4060 Ti"
+  }
+}

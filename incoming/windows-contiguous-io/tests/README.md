@@ -24,7 +24,7 @@ Functional coverage includes:
 
 - Contiguous and fragmented reads/writes around 64 KiB, and 1 MiB requests.
 - Independent readback and file-length checks, including offsets above 4 GiB.
-- Original aligned buffers with `FILE_FLAG_NO_BUFFERING`.
+- Original aligned buffers with `FILE_FLAG_NO_BUFFERING`, tested at 8 KiB.
 - Real EOF and invalid handles; injected access, EOF, disk-full, short-write,
   and flush failures.
 - Bounce-allocation failure, zero-length vector fallback, size mismatch,
@@ -40,13 +40,47 @@ network, game downloader, and per-request durability barriers. The final flush
 of each benchmark case is outside the timed sample. Results measure this host
 function only. They do not establish emulator throughput, game compatibility,
 power-loss durability, or the frequency of contiguous requests in real games.
+Real I/O cases cover requests up to 1 MiB. The `DWORD` and pointer-overflow
+boundaries are predicate checks without corresponding large I/O operations.
+
+## Complete emulator and guest writes
+
+The complete Windows headless builds and their source, object and executable
+hashes are recorded in [full-emulator-build.json](results/full-emulator-build.json).
+Use the same dependencies and configuration for both versions. For an
+incremental build, verify that the final executable is actually relinked:
+the current build passes `qemu2-common` through raw `wholearchive` flags, so
+rebuilding that archive alone can leave an unchanged executable. A successful
+compiler exit or changed object file is not enough.
+
+`syncbench.cc` is an Android x86_64 probe. Each worker appends 7,168 bytes and
+calls real `fsync` on every iteration. Arguments select 1–8 workers and 1–120
+seconds; defaults are one worker and ten seconds. Build it with the Android NDK
+C++ compiler and static libc++. Run only on a disposable test instance after
+checking that `/data/local/tmp/modavd-syncbench` is a real, empty directory and
+that no other probe or game is running. It creates and removes only its own
+`work-<id>.bin` files in that directory. A failed run must be investigated before
+reusing the directory.
+
+Alternate the two compiled emulator versions, preserve all samples, and verify
+the running executable hash before each measurement. This probe measures guest
+write-plus-fsync throughput; it does not prove power-loss durability or a game
+download speedup. The three formal alternating pairs and all retained samples
+are in [native-fsync.json](results/native-fsync.json).
 
 ## Download observations
 
 `measure_download.py` reads counters from a selected running test instance. It
 checks the instance path, process executable, executable hash and launch time,
-then uses `scriptAdbServerPort` from that root's configuration. It rejects port
-5037. The game must already be downloading through its own UI.
+then uses `scriptAdbServerPort` from that root's configuration. It follows the
+Manager's `sdkRoot` override: relative values resolve against the selected root,
+absolute values select that SDK, and an empty or absent value uses `<root>/sdk`.
+Both QEMU and adb must come from the selected SDK. The script accepts its GUI
+or headless QEMU executable, rejects port 5037, and records the guest boot ID
+and game PIDs with each sample. It stops if either changes during the window.
+The game must already be downloading through its own UI. This path was also
+smoke-tested for ten seconds on the compiled candidate headless build while
+Arknights was downloading.
 
 ```powershell
 python measure_download.py --root <test-root> --index <test-index> --package <package-name> --expected-exe-sha256 <tested-qemu-hash> --build-label <tested-build> --seconds 150 --out <result.json>
@@ -54,8 +88,13 @@ python measure_download.py --root <test-root> --index <test-index> --package <pa
 
 The script reads network counters for the instance, block writes and allocated
 space in the application's files directories. It does not install or launch
-games, click their UI, change game files, restart the instance or claim that
-the candidate patch is installed. A window spanning unpacking or an idle login
-page is not a steady download-speed measurement. Record the observed UI phase
-with each result. The committed game records use the released emulator;
-they are not a baseline/candidate comparison.
+games, click their UI, change game files, or restart the instance. The executable
+hash identifies the observed binary; record source-to-binary provenance
+separately. A window spanning unpacking or an idle login page is not a steady
+download-speed measurement. Record the observed UI phase with each result.
+
+Candidate game observations are in [compiled-games.json](results/compiled-games.json).
+The older released-build observations remain in [games.json](results/games.json)
+and the individual released-build window files. Neither set is a controlled
+baseline/candidate speed comparison. [RESULTS.md](RESULTS.md) distinguishes
+the builds, completed observations, and limits.
