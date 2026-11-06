@@ -31,7 +31,7 @@
 - `patches/`、`manifests/`、`release/` 是发版工具（`tools/pubrel/`）导出的：PR 不直接改这些，有问题先开 issue。
 - 发版和编译工具 `tools/`，以及 CI 检查 `scripts/`（发版工具也用这一份）：改动先开 issue 商量。本机路径不写进仓库，用参数或本机配置，见 [tools/README.md](tools/README.md)；改了 `tools/pubrel/` 或 `scripts/` 要在本地跑 `python -I tools/pubrel/test_release.py --work <全新临时目录>`。
 - 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)，发版前回归（端到端测试）在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)：PR 提到那边，issue 还是在本仓库提。
-- 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。
+- 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留；我们只给它们加了 `environment: mirrorchyan`，上传令牌放在这个 environment 里，只有 `v*` tag 上的运行拿得到。
 - CI 绿灯只表示该仓库已经声明的静态、构建或协议检查通过，不代表完成了完整编译、Windows 实机启动、GPU 或游戏兼容性验证，也不代表 AUTO-MAS 全流程已经验证。
 - 跨仓库的协议、版本或整包集成改动，要在相关仓库分别说明基线、依赖和实际验证范围；一个仓库的 CI 结果不能代替另一个仓库的验证。
 - 不收编译 CI：源码加编译产物约 124 GB，GitHub 的免费机器跑不了；自托管 runner 又会让外部 PR 在那台机器上执行任意命令（见 #5）。

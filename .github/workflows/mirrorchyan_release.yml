@@ -16,6 +16,8 @@ permissions:
 jobs:
   mirrorchyan:
     if: ${{ github.repository_owner == 'ModAVD' }}
+    # The upload token is an environment secret, so a workflow on a contributor's branch cannot read it.
+    environment: mirrorchyan
     runs-on: macos-latest
     timeout-minutes: 30
     strategy:
