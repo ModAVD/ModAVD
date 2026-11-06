@@ -5,7 +5,7 @@
     "min_automas": "5.7.0",
     "changes": {
       "新增": [
-        "可选的 Google Play 商店：补全组件时勾上 Play 商店服务（或导入自己的文件），再在实例的「更多操作」里补全；新建的实例默认不带。（[#125](https://github.com/ModAVD/ModAVD/issues/125)）"
+        "可选的 Google Play 商店：在实例的「更多操作」里点「补全 Google Play 商店…」，缺文件时先下载或导入；新建的实例不带。（[#125](https://github.com/ModAVD/ModAVD/issues/125)）"
       ],
       "变更": [
         "包里的管理器和命令行升到 0.5.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases)；模拟器还是 mas-38，没有重编。",
