@@ -114,7 +114,9 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 & '<adb>' -P <私有端口> -s <测试实例> shell /data/local/tmp/fsync-defer-test
 ```
 
-实机已验（见 `results/2026-11-04-*`）：active 下载 A/B（observe 5.95 → active 40.05 MB/s，约 6.7×，延后约 194 万次、stuck=0、无卡死）；`NoNewPrivs` 确会 0→1（96-3）；对装了过滤器的进程 `kill -SEGV`／`-ABRT` 和没装一样约 0.8 s 退出、不挂住（96-3，明日方舟自带崩溃处理器接管，debuggerd→crash_dump 路径没走到，故仅限「对明日方舟无可见危害」）。仍待实机：退出必刷 + 停线程这轮改动（下载→解压→各种退出→重开自愈、硬杀中途重下修复），EINTR 真机复现，以及登录态下的反作弊 / 卡死、崩溃走到 debuggerd 的路径、名单外应用与官服《阴阳师》回归。
+**现状（2026-11-06 暂停）**：吞吐、EINTR、单测和变异都过了，但**下载中途强杀后可能把资源包写坏**（游戏报错误号 302、重试修不好），第二条根因的修法还没被有效验证，所以不合、不能默认开。目的、做过的尝试和结果、怎么测、后续还要测什么，见交接说明 [`docs/fsync-defer-35.md`](docs/fsync-defer-35.md)；实机测试工具在 [`tests/fsync_defer_device/`](tests/fsync_defer_device/)。
+
+实机已验：active 比 off / observe 快约 8 倍（同一实例、同一包，定窗 150 s：active 25–57 MiB/s 随网络波动，off / observe 5–7 MiB/s），每轮约 100 万次延后、stuck=0、打断 0；`NoNewPrivs` 确会 0→1（96-3）；对装了过滤器的进程 `kill -SEGV`／`-ABRT` 和没装一样约 0.8 s 退出、不挂住（96-3，明日方舟自带崩溃处理器接管，debuggerd→crash_dump 路径没走到，故仅限「对明日方舟无可见危害」）；返回键加游戏内确认退出后重开、强停后重开都不卡；EINTR 探针结果如上。仍待实机：强杀后不坏档（见交接说明）、整包下完进标题页再退出再进、登录态下的反作弊 / 卡死、崩溃走到 debuggerd 的路径、名单外应用与官服《阴阳师》回归。
 
 ## 信号顺序
 
