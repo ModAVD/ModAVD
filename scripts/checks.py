@@ -17,6 +17,9 @@ CATEGORIES = ("新增", "变更", "修复", "移除", "说明")
 MACHINE_VERSIONS = 10
 MAX_ANNOUNCEMENT_CHARS = 4000
 MAX_MACHINE_CHARS = 8000
+# What the release tools leave where only a person can fill in (changes.md, and the new rows release_tools.py adds to
+# patches/BASE.md); the metadata check refuses it, so a release commit cannot go in unfilled.
+PLACEHOLDER = "发布前填写"
 MANIFEST = "modavd-manifest.json"
 # Patch authors: the maintainer's public identity, or an outside contributor's GitHub noreply address, which
 # CONTRIBUTING asks for and the export keeps. Any other address could be a private one, except the upstream author
@@ -137,8 +140,11 @@ def machine_line(data):
 def check_announcement(text, version=None, build=None):
     """Machine line, separator and announcement size of 0.32.1+ release notes."""
     lines = text.splitlines()
+    if lines and len(lines[0]) > MAX_MACHINE_CHARS:
+        raise ValueError(f"Machine-readable line is {len(lines[0])} chars; keep it within {MAX_MACHINE_CHARS} "
+                         f"(it carries the changes of the last {MACHINE_VERSIONS} versions)")
     m = re.fullmatch(re.escape(MACHINE_PREFIX) + r"(\{.*\}) -->", lines[0] if lines else "")
-    if not m or len(lines[0]) > MAX_MACHINE_CHARS or "--" in m[1]:
+    if not m or "--" in m[1]:
         raise ValueError("First line must be a single machine-readable <!-- modavd: {...} --> comment")
     data = json.loads(m[1])
     if set(data) != {"version", "build", "upstream", "min_automas", "changes"}:
@@ -256,8 +262,24 @@ def metadata(root):
         hashes = dict((line.split("  ")[1], line.split("  ")[0]) for line in lines)
         if hashes != {name: a["sha256"] for name, a in assets.items()}:
             raise ValueError("Size manifest hashes differ from checksum files")
+    check_base(root)
     if count := check_incoming(root):
         print(f"Incoming patches OK: {count}")
+
+
+def check_base(root):
+    """patches/BASE.md has no PLACEHOLDER left (see PLACEHOLDER)."""
+    if PLACEHOLDER in (root / "patches/BASE.md").read_text(encoding="utf-8-sig"):
+        raise ValueError(f"patches/BASE.md still contains 「{PLACEHOLDER}」: fill in the new rows (licenses, what changed)")
+
+
+def check_base_row(base_text, s):
+    """The one directory-table row of BASE.md for series.json entry `s` agrees with it."""
+    base_rows = [line for line in base_text.splitlines() if f"`{s['dir']}`" in line and line.startswith("|")]
+    if len(base_rows) != 1 or any(value not in base_rows[0] for value in [s["base"], s["head"], s["upstream"]]):
+        raise ValueError(f"series.json and BASE.md differ: {s['dir']}")
+    if int(base_rows[0].split("|")[4].strip()) != s["count"]:
+        raise ValueError(f"series.json and BASE.md patch counts differ: {s['dir']}")
 
 
 def replay(root, work):
@@ -270,11 +292,7 @@ def replay(root, work):
     for s in series:
         if not re.fullmatch(r"platform/[a-zA-Z0-9_/-]+", s["upstream"]) or any(not re.fullmatch(r"[0-9a-f]{40}", s[k]) for k in ["base", "head", "tree"]):
             raise ValueError("Invalid AOSP project/base")
-        base_rows = [line for line in base_text.splitlines() if f"`{s['dir']}`" in line and line.startswith("|")]
-        if len(base_rows) != 1 or any(value not in base_rows[0] for value in [s["base"], s["head"], s["upstream"]]):
-            raise ValueError("series.json and BASE.md differ")
-        if int(base_rows[0].split("|")[4].strip()) != s["count"]:
-            raise ValueError("series.json and BASE.md patch counts differ")
+        check_base_row(base_text, s)
         directory = s["dir"]
         if not re.fullmatch(r"[a-z0-9_-]+/[a-z0-9_-]+", directory):
             raise ValueError("Unsafe series directory")
