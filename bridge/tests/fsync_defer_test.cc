@@ -168,6 +168,13 @@ void SetUp(int mode) {
   g_sys_fsync_n = 0;
 }
 
+// The crash-repair safe length recorded on fd, or -1 if none.
+long long SafeXattr(int fd) {
+  char buf[24] = {};
+  const ssize_t n = fgetxattr(fd, kSafeXattr, buf, sizeof(buf) - 1);
+  return n > 0 ? atoll(buf) : -1;
+}
+
 // The last fsync syscall() saw went to `fd` and carried the payback magic.
 bool LastFsyncWasMagicOn(int fd) {
   if (g_sys_fsync_n == 0) return false;
@@ -279,6 +286,12 @@ int main() {
     const int handle = g_matched[idx].payback_fd.load();
     CHECK(handle >= 0);                      // a private handle was dup'd at match time
     CHECK(handle != fd);                     // ... and it is not the game's own fd
+    CHECK(g_sys_fsync_n == 1 && LastFsyncWasMagicOn(handle));  // paid back once at match time ...
+    CHECK(SafeXattr(handle) == 0);           // ... so the (still empty) file has a safe length
+    g_sys_fsync_n = 0;
+    char blob[10000];                        // the download appends 10000 bytes
+    memset(blob, 'd', sizeof(blob));
+    CHECK(write(fd, blob, sizeof(blob)) == static_cast<ssize_t>(sizeof(blob)));
     const long now = NowNs();
     g_matched[idx].deferred_ns.store(now);   // one unpaid deferred fsync
     g_matched[idx].paid_ns.store(0);
@@ -287,6 +300,7 @@ int main() {
     CHECK(g_c_payback_err.load() == 0);
     CHECK(g_sys_fsync_n == 1);               // exactly one fsync went out ...
     CHECK(LastFsyncWasMagicOn(handle));      // ... on our handle, with the magic the filter lets by
+    CHECK(SafeXattr(handle) == 8192);        // the size from BEFORE the fsync, rounded down to a page
     CHECK(!PaybackSlotIfDue(idx, now));      // deferred <= paid now -> nothing unpaid
     g_matched[idx].deferred_ns.store(now + 1);               // new defer, paid too recently
     CHECK(!PaybackSlotIfDue(idx, now + 1));
@@ -403,6 +417,7 @@ int main() {
     const int idx = g_fds[fd].matched_idx.load();
     CHECK(idx >= 0);
     CHECK(g_matched[idx].payback_fd.load() >= 0);  // a private handle was dup'd at match time
+    g_sys_fsync_n = 0;                          // (forget the match-time payback)
     const long now = NowNs();
     g_matched[idx].deferred_ns.store(now);
     g_matched[idx].paid_ns.store(now);          // "just paid": the scanner would skip (cap not elapsed)
@@ -446,6 +461,7 @@ int main() {
     const long now = NowNs();
     g_matched[idx].deferred_ns.store(now);
     g_matched[idx].paid_ns.store(0);
+    g_sys_fsync_n = 0;             // (forget the match-time payback)
     g_installed.store(false);
     FlushAndTeardown();            // not armed -> no-op: no shutdown, no flush
     CHECK(!g_shutdown.load());
@@ -471,6 +487,7 @@ int main() {
     const int idx = g_fds[fd].matched_idx.load();
     CHECK(idx >= 0);
     const int handle = g_matched[idx].payback_fd.load();
+    g_sys_fsync_n = 0;                           // (forget the match-time payback)
     const long now = NowNs();
     g_matched[idx].paid_ns.store(now);           // "just paid": the scanner would wait kPaybackEveryNs
     g_matched[idx].deferred_ns.store(now + 1);   // the download's last fsync, deferred
@@ -491,6 +508,40 @@ int main() {
     CHECK(!PayBackBeforeRename(&rn));            // observe never defers, never pays back here
     CHECK(g_sys_fsync_n == 1);
     close(fd);
+  }
+
+  // --- crash repair at start: a matched file whose safe-length xattr is shorter than the file is
+  // cut back to it; a file without the xattr (never deferred), one not longer than its safe length,
+  // and a file that does not match the patterns are left alone --------------------------------
+  SetUp(kActive);
+  {
+    const std::string root = dir + "/repair";
+    auto make = [&](const std::string& rel, size_t size, long long safe) -> std::string {
+      const int fd = OpenUnder(root, rel);
+      CHECK(fd >= 0);
+      std::string data(size, 'r');
+      CHECK(write(fd, data.data(), size) == static_cast<ssize_t>(size));
+      if (safe >= 0) {
+        const std::string v = std::to_string(safe);
+        CHECK(fsetxattr(fd, kSafeXattr, v.data(), v.size(), 0) == 0);
+      }
+      close(fd);
+      return root + "/" + rel;
+    };
+    auto size_of = [](const std::string& p) -> long long {
+      struct stat st;
+      return stat(p.c_str(), &st) == 0 ? static_cast<long long>(st.st_size) : -1;
+    };
+    const std::string cut = make("files/HGGameUpdate/HGDownload/f/download/a.downloading", 20000, 8192);
+    const std::string unmarked = make("files/HGGameUpdate/HGDownload/f/download/b.downloading", 20000, -1);
+    const std::string shorter = make("files/HGGameUpdate/HGDownload/f/download/c.downloading", 20000, 40960);
+    const std::string other = make("files/HGGameUpdate/HGDownload/f/download/d.dat", 20000, 4096);
+    RepairDir(root.c_str(), 0);
+    CHECK(size_of(cut) == 8192);          // cut back to the safe length
+    CHECK(size_of(unmarked) == 20000);    // never deferred: untouched
+    CHECK(size_of(shorter) == 20000);     // not longer than its safe length: untouched
+    CHECK(size_of(other) == 20000);       // not a download temp file: untouched
+    CHECK(g_c_repaired.load() == 1);
   }
 
   // --- RECV errors: a withdrawn notification (ENOENT) is counted as an interruption, our own

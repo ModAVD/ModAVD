@@ -146,6 +146,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <linux/audit.h>
@@ -159,6 +160,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/system_properties.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -386,9 +388,102 @@ void ClosePaybackHandle(int h) {
   }
 }
 
+// ---- crash repair: the "safe length" of a deferred download ---------------------------------
+// Our payback fsync runs while the download thread keeps appending to the same file. ext4 writes
+// the last, partly filled page with zeros past the old end, yet the size it commits can already be
+// the newer one; until that page is written again, a power cut leaves zeros at the end of the file.
+// Seen on device: 3104 zero bytes ending a *.downloading after a hard kill; the game resumes from
+// the file length, so the zeros stay and the unzip fails its CRC (error 302) on every retry. The
+// game's own fsync never races its own appends, so without deferral this does not happen.
+// What IS provable: every byte below the size S0 read just BEFORE a payback fsync, rounded down to
+// a page, was written by the (single, sequential) download thread before that fsync started, so it
+// is on disk and correct once the fsync returns, whatever is appended meanwhile. That length is
+// recorded on the file as an xattr (if a crash loses the newest value, the older one is smaller and
+// still safe). When the package's main process starts, RepairDeferredDownloads() cuts every matched
+// file carrying the xattr back to it, before the game's code runs; the download then re-fetches the
+// rest. Cutting is always safe for a downloader that resumes from the file length (this one does,
+// verified on device); a file without the xattr was never deferred and is left alone.
+constexpr char kSafeXattr[] = "user.modavd.fsync.safe";
+constexpr long long kPageMask = ~4095LL;
+std::atomic<uint64_t> g_c_xattr_err{0};  // safe-length xattr could not be written
+std::atomic<uint64_t> g_c_repaired{0};   // files cut back to their safe length at start
+
+long long FileSize(int fd) {
+  struct stat st;
+  return fstat(fd, &st) == 0 ? static_cast<long long>(st.st_size) : -1;
+}
+
+// Record len (rounded down to a page) as fd's safe length. Only call it after a successful fsync
+// that STARTED after len was read.
+void RecordSafeLength(int fd, long long len) {
+  if (fd < 0 || len < 0) return;
+  char buf[24];
+  const int n = snprintf(buf, sizeof(buf), "%lld", len & kPageMask);
+  if (fsetxattr(fd, kSafeXattr, buf, static_cast<size_t>(n), 0) != 0)
+    g_c_xattr_err.fetch_add(1, std::memory_order_relaxed);
+}
+
+// One real fsync on our own handle (the magic lets it past our filter -- without it the supervisor
+// would trap its own call), recording the safe length on success. Returns the fsync result.
+long PayBackHandle(int fd) {
+  const long long s0 = FileSize(fd);  // BEFORE the fsync: see the block comment above
+  const long r = syscall(__NR_fsync, fd, static_cast<long>(kMagic));
+  if (r == 0) RecordSafeLength(fd, s0);
+  return r;
+}
+
+// Cut one matched file back to its recorded safe length (no-op without the xattr or if it is not
+// longer). Called only before the game's code runs, so nothing is writing the file.
+void RepairFile(const char* path) {
+  const int fd = open(path, O_RDWR | O_CLOEXEC);
+  if (fd < 0) return;
+  char buf[24] = {};
+  const ssize_t n = fgetxattr(fd, kSafeXattr, buf, sizeof(buf) - 1);
+  if (n > 0) {
+    buf[n] = '\0';
+    const long long safe = atoll(buf) & kPageMask;
+    const long long size = FileSize(fd);
+    if (safe >= 0 && size > safe && ftruncate(fd, safe) == 0) {
+      fsync(fd);  // the filter is not installed yet: a plain fsync
+      g_c_repaired.fetch_add(1, std::memory_order_relaxed);
+      FD_LOGI("repair: %s cut %lld -> %lld (safe length of a deferred download)", path, size, safe);
+    }
+  }
+  close(fd);
+}
+
+// Walk dir (bounded depth) and repair every regular file matching the patterns.
+void RepairDir(const char* dir, int depth) {
+  if (depth > 8) return;
+  DIR* d = opendir(dir);
+  if (d == nullptr) return;
+  while (struct dirent* e = readdir(d)) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    char path[512];
+    const int n = snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+    if (n <= 0 || n >= static_cast<int>(sizeof(path))) continue;
+    if (e->d_type == DT_DIR) {
+      RepairDir(path, depth + 1);
+    } else if ((e->d_type == DT_REG || e->d_type == DT_UNKNOWN) && PathMatches(path)) {
+      RepairFile(path);
+    }
+  }
+  closedir(d);
+}
+
+// At arm time in the package's main process: repair the app's external files dir, where the
+// download lives (/storage/emulated/0/Android/data/<pkg>, the path the game's fds resolve to).
+void RepairDeferredDownloads(const char* pkg) {
+  char root[256];
+  const int n = snprintf(root, sizeof(root), "/storage/emulated/0/Android/data/%s", pkg);
+  if (n <= 0 || n >= static_cast<int>(sizeof(root))) return;
+  RepairDir(root, 0);
+}
+
 // Lock held, active mode only. Add a matched fd to the side list; returns its slot index, or
 // -1 if the list is full (then the fd goes untracked and is never deferred). Dups the game's
-// fd into a private payback handle (see OpenPaybackHandle) and stamps matched_ns.
+// fd into a private payback handle (see OpenPaybackHandle), pays it back once so the file gets a
+// safe length before its first deferral (see RecordSafeLength), and stamps matched_ns.
 int MatchedAdd(int fd, const char* path, uint64_t dev, uint64_t ino) {
   for (int i = 0; i < kMaxMatched; ++i) {
     if (g_matched[i].fd == fd) {
@@ -402,7 +497,9 @@ int MatchedAdd(int fd, const char* path, uint64_t dev, uint64_t ino) {
       g_matched[i].fd = fd;
       strncpy(g_matched[i].path, path, sizeof(g_matched[i].path) - 1);
       g_matched[i].path[sizeof(g_matched[i].path) - 1] = '\0';
-      g_matched[i].payback_fd.store(OpenPaybackHandle(fd, dev, ino), std::memory_order_relaxed);
+      const int handle = OpenPaybackHandle(fd, dev, ino);
+      if (handle >= 0) PayBackHandle(handle);  // safe length from the start (crash repair)
+      g_matched[i].payback_fd.store(handle, std::memory_order_relaxed);
       g_matched[i].matched_ns.store(NowNs(), std::memory_order_relaxed);
       g_matched[i].deferred_ns.store(0, std::memory_order_relaxed);
       g_matched[i].paid_ns.store(0, std::memory_order_relaxed);
@@ -769,14 +866,15 @@ void* WatchdogMain(void*) {
     if (now - last_summary >= kSummaryEveryNs) {
       last_summary = now;
       FD_LOGI("summary pkg=%s mode=%s recv=%llu real=%llu other=%llu foreign=%llu rename=%llu deferred=%llu "
-              "payback=%llu rename_flush=%llu payback_err=%llu recv_err=%llu send_err=%llu recv_enoent=%llu "
-              "send_enoent=%llu stuck=%llu idle_ms=%ld",
+              "payback=%llu rename_flush=%llu xattr_err=%llu repaired=%llu payback_err=%llu recv_err=%llu "
+              "send_err=%llu recv_enoent=%llu send_enoent=%llu stuck=%llu idle_ms=%ld",
               g_pkg, g_mode == kActive ? "active" : "observe",
               (unsigned long long)g_c_recv.load(), (unsigned long long)g_c_real.load(),
               (unsigned long long)g_c_other.load(), (unsigned long long)g_c_foreign.load(),
               (unsigned long long)g_c_rename.load(),
               (unsigned long long)g_c_deferred.load(), (unsigned long long)g_c_payback.load(),
-              (unsigned long long)g_c_rename_flush.load(),
+              (unsigned long long)g_c_rename_flush.load(), (unsigned long long)g_c_xattr_err.load(),
+              (unsigned long long)g_c_repaired.load(),
               (unsigned long long)g_c_payback_err.load(), (unsigned long long)g_c_recv_err.load(),
               (unsigned long long)g_c_send_err.load(), (unsigned long long)g_c_recv_enoent.load(),
               (unsigned long long)g_c_send_enoent.load(),
@@ -823,8 +921,8 @@ bool PaybackSlotIfDue(int i, long now) {
     g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
-  // Magic fsync: the filter lets args[1]==kMagic through without a notification.
-  const long r = syscall(__NR_fsync, fd, static_cast<long>(kMagic));
+  // Magic fsync (the filter lets args[1]==kMagic through) + safe length for crash repair.
+  const long r = PayBackHandle(fd);
   if (opened) close(fd);
   g_matched[i].paid_ns.store(now, std::memory_order_relaxed);
   if (r == 0)
@@ -916,7 +1014,7 @@ void FlushAllDeferred() {
       g_c_payback_err.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
-    const long r = syscall(__NR_fsync, fd, static_cast<long>(kMagic));
+    const long r = PayBackHandle(fd);
     g_matched[i].paid_ns.store(NowNs(), std::memory_order_relaxed);
     if (r == 0)
       g_c_payback.fetch_add(1, std::memory_order_relaxed);
@@ -1200,6 +1298,11 @@ extern "C" __attribute__((visibility("default"))) void modavd_fsync_defer_init(c
   strncpy(g_pkg, pkg, sizeof(g_pkg) - 1);
   g_pid = getpid();
   pthread_atfork(nullptr, nullptr, &ForgetAfterFork);
+
+  // Crash repair (see RecordSafeLength): only in the package's main process (the download runs
+  // there; a ":service" process must not cut a file the main process may be writing), and before
+  // the filter goes in and before any of the game's own code has run.
+  if (strchr(pkg, ':') == nullptr) RepairDeferredDownloads(pkg);
 
   // Any failure inside leaves NOTHING installed. g_fds is deliberately not freed on
   // failure: a parked thread may still be waking up to see the abort.
