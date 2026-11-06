@@ -1,0 +1,159 @@
+{
+  "build_label": "ModAVD-0.38.1",
+  "emulator_sha256": "5aa94b981efb8b4c77bf0c3fa2bc23645f0804f0ae0a20952f84a56fdb06c3ae",
+  "package": "com.shenlan.m.reverse1999",
+  "scope": "Observed installed build only; not candidate patch validation",
+  "samples": [
+    {
+      "guest_seconds": 1523.82,
+      "rx_bytes": 8736552883,
+      "written_sectors": 109827184,
+      "external_kib": 4112044,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1533.93,
+      "rx_bytes": 9110922891,
+      "written_sectors": 110593072,
+      "external_kib": 4469360,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1544.04,
+      "rx_bytes": 9567856925,
+      "written_sectors": 111414696,
+      "external_kib": 4898440,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1554.56,
+      "rx_bytes": 10075289032,
+      "written_sectors": 112458064,
+      "external_kib": 5370332,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1564.7,
+      "rx_bytes": 10616002051,
+      "written_sectors": 113344496,
+      "external_kib": 5882588,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1574.81,
+      "rx_bytes": 11186666191,
+      "written_sectors": 114442568,
+      "external_kib": 6420864,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1584.92,
+      "rx_bytes": 11758970641,
+      "written_sectors": 115467784,
+      "external_kib": 6959236,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1595.04,
+      "rx_bytes": 12345285472,
+      "written_sectors": 116597568,
+      "external_kib": 7508700,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1605.18,
+      "rx_bytes": 12939508490,
+      "written_sectors": 117790440,
+      "external_kib": 8070284,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1615.3,
+      "rx_bytes": 13576076202,
+      "written_sectors": 118975288,
+      "external_kib": 8652660,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1625.44,
+      "rx_bytes": 14262280626,
+      "written_sectors": 120200944,
+      "external_kib": 9301732,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1635.64,
+      "rx_bytes": 14942709559,
+      "written_sectors": 121469016,
+      "external_kib": 9949004,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1645.8,
+      "rx_bytes": 15528504056,
+      "written_sectors": 122548832,
+      "external_kib": 10501264,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1655.96,
+      "rx_bytes": 15675988756,
+      "written_sectors": 123153112,
+      "external_kib": 10643120,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1666.07,
+      "rx_bytes": 16112909856,
+      "written_sectors": 123788400,
+      "external_kib": 11053892,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1673.83,
+      "rx_bytes": 16557283434,
+      "written_sectors": 124526800,
+      "external_kib": 11474360,
+      "internal_kib": 1932,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    }
+  ],
+  "summary": {
+    "seconds": 150.01,
+    "network_mib_s": 49.71955111007533,
+    "block_write_mib_s": 47.84712269182055,
+    "external_growth_mib_s": 47.92854955502967,
+    "internal_growth_mib_s": 0.0
+  }
+}

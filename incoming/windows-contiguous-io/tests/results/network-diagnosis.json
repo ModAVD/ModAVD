@@ -1,0 +1,62 @@
+{
+  "observed_at": "2026-11-06T17:50:09+0800",
+  "build_scope": "ModAVD 0.38.1 baseline; candidate QEMU patch not installed",
+  "cause_supported": "Guest DNS selected a very slow CDN edge/path for the official resource hostname; storage independently sustained 13.6166MiB/s true-fsync probe.",
+  "resource_host": "ak.hycdn.cn",
+  "bounded_tls_probe": {
+    "range_bytes_each": 1048576,
+    "rounds": 2,
+    "all_status": 206,
+    "tls_verified": true,
+    "identical_body_sha256": "04add33e762473024a4edd86eb186865acb89b6a51d84ed725cae7795bde557c",
+    "median_bytes_per_second": {
+      "default": 4982388.5,
+      "guest-edge": 111816.0,
+      "host-edge-a": 10775068.0,
+      "host-edge-b": 9909814.0
+    }
+  },
+  "applied_change": {
+    "scope": "disposable Android guest only",
+    "prior_private_dns_mode": "absent",
+    "current_private_dns_mode": "off",
+    "private_dns_specifier_changed": false,
+    "rollback_shell": "settings delete global private_dns_mode",
+    "app_only_relaunches": 1
+  },
+  "actual_game_after": {
+    "seconds": 60.0,
+    "eth0_received_bytes": 686410976,
+    "rx_mib_s": 10.910208638509115,
+    "resource_peer": "60.188.140.124:443",
+    "game_pid": "23691",
+    "same_guest_boot": true
+  },
+  "untouched": [
+    "host proxy configuration",
+    "host routing",
+    "host DNS configuration",
+    "original ModAVD instances",
+    "game files directly",
+    "emulator process lifecycle"
+  ],
+  "limits": [
+    "Does not establish the physical location of either CDN edge.",
+    "Does not yet identify the precise upstream DNS/TUN interaction.",
+    "Does not establish full resumed-resource CRC correctness or candidate-patch validation."
+  ],
+  "lifecycle": {
+    "emulator_pid": 51572,
+    "emulator_restarted": false,
+    "guest_boot_unchanged": true,
+    "app_restarted_once": true,
+    "app_pid_before_relaunch": 5411,
+    "app_pid_after_relaunch": 23691,
+    "app_pid_stable_during_60s_measurement": true
+  },
+  "measurement_scope": "Network diagnosis after a separately recorded emulator-crash trial; lifecycle fields describe only the DNS experiment.",
+  "actual_game_before": {
+    "rx_mib_s": 0.154,
+    "resource_peer": "43.109.5.15:443"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "build_label": "ModAVD-0.38.1",
+  "emulator_sha256": "5aa94b981efb8b4c77bf0c3fa2bc23645f0804f0ae0a20952f84a56fdb06c3ae",
+  "package": "com.netease.onmyoji",
+  "scope": "Observed installed build only; not candidate patch validation",
+  "samples": [
+    {
+      "guest_seconds": 2358.13,
+      "rx_bytes": 25117874042,
+      "written_sectors": 141417184,
+      "external_kib": 1107924,
+      "internal_kib": 6364,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 2368.22,
+      "rx_bytes": 25281962288,
+      "written_sectors": 141742720,
+      "external_kib": 1257412,
+      "internal_kib": 6364,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 2378.3,
+      "rx_bytes": 25420470274,
+      "written_sectors": 142040000,
+      "external_kib": 1387664,
+      "internal_kib": 6364,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 2388.38,
+      "rx_bytes": 25553359963,
+      "written_sectors": 142246920,
+      "external_kib": 1510728,
+      "internal_kib": 6364,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 2398.13,
+      "rx_bytes": 25685381418,
+      "written_sectors": 142517672,
+      "external_kib": 1631068,
+      "internal_kib": 6364,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    }
+  ],
+  "summary": {
+    "seconds": 40.0,
+    "network_mib_s": 13.530430221557618,
+    "block_write_mib_s": 13.43369140625,
+    "external_growth_mib_s": 12.7720703125,
+    "internal_growth_mib_s": 0.0
+  }
+}
