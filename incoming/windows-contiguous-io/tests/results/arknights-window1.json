@@ -1,0 +1,159 @@
+{
+  "build_label": "ModAVD-0.38.1",
+  "emulator_sha256": "5aa94b981efb8b4c77bf0c3fa2bc23645f0804f0ae0a20952f84a56fdb06c3ae",
+  "package": "com.hypergryph.arknights",
+  "scope": "Observed installed build only; not candidate patch validation",
+  "samples": [
+    {
+      "guest_seconds": 1029.0,
+      "rx_bytes": 1623368912,
+      "written_sectors": 49311536,
+      "external_kib": 1575696,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1039.13,
+      "rx_bytes": 1745107502,
+      "written_sectors": 50687544,
+      "external_kib": 1690024,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1049.24,
+      "rx_bytes": 1847896604,
+      "written_sectors": 52709184,
+      "external_kib": 1790176,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1059.36,
+      "rx_bytes": 1938991283,
+      "written_sectors": 54214816,
+      "external_kib": 1878436,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1069.49,
+      "rx_bytes": 2044436425,
+      "written_sectors": 55778088,
+      "external_kib": 1977684,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1079.61,
+      "rx_bytes": 2160840198,
+      "written_sectors": 57095968,
+      "external_kib": 2086860,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1089.71,
+      "rx_bytes": 2284030157,
+      "written_sectors": 58492816,
+      "external_kib": 2202748,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1099.82,
+      "rx_bytes": 2395060056,
+      "written_sectors": 59748456,
+      "external_kib": 2307068,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1109.91,
+      "rx_bytes": 2514027630,
+      "written_sectors": 61096288,
+      "external_kib": 2419236,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1120.02,
+      "rx_bytes": 2627848469,
+      "written_sectors": 62380008,
+      "external_kib": 2525868,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1130.14,
+      "rx_bytes": 2736362080,
+      "written_sectors": 64491744,
+      "external_kib": 2633816,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1140.24,
+      "rx_bytes": 2843755973,
+      "written_sectors": 66533624,
+      "external_kib": 2735328,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1150.35,
+      "rx_bytes": 2952352892,
+      "written_sectors": 67761736,
+      "external_kib": 2837488,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1160.47,
+      "rx_bytes": 3065811382,
+      "written_sectors": 69046592,
+      "external_kib": 2944032,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1170.57,
+      "rx_bytes": 3205604994,
+      "written_sectors": 70631080,
+      "external_kib": 3075628,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    },
+    {
+      "guest_seconds": 1179.02,
+      "rx_bytes": 3308925755,
+      "written_sectors": 71804632,
+      "external_kib": 3172836,
+      "internal_kib": 240,
+      "clocksource": "tsc",
+      "write_cache": "write through"
+    }
+  ],
+  "summary": {
+    "seconds": 150.01999999999998,
+    "network_mib_s": 10.71505312632917,
+    "block_write_mib_s": 73.20995221470471,
+    "external_growth_mib_s": 10.396660653579524,
+    "internal_growth_mib_s": 0.0
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-06",
+  "build": "ModAVD 0.38.1",
+  "candidate_patch_installed": false,
+  "pr96_active_deferral_installed": false,
+  "trials": 1,
+  "game_version": "2.7.91",
+  "fault": "Terminate the verified disposable QEMU process during download without guest sync",
+  "ownership_guards": [
+    "fixed disposable root, instance name, title and ports",
+    "reject root/AVD aliases and original-instance paths",
+    "pin the process handle before checking identity and creation time",
+    "check current per-PID avd.dir and file freshness",
+    "check emulator executable path and SHA-256",
+    "require growing .downloading files before termination"
+  ],
+  "active_file_sizes_before_five_second_observation": [243456100, 243313524],
+  "active_file_sizes_before_termination": [265009252, 264833908],
+  "cold_boot_completed": true,
+  "bridge_payload_hashes_unchanged": true,
+  "resume": "Game resumed automatically; initial low network throughput was separately diagnosed and resolved as DNS-selected CDN edge/path",
+  "final_ui": "Resource processing finished; voice configuration kept; clean START title screen",
+  "post_completion_app_relaunch": "After guest sync and app relaunch, observed resource integrity checking, then START title with voice configuration prompt; no download progress or error",
+  "observed_302_or_crc_error": false,
+  "account_login_performed": false,
+  "independent_full_resource_crc_scan_performed": false,
+  "limitations": "One released-build trial only. This does not validate PR96 active mode, the candidate QEMU patch, or general crash/power-loss safety."
+}

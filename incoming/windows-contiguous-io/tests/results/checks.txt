@@ -1,0 +1,35 @@
+roundtrip bytes=4096 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=8192 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=16384 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=65535 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=65536 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=69632 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=1048576 fragmented=0 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=16384 fragmented=1 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=1048576 fragmented=1 direct=0 offset=0 allocation_failure=0: PASS
+roundtrip bytes=8192 fragmented=0 direct=1 offset=0 allocation_failure=0: PASS
+roundtrip bytes=8192 fragmented=1 direct=1 offset=0 allocation_failure=0: PASS
+roundtrip bytes=8192 fragmented=0 direct=0 offset=4294971392 allocation_failure=0: PASS
+roundtrip bytes=16384 fragmented=0 direct=0 offset=0 allocation_failure=1: PASS
+roundtrip bytes=16384 fragmented=1 direct=0 offset=0 allocation_failure=1: PASS
+variant=0 edge=0: PASS
+variant=0 edge=1: PASS
+variant=0 edge=2: PASS
+variant=0 edge=3: PASS
+variant=0 edge=4: PASS
+variant=0 edge=5: PASS
+variant=0 edge=6: PASS
+variant=0 edge=7: PASS
+baseline real invalid handle: PASS
+variant=1 edge=0: PASS
+variant=1 edge=1: PASS
+variant=1 edge=2: PASS
+variant=1 edge=3: PASS
+variant=1 edge=4: PASS
+variant=1 edge=5: PASS
+variant=1 edge=6: PASS
+variant=1 edge=7: PASS
+candidate real invalid handle: PASS
+contiguity, size, DWORD and pointer-overflow boundaries: PASS
+zero-length vector keeps existing fallback: PASS
+34 cases, 0 failed assertions
