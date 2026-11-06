@@ -119,7 +119,7 @@ OWN_SOURCES_IME_TEXT = """\
 # changes.md: these go above the github-only separator (in this order), the last one below it.
 UPPER_SECTIONS = ["怎么更新", "AUTO-MAS 版本", "已知问题"]
 LOWER_SECTIONS = ["发布前回归"]
-PLACEHOLDER = "发布前填写"
+PLACEHOLDER = checks.PLACEHOLDER
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_COUNT="2",
                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false",
                GIT_CONFIG_KEY_1="core.longpaths", GIT_CONFIG_VALUE_1="true")
@@ -392,8 +392,8 @@ def preflight(args):
     if not re.search(rf"(?m)^Pkg.BuildId=mas-{number}\s*$", props):
         raise ValueError("SDK Pkg.BuildId differs from requested release")
     upstream = sdk_upstream(args.sdk)
-    read_changes(args.changes)
-    read_changelog(args.changelog, version, number)
+    # reads and checks changes.md and changelog.json, and the release notes' length limits (step 7 checks them again)
+    budget = describe_budget(*notes_budget(version, number, upstream, args.changes, args.changelog))
     baseline = Path(args.baseline)
     sums = baseline_sums(baseline)
     for name, expected in sums.items():
@@ -415,7 +415,7 @@ def preflight(args):
     if changed(REPO, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = public_sources(args)
-    print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, snapshot, baseline hashes, "
+    print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
           f"AGPL-3.0 full text, pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
           f"{describe_sources(own)}")
 
@@ -838,10 +838,34 @@ def export_patches(args):
                 raise ValueError(f"Patch author/trailer check failed: {f.name}")
             (dest / f.name).write_bytes(header + diff)
         entry = dict(series, count=len(files), tree=git(repo, "rev-parse", head + "^{tree}"),
-                     trees=[git(repo, "rev-parse", c + "^{tree}") for c in originals], authors=authors)
+                     trees=[git(repo, "rev-parse", c + "^{tree}") for c in originals], authors=authors,
+                     path="patches/" + series["dir"])
         series_log.append(entry)
         print(f"Exported {series['dir']}: {len(files)} patches")
-    save(out / "patches/series.json", [{k: v for k, v in s.items() if k not in ("trees", "authors")} for s in series_log])
+    published = published_patches(data)
+    if published:
+        # The release checkout gets its own series.json and BASE.md back with this release added, not replaced by a
+        # summary of this build (0.38.0 lost the older rows and the license section that way). A series that is
+        # already published keeps its directory: its export moves out of patches/, so only new directories are
+        # there to copy into the checkout.
+        records, text, dirs = merge_patch_records(series_log, *published, out, data["version"], build_number(data["build"]))
+        for s in series_log:
+            if not dirs[s["repo"]]["new"]:
+                moved = out / "work/patches-reused" / safe_rel(s["dir"])
+                moved.parent.mkdir(parents=True, exist_ok=True)
+                (out / s["path"]).rename(moved)
+                s["path"] = moved.relative_to(out).as_posix()
+        for d in sorted((out / "patches").iterdir()):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        save(out / "patches/series.json", records)
+        (out / "patches/BASE.md").write_text(text, encoding="utf-8", newline="\n")
+        save(out / "logs/patch-dirs.json", dirs)
+        print("Patch directories: " + "; ".join(f"{r} -> {d['dir']} ({'new' if d['new'] else 'already published'})"
+                                                 for r, d in dirs.items()))
+        save(out / "logs/patch-series.json", series_log)
+        return
+    save(out / "patches/series.json", [{k: v for k, v in s.items() if k not in ("trees", "authors", "path")} for s in series_log])
     save(out / "logs/patch-series.json", series_log)
     if data["build"] == "mas30":
         copy(HERE / "config/BASE-mas30.md", out / "patches/BASE.md")
@@ -851,6 +875,162 @@ def export_patches(args):
                  "| 目录 | AOSP 仓库 | 基准 | 补丁数 | 原分支头 |", "| --- | --- | --- | --- | --- |"]
         lines += [f"| `{s['dir']}` | `{s['upstream']}` | `{s['base']}` | {s['count']} | `{s['head']}` |" for s in series_log]
         (out / "patches/BASE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def export_dir(out, s):
+    """Where a series of logs/patch-series.json was exported: patches/<dir>, or work/patches-reused/<dir> for one
+    that is already published (older logs have no path)."""
+    return Path(out) / s.get("path", "patches/" + s["dir"])
+
+
+def published_patches(data):
+    """patches/series.json and BASE.md of the release checkout that step 1 recorded in the snapshot (own.modavd.repo),
+    with its path; None without one (mas30, or a direct call)."""
+    repo = ((data.get("own") or {}).get("modavd") or {}).get("repo")
+    if not repo or data["build"] == "mas30":
+        return None
+    repo = Path(repo)
+    return load(repo / "patches/series.json"), (repo / "patches/BASE.md").read_text(encoding="utf-8-sig"), repo
+
+
+def leading_same(new_files, old_files):
+    """How many patches at the start of two series are the same change (git patch-id), whatever their numbers."""
+    n = 0
+    for a, b in zip(new_files, old_files):
+        if patch_identity(a.read_bytes()) != patch_identity(b.read_bytes()):
+            break
+        n += 1
+    return n
+
+
+def merge_patch_records(series_log, published, base_text, repo, out, version, number):
+    """series.json and BASE.md for the release checkout: the published ones with this release added.
+
+    A series with the repository, base and head of a published one is that series: it keeps the published directory
+    and adds nothing. Any other is a new directory: its series.json entry goes first, and BASE.md gets a row in the
+    version table, a row in the directory table and a line in the notes under it. What only a person can say (the
+    licenses of the new patches, what they do) is left as PLACEHOLDER, which the public metadata check refuses, so
+    the release commit cannot go in unfilled. Running it again on its own output adds nothing.
+    Returns (series.json, BASE.md, {repo: {"dir", "new"}})."""
+    by_key = {(p["repo"], p["base"], p["head"]): p for p in published}
+    dirs, new = {}, []
+    for s in series_log:
+        old = by_key.get((s["repo"], s["base"], s["head"]))
+        if old:
+            if (old["count"], old["tree"]) != (s["count"], s["tree"]):
+                raise ValueError(f"patches/{old['dir']} is published with the base and head of {s['repo']} but another "
+                                 f"count or tree; check series.json")
+            dirs[s["repo"]] = {"dir": old["dir"], "new": False}
+            continue
+        if any(p["dir"] == s["dir"] for p in published):
+            raise ValueError(f"patches/{s['dir']} is already in series.json with another base or head; a stale copy of "
+                             f"an earlier run? Restore patches/series.json and BASE.md from main first")
+        dirs[s["repo"]] = {"dir": s["dir"], "new": True}
+        new.append({k: v for k, v in s.items() if k not in ("trees", "authors", "path")})
+    lines = base_text.replace("\r\n", "\n").split("\n")
+
+    def table(header):
+        """Index of the header row and of the first line after the table."""
+        starts = [i for i, line in enumerate(lines) if line.startswith(header)]
+        if len(starts) != 1 or not lines[starts[0] + 1].startswith("| --- "):
+            raise ValueError(f"patches/BASE.md: no single table starting with {header!r}")
+        end = starts[0] + 2
+        while end < len(lines) and lines[end].startswith("|"):
+            end += 1
+        return starts[0], end
+
+    def cells(line):
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    # version table: | 版本 | qemu | gfxstream | Crashpad |, newest first
+    head, end = table("| 版本 |")
+    columns = cells(lines[head])[1:]
+    by_column = {d["dir"].split("/")[0]: d["dir"] for d in dirs.values()}
+    if sorted(c.lower() for c in columns) != sorted(by_column):
+        raise ValueError(f"patches/BASE.md: version table columns {columns} differ from the series {sorted(by_column)}")
+    want = [by_column[c.lower()] for c in columns]
+    build_id = f"`Pkg.BuildId=mas-{number}`"
+    rows = [i for i in range(head + 2, end) if build_id in cells(lines[i])[0]]
+    if len(rows) > 1:
+        raise ValueError(f"patches/BASE.md: more than one version row for {build_id}")
+    # Only the first export of a build describes it: a rerun, or a repack of a published build, adds no notes.
+    first = not rows
+    if rows:
+        row = cells(lines[rows[0]])
+        if row[1:] != want:
+            raise ValueError(f"patches/BASE.md: the row for {build_id} names {row[1:]}, this build exports {want}")
+        if version not in row[0]:
+            # a repack of a published build: 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同）
+            row[0] = re.sub(r"）$", f"；{version} 相同）", row[0]) if row[0].endswith("）") else f"{row[0]}（{version} 相同）"
+            lines[rows[0]] = "| " + " | ".join(row) + " |"
+    else:
+        lines.insert(head + 2, f"| {version}（{build_id}） | " + " | ".join(want) + " |")
+
+    # directory table: | 目录 | AOSP 仓库 | 基准 | 补丁数 | 回放后的树 | 许可证 |, grouped by repository, newest first
+    head, end = table("| 目录 |")
+    for s in reversed(new):
+        if any(f"`{s['dir']}`" in line for line in lines[head + 2:end]):
+            continue
+        group = s["dir"].split("/")[0] + "/"
+        at = next((i for i in range(head + 2, end) if cells(lines[i])[0].startswith("`" + group)), end)
+        lines.insert(at, f"| `{s['dir']}` | `{s['upstream']}` | `{s['base']}` | {s['count']} | `{s['head']}` | "
+                         f"{PLACEHOLDER}：按所改文件的文件头逐个归许可证，写法照下面几行 |")
+        end += 1
+
+    # notes: the bullet list right under the directory table, newest first
+    head, end = table("| 目录 |")
+    at = end
+    while at < len(lines) and not lines[at].strip():
+        at += 1
+    if at >= len(lines) or not lines[at].startswith("- "):
+        raise ValueError("patches/BASE.md: no bullet list under the directory table")
+    names = dict(zip((c.lower() for c in columns), columns))
+    notes = []
+    extended = {}   # repo -> number of its first new patch, for a new series that continues the previous one
+    for s in series_log:
+        d = dirs[s["repo"]]
+        if d["new"]:
+            if any(line.startswith(f"- `{d['dir']}` 的 ") for line in lines):
+                continue
+            previous = next((p for p in published if p["repo"] == s["repo"]), None)
+            same = 0
+            if previous:
+                same = leading_same(sorted(export_dir(out, s).glob("*.patch")),
+                                    sorted((repo / "patches" / safe_rel(previous["dir"])).glob("*.patch")))
+            if same == s["count"]:
+                what = f"全部 {s['count']} 个与 `{previous['dir']}` 是同一批提交（补丁文件头里的序号不同）"
+            elif same:
+                what = (f"0001–{same:04d} 与 `{previous['dir']}` 是同一批提交（补丁文件头里的序号不同），"
+                        f"{same + 1:04d}–{s['count']:04d} 是 mas-{number} 新增的：{PLACEHOLDER}（新增的补丁各做了什么）")
+                extended[s["repo"]] = same + 1
+            else:
+                what = f"0001–{s['count']:04d} 都是 mas-{number} 的：{PLACEHOLDER}（和已发布的目录有什么不同）"
+            notes.append(f"- `{d['dir']}` 的 {what}。")
+        else:
+            name = names[d["dir"].split("/")[0]]
+            # d["dir"] == s["dir"]: this build's own directory, recorded by an earlier run
+            if not first or d["dir"] == s["dir"] or any(line.startswith(f"- {version} 的 {name} 补丁") for line in lines):
+                continue
+            notes.append(f"- {version} 的 {name} 补丁和已发布的 `{d['dir']}` 是同一批提交（基准、分支头都相同），沿用这个目录；"
+                         f"mas-{number} 清单注释里写的也是这个目录。")
+    lines[at:at] = notes
+    text = "\n".join(lines)
+    # The qemu license section names, for each range of patches, the commit whose file headers it was read from, and
+    # ends with a replay example of the newest qemu series. Both follow mechanically from a new qemu series that adds
+    # patches to the previous one; the license table itself stays for a person (see the directory row's PLACEHOLDER).
+    for s in new:
+        if not s["dir"].startswith("qemu/") or s["repo"] not in extended:
+            continue
+        first_new = extended[s["repo"]]
+        text = re.sub(r"(这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（[^\n]*?)）。",
+                      lambda m: f"{m[1]}，{first_new:04d}–{s['count']:04d} 按 `{s['head'][:8]}`）。", text, count=1)
+        replay = [(r"回放示例（以 mas-\d+ 的 qemu 为例）", f"回放示例（以 mas-{number} 的 qemu 为例）"),
+                  (r"git checkout -b \S+ [0-9a-f]{40}", f"git checkout -b {s['dir'].split('/')[1]} {s['base']}"),
+                  (r"git am --keep-cr \.\./patches/qemu/[^/\s]+/\*\.patch", f"git am --keep-cr ../patches/{s['dir']}/*.patch")]
+        if all(len(re.findall(pattern, text)) == 1 for pattern, _ in replay):
+            for pattern, value in replay:
+                text = re.sub(pattern, lambda m: value, text)
+    return new + published, text, dirs
 
 
 def patch_identity(data):
@@ -874,7 +1054,7 @@ def incoming(args):
     keep = set(args.keep_incoming or [])
     exported = []
     for s in load(out / "logs/patch-series.json"):
-        for p in sorted((out / "patches" / s["dir"]).glob("*.patch")):
+        for p in sorted(export_dir(out, s).glob("*.patch")):
             data = p.read_bytes()
             exported.append((s["dir"] + "/" + p.name, patch_identity(data), checks.patch_author(data), patch_subject(data)))
     log, missing, done = [], [], []
@@ -899,7 +1079,12 @@ def incoming(args):
         raise ValueError(f"Merged incoming patches not found exactly once in the new series (import them, or pass "
                          f"--keep-incoming <topic>): {missing}")
     for topic in done:
-        git(repo, "rm", "-r", "-q", "--", topic.relative_to(repo).as_posix())
+        # With the checkout's own line-ending settings (STATUS_ENV), like changed(): a text file of the topic other
+        # than its patches (*.patch -text) is CRLF in a core.autocrlf=true checkout, and under GIT_ENV's
+        # core.autocrlf=false git rm takes it for a local modification and refuses (0.38.0). Real local changes still
+        # stop it: no -f.
+        run("git", "-C", repo, "--no-optional-locks", "rm", "-r", "-q", "--", topic.relative_to(repo).as_posix(),
+            env=STATUS_ENV)
     save(out / "logs/incoming.json", log)
     kept = [e["topic"] for e in log if e.get("kept")]
     print(f"Incoming: {len(done)} topics found in the new series and removed from the repository; kept {kept or 'none'}")
@@ -920,7 +1105,7 @@ def replay(args):
         git(work, "config", "gc.auto", "0")
         git(work, "config", "maintenance.auto", "false")
         git(work, "checkout", "-q", "--detach", s["base"])
-        files = sorted((out / "patches" / s["dir"]).glob("*.patch"))
+        files = sorted(export_dir(out, s).glob("*.patch"))
         git(work, "am", "--keep-cr", "-q", *files)
         commits = git(work, "rev-list", "--reverse", s["base"] + "..HEAD").splitlines()
         trees = [git(work, "rev-parse", c + "^{tree}") for c in commits]
@@ -977,7 +1162,8 @@ def sources(args):
             shutil.copyfileobj(src, target)
         summary.append({"file": name, "action": "archived", "revision": rev, "sha256": sha(dest / name)})
     if data["build"] != "mas30":
-        series = load(out / "patches/series.json")
+        # this build's own series (patches/series.json is the release checkout's, all versions)
+        series = [{k: v for k, v in s.items() if k not in ("trees", "authors", "path")} for s in load(out / "logs/patch-series.json")]
         published_series = load(Path(data["own"]["modavd"]["repo"]) / "patches/series.json")
         (dest / ("manifest-" + data["build"] + ".xml")).write_text(
             annotated_manifest(MANIFEST_MAS30.read_text(encoding="utf-8"), new_manifest, data["build"], series,
@@ -1145,28 +1331,81 @@ def render_changes(changes):
     return "\n\n".join(blocks)
 
 
-def notes(args):
-    out = Path(args.output)
-    data = load(out / "snapshot.json")
-    version, number = data["version"], build_number(data["build"])
-    sections = read_changes(args.changes)
-    log = read_changelog(args.changelog, version, number)
-    machine = {"version": "v" + version, "build": number, "upstream": data["upstream"], "min_automas": log[0]["min_automas"],
+def text_fields(version, number, upstream, changes, changelog):
+    """The template fields that come from changes.md and changelog.json (everything but the asset rows)."""
+    sections = read_changes(changes)
+    log = read_changelog(changelog, version, number)
+    machine = {"version": "v" + version, "build": number, "upstream": upstream, "min_automas": log[0]["min_automas"],
                "changes": {e["version"]: e["changes"] for e in log[:checks.MACHINE_VERSIONS]}}
-    main, archive = release_assets(out)
-    assets = sorted(p for p in (out / "source").iterdir() if p.name != "SHA256SUMS.txt")
-    def row(p):
-        return f"| `{p.name}` | {p.stat().st_size:,} 字节 | `{sha(p)}` |"
-    fields = {"MACHINE": checks.machine_line(machine), "VERSION": version, "BUILD_ID": f"mas-{number}", "UPSTREAM": data["upstream"],
-              "CHANGES": render_changes(log[0]["changes"]), "HOW_TO_UPDATE": sections["怎么更新"], "AUTOMAS": sections["AUTO-MAS 版本"],
-              "KNOWN": sections["已知问题"], "REGRESSION": sections["发布前回归"],
-              "MAIN_ROW": row(main), "BUNDLE_ROW": row(archive),
-              "SOURCE_COUNT": str(len(assets)), "SOURCE_BYTES": f"{sum(p.stat().st_size for p in assets):,}"}
+    return {"MACHINE": checks.machine_line(machine), "VERSION": version, "BUILD_ID": f"mas-{number}", "UPSTREAM": upstream,
+            "CHANGES": render_changes(log[0]["changes"]), "HOW_TO_UPDATE": sections["怎么更新"], "AUTOMAS": sections["AUTO-MAS 版本"],
+            "KNOWN": sections["已知问题"], "REGRESSION": sections["发布前回归"]}
+
+
+def render_notes(fields):
     text = (HERE / "release-notes.template.md").read_text(encoding="utf-8")
     for key, value in fields.items():
         text = text.replace("{{" + key + "}}", value)
     if "{{" in text:
         raise ValueError("Unfilled template variable")
+    return text
+
+
+# A rendered asset row is this long whatever the file: name, size and hash all sit below the separator.
+SAMPLE_ASSETS = {"MAIN_ROW": "| `ModAVD-0.0.0-win-x64.zip` | 1 字节 | `" + "0" * 64 + "` |",
+                 "BUNDLE_ROW": "| `ModAVD-0.0.0-sources.zip` | 1 字节 | `" + "0" * 64 + "` |", "SOURCE_COUNT": "1", "SOURCE_BYTES": "1"}
+
+
+def notes_budget(version, number, upstream, changes, changelog):
+    """How long the two limited parts of the release notes will be, from the texts alone: the machine-readable first
+    line (MAX_MACHINE_CHARS) and the announcement above the separator (MAX_ANNOUNCEMENT_CHARS). Neither depends on the
+    assets, so preflight and `notes-budget` tell before packaging, instead of step 7 after it (0.38.0: 9157 and 4532).
+    Raises with both numbers when one is over; returns (machine, announcement)."""
+    text = render_notes({**text_fields(version, number, upstream, changes, changelog), **SAMPLE_ASSETS})
+    lines = text.splitlines()
+    machine = len(lines[0])
+    upper = len("\n".join(lines[1:lines.index(checks.SEPARATOR)])) if checks.SEPARATOR in lines else 0
+    over = []
+    if machine > checks.MAX_MACHINE_CHARS:
+        over.append(f"the machine-readable line would be {machine} chars, limit {checks.MAX_MACHINE_CHARS} (it carries the "
+                    f"changelog.json items of the last {checks.MACHINE_VERSIONS} versions: shorten them)")
+    if upper > checks.MAX_ANNOUNCEMENT_CHARS:
+        over.append(f"the announcement above the separator would be {upper} chars, limit {checks.MAX_ANNOUNCEMENT_CHARS} "
+                    f"(this version's changelog.json items and the 怎么更新 / AUTO-MAS 版本 / 已知问题 sections of {Path(changes).name}: shorten them)")
+    if over:
+        raise ValueError("Release notes too long: " + "; ".join(over))
+    checks.check_announcement(text, "v" + version, number)
+    return machine, upper
+
+
+def describe_budget(machine, upper):
+    near = [name for name, n, limit in [("machine line", machine, checks.MAX_MACHINE_CHARS),
+                                        ("announcement", upper, checks.MAX_ANNOUNCEMENT_CHARS)] if n > 0.9 * limit]
+    return (f"machine line {machine}/{checks.MAX_MACHINE_CHARS}, announcement {upper}/{checks.MAX_ANNOUNCEMENT_CHARS} chars"
+            + (f" (WARNING: {' and '.join(near)} over 90% of the limit)" if near else ""))
+
+
+def notes_budget_command(args):
+    """`notes-budget`: the lengths, while changelog.json and changes.md are being written (no SDK or output needed)."""
+    version = release_version(args.build, args.patch)
+    upstream = sdk_upstream(args.sdk) if args.sdk else "99.99.99"
+    machine, upper = notes_budget(version, build_number(args.build), upstream, args.changes, args.changelog)
+    print(f"Release notes v{version}: {describe_budget(machine, upper)}"
+          + ("" if args.sdk else "; upstream version assumed 99.99.99 (pass --sdk for the real one)"))
+
+
+def notes(args):
+    out = Path(args.output)
+    data = load(out / "snapshot.json")
+    version, number = data["version"], build_number(data["build"])
+    main, archive = release_assets(out)
+    assets = sorted(p for p in (out / "source").iterdir() if p.name != "SHA256SUMS.txt")
+    def row(p):
+        return f"| `{p.name}` | {p.stat().st_size:,} 字节 | `{sha(p)}` |"
+    fields = {**text_fields(version, number, data["upstream"], args.changes, args.changelog),
+              "MAIN_ROW": row(main), "BUNDLE_ROW": row(archive),
+              "SOURCE_COUNT": str(len(assets)), "SOURCE_BYTES": f"{sum(p.stat().st_size for p in assets):,}"}
+    text = render_notes(fields)
     (out / "release-notes.md").write_text(text, encoding="utf-8")
     checks.check_notes(out / "release-notes.md", out / "SHA256SUMS.txt", {p.name: p.stat().st_size for p in [main, archive]})
     checks.check_announcement(text, "v" + version, number)
@@ -1199,7 +1438,7 @@ def privacy_release(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "privacy-release"])
+    parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "notes-budget", "privacy-release"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
                  "emu-src", "sevenzip", "repository", "private-rules"]:
         parser.add_argument("--" + name)
@@ -1213,7 +1452,8 @@ def main():
     args = parser.parse_args()
     commands = {"snapshot": snapshot_data, "preflight": preflight, "own": lambda a: owned(a, True), "check-owned": owned,
                 "assemble": assemble, "verify-zip": verify_zip, "patches": export_patches, "replay": replay, "incoming": incoming,
-                "sources": sources, "bundle": bundle, "sums": sums, "notes": notes, "privacy-release": privacy_release}
+                "sources": sources, "bundle": bundle, "sums": sums, "notes": notes, "notes-budget": notes_budget_command,
+                "privacy-release": privacy_release}
     try:
         commands[args.command](args)
     except Exception as e:
