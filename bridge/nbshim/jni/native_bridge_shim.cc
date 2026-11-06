@@ -155,6 +155,8 @@ size_t g_real_bytes = 0;                        // how much of *g_real the ctor 
 // The companion's modavd_gate_detach_unless_target (see ShimInitialize).
 using GateDetachFn = int (*)(const char* pkg);
 GateDetachFn g_companion_detach = nullptr;
+using DownloadSyncInitFn = int (*)(const char* pkg, const char* private_dir);
+DownloadSyncInitFn g_companion_download_sync_init = nullptr;
 
 // Diagnostic logging gate (property modavd.nb.log, default ON for this build),
 // cached per process.  Cached alongside the pid it was read in so that a value
@@ -322,8 +324,19 @@ bool ShimInitialize(const void* runtime_cbs, const char* private_dir,
   // handler, no GOT triggers, no logging.
   const GateDetachFn detach = __atomic_load_n(&g_companion_detach, __ATOMIC_ACQUIRE);
   char pkg[128];
-  if (detach != nullptr && PackageFromPrivateDir(private_dir, pkg, sizeof(pkg)) &&
-      detach(pkg) == 0) {
+  const bool have_pkg = PackageFromPrivateDir(private_dir, pkg, sizeof(pkg));
+  // Recovery and explicit download experiments also apply to non-gate apps.
+  // Do not start guest code after failed recovery or partial filter setup.
+  const auto download_init =
+      __atomic_load_n(&g_companion_download_sync_init, __ATOMIC_ACQUIRE);
+  if (have_pkg && download_init != nullptr) {
+    const int error = download_init(pkg, private_dir);
+    if (error != 0) {
+      NB_LOGF("cb=initialize download sync refused pkg=%s error=%d", pkg, error);
+      return false;
+    }
+  }
+  if (detach != nullptr && have_pkg && detach(pkg) == 0) {
     memcpy(&NativeBridgeItf, g_real, g_real_bytes);
     __atomic_store_n(&g_log_on, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_log_pid, static_cast<int>(getpid()), __ATOMIC_RELAXED);
@@ -643,6 +656,9 @@ __attribute__((constructor)) void ShimCtor() {
     // Optional export too: an older companion without it leaves every app on the shim.
     const auto dt = reinterpret_cast<GateDetachFn>(dlsym(ch, "modavd_gate_detach_unless_target"));
     __atomic_store_n(&g_companion_detach, dt, __ATOMIC_RELEASE);
+    const auto download_init =
+        reinterpret_cast<DownloadSyncInitFn>(dlsym(ch, "modavd_download_sync_init"));
+    __atomic_store_n(&g_companion_download_sync_init, download_init, __ATOMIC_RELEASE);
     NB_LOGI("shim-ctor companion %s loaded handle=%p first-chance=%p detach=%p", companion, ch,
             reinterpret_cast<void*>(fc), reinterpret_cast<void*>(dt));
   }

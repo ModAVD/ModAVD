@@ -2,7 +2,7 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE    := modavd_gate
-LOCAL_SRC_FILES := native_to_guest_companion.cc
+LOCAL_SRC_FILES := native_to_guest_companion.cc download_commit.cc download_journal.cc download_control.cc download_listener.cc download_batch.cc
 # DO NOT add -ftls-model=initial-exec here. It was tried and it bricks the device's
 # arm64 support outright: libnativebridge dlopen()s the translator, we are its
 # DT_NEEDED, and a dlopened library carrying initial-exec TLS relocations is
