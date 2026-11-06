@@ -12,7 +12,7 @@ What follows are the points that matter most before you open an issue or a PR.
 
 - ModAVD has one maintainer, and replies can take a few days. For anything bigger, open an issue and talk it over first; a large PR that was not discussed may not be merged.
 - Say so in the issue before you start work. If an issue is assigned to someone, that person is working on it.
-- What helps most is testing on your own computer: install it, run a normal day of tasks, and post your configuration (made with `复制配置信息.bat`, which copies your system and game info) to the pinned "兼容性报告" (compatibility report) issue. See [Game testing and compatibility reports](https://modavd.github.io/en/develop/testing).
+- What helps most is testing on your own computer: install it and run a normal day of tasks. Open an issue in [Issues](https://github.com/ModAVD/ModAVD/issues) and include the output of `复制配置信息.bat` (copies your system and game info). See [Game testing and compatibility reports](https://modavd.github.io/en/develop/testing).
 
 ## Reporting problems
 
