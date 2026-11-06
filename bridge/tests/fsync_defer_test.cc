@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // The module issues its payback / exit-flush fsync as syscall(__NR_fsync, handle, kMagic).
@@ -542,6 +543,20 @@ int main() {
     CHECK(size_of(shorter) == 20000);     // not longer than its safe length: untouched
     CHECK(size_of(other) == 20000);       // not a download temp file: untouched
     CHECK(g_c_repaired.load() == 1);
+  }
+
+  // --- repair runs only when the app has no other live process: OtherProcessOfOurUid sees the
+  // other root processes from here, and nothing from a child switched to an unused uid ----------
+  {
+    CHECK(OtherProcessOfOurUid() > 0);  // run as root: plenty of other root processes
+    const pid_t c = fork();
+    if (c == 0) {
+      if (setgid(54321) != 0 || setuid(54321) != 0) _exit(2);
+      _exit(OtherProcessOfOurUid() == 0 ? 0 : 1);
+    }
+    int st = -1;
+    waitpid(c, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);  // the only process of uid 54321
   }
 
   // --- RECV errors: a withdrawn notification (ENOENT) is counted as an interruption, our own

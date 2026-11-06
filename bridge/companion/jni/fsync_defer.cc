@@ -399,7 +399,8 @@ void ClosePaybackHandle(int h) {
 // a page, was written by the (single, sequential) download thread before that fsync started, so it
 // is on disk and correct once the fsync returns, whatever is appended meanwhile. That length is
 // recorded on the file as an xattr (if a crash loses the newest value, the older one is smaller and
-// still safe). When the package's main process starts, RepairDeferredDownloads() cuts every matched
+// still safe). When the app starts with no other process of it alive (its main process, before any
+// helper), RepairDeferredDownloads() cuts every matched
 // file carrying the xattr back to it, before the game's code runs; the download then re-fetches the
 // rest. Cutting is always safe for a downloader that resumes from the file length (this one does,
 // verified on device); a file without the xattr was never deferred and is left alone.
@@ -471,8 +472,36 @@ void RepairDir(const char* dir, int depth) {
   closedir(d);
 }
 
-// At arm time in the package's main process: repair the app's external files dir, where the
-// download lives (/storage/emulated/0/Android/data/<pkg>, the path the game's fds resolve to).
+// Another live process with our uid? Returns its pid, 0 if none, -1 if /proc cannot be read. Every
+// process of the app arms with the same package name (the shim passes the package, not the process
+// name), and the game starts helper processes (its anti-cheat ":GP7*" ones, repeatedly) while the
+// main process downloads -- such a process must never cut a file that may be being written. The
+// main process is the first one of the app to start, so "no other process of our uid" is the
+// condition for repairing; a leftover helper from an earlier run only means no repair this time.
+pid_t OtherProcessOfOurUid() {
+  const uid_t uid = getuid();
+  const pid_t self = getpid();
+  DIR* d = opendir("/proc");
+  if (d == nullptr) return -1;
+  pid_t found = 0;
+  while (struct dirent* e = readdir(d)) {
+    char* end = nullptr;
+    const long pid = strtol(e->d_name, &end, 10);
+    if (end == e->d_name || *end != '\0' || pid <= 0 || pid == self) continue;
+    char p[32];
+    snprintf(p, sizeof(p), "/proc/%ld", pid);
+    struct stat st;
+    if (stat(p, &st) == 0 && st.st_uid == uid) {
+      found = static_cast<pid_t>(pid);
+      break;
+    }
+  }
+  closedir(d);
+  return found;
+}
+
+// At arm time, only when no other process of the app is alive: repair the app's external files dir,
+// where the download lives (/storage/emulated/0/Android/data/<pkg>, what the game's fds resolve to).
 void RepairDeferredDownloads(const char* pkg) {
   char root[256];
   const int n = snprintf(root, sizeof(root), "/storage/emulated/0/Android/data/%s", pkg);
@@ -1299,10 +1328,16 @@ extern "C" __attribute__((visibility("default"))) void modavd_fsync_defer_init(c
   g_pid = getpid();
   pthread_atfork(nullptr, nullptr, &ForgetAfterFork);
 
-  // Crash repair (see RecordSafeLength): only in the package's main process (the download runs
-  // there; a ":service" process must not cut a file the main process may be writing), and before
-  // the filter goes in and before any of the game's own code has run.
-  if (strchr(pkg, ':') == nullptr) RepairDeferredDownloads(pkg);
+  // Crash repair (see RecordSafeLength): before the filter goes in and before any of the game's own
+  // code has run -- and only if this is the app's only process (see OtherProcessOfOurUid: a helper
+  // process starting while the main process downloads must not cut the files being written).
+  const pid_t other = OtherProcessOfOurUid();
+  if (other == 0) {
+    RepairDeferredDownloads(pkg);
+  } else {
+    FD_LOGI("repair skipped: another process of uid %d is alive (pid %d); a download may be writing",
+            static_cast<int>(getuid()), static_cast<int>(other));
+  }
 
   // Any failure inside leaves NOTHING installed. g_fds is deliberately not freed on
   // failure: a parked thread may still be waking up to see the abort.
