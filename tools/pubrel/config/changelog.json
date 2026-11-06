@@ -1,5 +1,19 @@
 [
   {
+    "version": "v0.38.1",
+    "build": 38,
+    "min_automas": "5.7.0",
+    "changes": {
+      "修复": [
+        "0.37.0 到 0.38.0 的「补全组件.bat」装系统镜像必然失败，已修；用旧包的也可以在根目录运行 tools\\modavd.exe components fetch。（[#118](https://github.com/ModAVD/ModAVD/issues/118)）",
+        "关机后马上自动换包，偶尔把正在退出的辅助进程当成占用而拒绝，已修；从 0.38.1 往后的更新生效。（[#77](https://github.com/ModAVD/ModAVD/issues/77)）"
+      ],
+      "变更": [
+        "包里的管理器和命令行升到 0.4.1，模拟器还是 mas-38，没有重编。"
+      ]
+    }
+  },
+  {
     "version": "v0.38.0",
     "build": 38,
     "min_automas": "5.7.0",
