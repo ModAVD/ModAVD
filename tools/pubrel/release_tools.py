@@ -1142,7 +1142,9 @@ def privacy_release(args):
         hit = inside(cache, [out, REPO] + ([args.repository] if getattr(args, "repository", None) else []))
         if hit:
             raise ValueError(f"The privacy cache must live outside the release output and the checkouts: {cache} is in {hit}")
-        report = cached_privacy_scan(privacy, files, allowlist, Path(cache))
+        # the run that uploads (release.ps1 -DraftRelease) scans everything and only refreshes the cache
+        report = cached_privacy_scan(privacy, files, allowlist, Path(cache),
+                                     write_only=bool(getattr(args, "privacy_cache_write_only", False)))
     else:
         report = privacy.scan_files(files, allowlist)
     save(out / "logs/privacy.json", report)
@@ -1159,13 +1161,27 @@ PRIVACY_ARCHIVES = (".tar.xz", ".tar.gz")   # what privacy.scan_files opens and 
 
 
 def privacy_fingerprint(privacy):
-    """What a cached "clean" verdict depends on besides the file itself: the scanner's code and the rules it ran with
-    (public and private). Either changing drops the whole cache. The allowlist is not in it: a cached entry keeps the
-    exceptions it relied on, and a hit checks each against the current allowlist (adding exceptions never turns a clean
-    file into a failing one; removing one sends the files that used it back to the scanner)."""
+    """What a cached "clean" verdict depends on besides the file itself: the scanner's code, the rules it ran with
+    (public and private), and the Python and Unicode versions (what counts as printable, and so which strings are
+    checked, comes from the Unicode database). Any of them changing drops the whole cache. The allowlist is not in it:
+    a cached entry keeps the exceptions it relied on, and a hit checks each against the current allowlist (adding
+    exceptions never turns a clean file into a failing one; removing one sends the files that used it back to the
+    scanner)."""
+    import unicodedata
     h = hashlib.sha256(Path(privacy.__file__).read_bytes())
     h.update(json.dumps(privacy.RULE_SPECS, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    h.update(json.dumps([list(sys.version_info[:2]), unicodedata.unidata_version]).encode("utf-8"))
     return h.hexdigest()
+
+
+PRIVACY_ALLOWED_FIELDS = ("member", "path", "rule", "file_sha256", "string_sha256")
+
+
+def privacy_entry_ok(entry):
+    """An entry as cached_privacy_scan writes it. Anything else is dropped and its file scanned again."""
+    return (isinstance(entry, dict) and type(entry.get("files")) is int and entry["files"] >= 1
+            and isinstance(entry.get("allowed"), list)
+            and all(isinstance(a, dict) and all(isinstance(a.get(k), str) for k in PRIVACY_ALLOWED_FIELDS) for a in entry["allowed"]))
 
 
 def privacy_key(path, name):
@@ -1181,19 +1197,31 @@ def privacy_key(path, name):
     return digest + "\t" + logical
 
 
-def cached_privacy_scan(privacy, files, allowlist, cache_path):
+def cached_privacy_scan(privacy, files, allowlist, cache_path, write_only=False):
     """privacy.scan_files(files, allowlist), without scanning again what the cache at `cache_path` (this machine only)
     already found clean: same content at the same logical path (an archive: same content), same scanner and rules,
     and every exception the file needed still in the allowlist. Only clean results are kept; a file with a failure is
     scanned every time. The cache is rewritten with this run's entries only, so it follows the latest release.
+    An entry that is not shaped as written here is dropped (its file is scanned again).
+    write_only: do not read the cache, scan everything, then write it (the run that uploads: a "clean" entry written by
+    hand, or by a bug, must not decide what is published).
     The report is privacy.scan_files's, with the cached files' counts and exceptions put back, plus a "cache" entry."""
     fingerprint = privacy_fingerprint(privacy)
     entries, note = {}, ""
-    if cache_path.is_file():
+    if write_only:
+        note = "not read (upload run), everything scanned"
+    elif cache_path.is_file():
         try:
             cached = load(cache_path)
+            if not isinstance(cached, dict):
+                raise ValueError("not an object")
             if cached.get("version") == PRIVACY_CACHE_VERSION and cached.get("fingerprint") == fingerprint:
-                entries = dict(cached["entries"])
+                if not isinstance(cached.get("entries"), dict):
+                    raise ValueError("entries is not an object")
+                entries = {k: v for k, v in cached["entries"].items() if privacy_entry_ok(v)}
+                dropped = len(cached["entries"]) - len(entries)
+                if dropped:
+                    note = f"{dropped} malformed entries dropped"
             else:
                 note = "scanner or rules changed, cache dropped"
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -1245,6 +1273,8 @@ def main():
                  "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
     parser.add_argument("--keep-incoming", action="append", default=[])
+    # privacy-release with --privacy-cache: scan everything and only write the cache (release.ps1 -DraftRelease)
+    parser.add_argument("--privacy-cache-write-only", action="store_true")
     # Directories the release checkout must not be in (source trees, backups, production); repeatable.
     parser.add_argument("--protect", action="append", default=[])
     parser.add_argument("--min-free-gb", type=int, default=120)

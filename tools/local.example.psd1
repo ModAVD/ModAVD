@@ -19,7 +19,7 @@
     # 绝不提交。也可以用环境变量 MODAVD_PRIVATE_RULES。发版的隐私扫描没加载到它就停
     PrivateRules   = ''
     # 发版隐私扫描的缓存（文件哈希 → 上次扫过干净）：只在本机，不能在仓库和发版输出里。空着就是 <TempRoot>\pubrel\privacy-cache.json；
-    # 扫描器或规则一变整个作废，release.ps1 -NoPrivacyCache 全部重扫
+    # 扫描器或规则一变整个作废，release.ps1 -NoPrivacyCache 全部重扫；-DraftRelease（真要上传）那一轮不读缓存、全部重扫
     PrivacyCache   = ''
     # ModAVDManager、ModAVDHostIME 的工作克隆（只读 tag，先 git fetch upstream --tags）
     ManagerRepo    = ''
