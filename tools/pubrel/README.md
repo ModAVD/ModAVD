@@ -95,15 +95,18 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 
 `config/sdk-inventory.csv` 是审核过的包装政策：目前 SDK 文件集固定，移除 103 个文件。新 SDK 增减文件会停止，需先审核并更新政策。
 其中 `resources/modavd/` 三行是我们自研的 arm64 执行桥载荷（AGPL-3.0-or-later），由 `tools/gate/stage-payload.ps1` 放进 SDK 树；
-它们在 `sdk/emulator` 下面，所以内测「只发 `sdk\emulator`」那条规矩不用改。包里的 `tools/modavd-bridge.ps1`（装 / 卸 / 核对执行桥）、`tools/components-sources.txt`（补全组件.bat 的下载源菜单）和三个 .bat
-一起按提交从发版克隆的 `package/` 取原字节（那边 `package/** -text`，存的就是包里的字节）。
+它们在 `sdk/emulator` 下面，所以内测「只发 `sdk\emulator`」那条规矩不用改。包里的 `tools/modavd-bridge.ps1`（装 / 卸 / 核对执行桥）
+按提交从发版克隆的 `package/` 取原字节（那边 `package/** -text`，存的就是包里的字节）。0.38.1 及更早的包里还有三个 .bat 和
+`fetch-components.ps1`、`collect-info.ps1`、`report-config.ps1`，0.38.2 起这些事由管理器和命令行做，包里不再有（ModAVD/ModAVD#45）；
+用 `modavd update` 升级时，旧清单里有、新包里没有的包根文件会被删掉。
 
 0.36.0 起包里还有 `ModAVD.exe`（管理器）和 `tools/modavd.exe`（命令行、MCP），取自 `-Manager` 那个 Release 包（ModAVDManager 自己的发版流程可复现编译并核对过）。
 
-P3 审核过的 NOTICE 和 `说明.txt` 之后新发的东西，由 assemble 按锚点补进去：已有条目加文件（`NOTICE_MORE_FILES`）、
-Part 2 末尾加 `config/notice-additions.txt` / `.csv` 的条目（执行桥载荷、modavd 两个 exe、Go 运行时的 BSD-3 声明，Go 版本取自管理器 tag 的 go.mod）、
-`说明.txt` 在「出问题怎么办」前加 `config/readme-tools.txt`。锚点找不到就停。补完逐个核对：包根以下（`sdk/` 除外）每个文件、
-`sdk/emulator/resources/modavd/` 每个文件都要在 NOTICE.txt 里有条目，许可证全文除外；以后再往包里加文件，不补条目打包就停。
+P3 审核过的 NOTICE 和 `说明.txt` 之后新发的、不再发的东西，由 assemble 按锚点改进去：已有条目里拿掉不再发的文件（`NOTICE_GONE_FILES`）、
+加上新发的文件（`NOTICE_MORE_FILES`）、Part 2 末尾加 `config/notice-additions.txt` / `.csv` 的条目（执行桥载荷、modavd 两个 exe、Go 运行时的 BSD-3 声明，Go 版本取自管理器 tag 的 go.mod）、
+`说明.txt` 里讲批处理的几段换成管理器和命令行的说法（`README_EDITS`），在「出问题怎么办」前加 `config/readme-tools.txt`。锚点或原文找不到、不止一处就停。
+补完两个方向都核对：包根以下（`sdk/` 除外）每个文件、`sdk/emulator/resources/modavd/` 每个文件都要在 NOTICE.txt 里有条目，许可证全文除外；
+NOTICE.txt 里每个 `(package root)` 文件都要在包里。以后往包里加文件不补条目，或拿掉文件不改条目，打包都会停。
 
 源码总包多一个 `modavd-src.tar.xz`（0.36.0 时叫 `modavd-src-<提交>.tar.xz`）：各公开仓库的原样 `git archive`，
 `ModAVDManager/` 是 `-Manager` 那个 tag，`ModAVDHostIME/` 是 `-ImeApk` 对上的 tag，`ModAVD/bridge/` 是发版克隆当前提交的 `bridge/`。
@@ -112,7 +115,7 @@ Part 2 末尾加 `config/notice-additions.txt` / `.csv` 的条目（执行桥载
 `LICENSE`、`NOTICE` 有没提交的改动时预检就停。随包脚本本身就是源码，随主包原样发出，不进这个归档。
 
 自研部分（管理器和命令行、执行桥、宿主输入法、随包脚本）按 AGPL-3.0-or-later 发布，公开位置：
-管理器 https://github.com/ModAVD/ModAVDManager，输入法 https://github.com/ModAVD/ModAVDHostIME，随包脚本 https://github.com/ModAVD/ModAVD/tree/main/package，
+管理器 https://github.com/ModAVD/ModAVDManager，输入法 https://github.com/ModAVD/ModAVDHostIME，随包脚本（装执行桥的 `modavd-bridge.ps1`）https://github.com/ModAVD/ModAVD/tree/main/package，
 执行桥 https://github.com/ModAVD/ModAVD/tree/main/bridge。
 补丁按所改文件的许可证；ModAVD 仓库根目录的 LICENSE 仍是 Apache-2.0；图标是同人创作，不在任何许可证范围内。
 24 个源项目发生变化时重新 `git archive`；其他 manifest 项目（尤其 prebuilts）发生变化会停止，需重新审核对应源码及 NOTICE。

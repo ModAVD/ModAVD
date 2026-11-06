@@ -8,10 +8,10 @@ body:
       description: 拿不准就选「不确定」。 / If you are not sure, pick "Not sure".
       options:
         - 模拟器本体（开机、画面、性能、游戏能不能跑） / The emulator itself
-        - 管理器和命令行（ModAVD.exe、tools\modavd.exe） / Manager and CLI
+        - 管理器和命令行（ModAVD.exe、tools\modavd.exe，含补全组件、收集问题信息、复制配置信息） / Manager and CLI (including fetching components and problem reports)
         - 宿主输入法 / Host IME
         - arm64 执行桥 / arm64 execution bridge
-        - 随包脚本（补全组件、收集问题信息、复制配置信息） / Bundled scripts
+        - 随包脚本（tools\modavd-bridge.ps1） / Bundled scripts
         - 文档站 / Docs site
         - 发版前回归（ModAVDE2E） / Pre-release regression (ModAVDE2E)
         - 不确定 / Not sure

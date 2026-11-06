@@ -40,26 +40,45 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # there, the entries appended to Part 2 (NOTICE.txt / NOTICE.csv), and a section for 说明.txt.
 NOTICE_MORE_FILES = {
     "ModAVD program icon (fan art)": ["(package root) ModAVD.exe"],
-    "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1", "(package root) tools/components-sources.txt",
-                                     "(package root) 复制配置信息.bat"],
+    "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1"],
 }
-# Files the reviewed NOTICE still names but the package no longer ships: the batch files call tools/modavd.exe instead
-# of these scripts (ModAVD/ModAVD#45). Each is taken out of its entry, where it has to be exactly once.
+# Files the reviewed NOTICE still names but the package no longer ships: fetching the components, collecting a problem
+# report and copying the system info are in the manager and tools/modavd.exe, and the batch files and scripts that did
+# them are gone (ModAVD/ModAVD#45). Each is taken out of its entry, where it has to be exactly once.
 NOTICE_GONE_FILES = {
-    "ModAVD scripts and documents": ["(package root) tools/fetch-components.ps1", "(package root) tools/collect-info.ps1"],
+    "ModAVD scripts and documents": ["(package root) tools/fetch-components.ps1", "(package root) tools/collect-info.ps1",
+                                     "(package root) 补全组件.bat", "(package root) 收集问题信息.bat"],
 }
 NOTICE_ADDITIONS = HERE / "config/notice-additions.txt"
 NOTICE_ADDITIONS_CSV = HERE / "config/notice-additions.csv"
 README_TOOLS = HERE / "config/readme-tools.txt"
+# Passages of the reviewed 说明.txt that told the user to run the batch files, and what they say now (ModAVD/ModAVD#45).
+# Each old passage has to be there exactly once (see extend_texts).
+README_EDITS = [
+    ("2. 双击「补全组件.bat」。\n"
+     "   它会先显示 Google《Android 软件开发套件许可协议》，输入 y 回车表示同意，\n"
+     "   然后下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
+     "   中途断了，再运行一次会接着下。看到「完成」就好了。\n",
+     "2. 双击 ModAVD.exe（管理器），点上方提示里的「补全组件」\n"
+     "   （顶栏「电脑检查」的「组件」一项下面也有）。\n"
+     "   先选下载源（拿不准就选「自动」），看完 Google《Android 软件开发套件许可协议》后同意，\n"
+     "   它就下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
+     "   中途断了，再点一次会接着下。装好后「电脑检查」的「组件」一项会通过。\n"
+     "   也可以在这个文件夹里运行 tools\\modavd.exe components fetch，做的事一样。\n"),
+    ("先别关模拟器，双击「收集问题信息.bat」，桌面上会生成一个问题包 zip。\n",
+     "先别关模拟器，在管理器的「设置」→「组件与问题反馈」里点「收集问题信息」\n"
+     "（或者在这个文件夹里运行 tools\\modavd.exe collect-info），桌面上会生成一个问题包 zip。\n"),
+    ("ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥、宿主输入法、补全组件和问题收集脚本）按\n",
+     "ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按\n"),
+]
 # The Go programs come from the ModAVDManager release ZIP (--manager), checked against release/<version>.SHA256SUMS.txt
 # at tag v<version> of a ModAVDManager checkout (--manager-repo): path in the ZIP -> package path.
 MODAVD_FILES = {"tools/modavd.exe": "tools/modavd.exe", "ModAVD.exe": "ModAVD.exe"}
 MANAGER_ZIP = re.compile(r"ModAVDManager-(\d+\.\d+\.\d+)-win-x64\.zip")
-# The bundled files, read from package/ of the ModAVD release checkout (--repository) at its HEAD, where package/**
-# is stored byte for byte (-text): these go to tools/ (the bridge script and the download-source menu of 补全组件.bat),
-# the batch files to the package root. The batch files call tools/modavd.exe (ModAVD/ModAVD#45).
-PACKAGE_TOOLS = ["modavd-bridge.ps1", "components-sources.txt"]
-PACKAGE_ROOT = ["补全组件.bat", "收集问题信息.bat", "复制配置信息.bat"]
+# The bundled script, read from package/ of the ModAVD release checkout (--repository) at its HEAD, where package/**
+# is stored byte for byte (-text), into tools/. Up to 0.38.1 the package also had three batch files at its root and
+# three more scripts; what they did is in the manager and tools/modavd.exe now (ModAVD/ModAVD#45).
+PACKAGE_TOOLS = ["modavd-bridge.ps1"]
 # ModAVD's own programs in the package (AGPL-3.0-or-later) go into the source bundle as OWN_SOURCES_NAME: each public
 # repository exactly as published, under its own folder: ModAVDManager at the tag of the shipped ZIP, ModAVDHostIME
 # at the tag whose release checksums list the shipped APK, and bridge/ (the arm64 execution bridge) of the ModAVD
@@ -87,7 +106,7 @@ OWN_SOURCES_TEXT = """
                             bridge/。libmodavd_bridge.so（nbshim/jni）、libmodavd_gate.so（companion/jni）用
                             Android NDK r27c 的 ndk-build 按 jni 下的 Android.mk / Application.mk 编（bridge/scripts）；
                             modavd_bridge.rc 是原文件。https://github.com/ModAVD/ModAVD/tree/main/bridge
-   包里的脚本和批处理文件（tools\\*.ps1、包根的 .bat）本身就是源码，随主包原样发出，不在这个归档里；
+   包里装执行桥的脚本（tools\\modavd-bridge.ps1）本身就是源码，随主包原样发出，不在这个归档里；
    取自同一提交的 package/：https://github.com/ModAVD/ModAVD/tree/main/package。
 """
 OWN_SOURCES_IME_TEXT = """\
@@ -472,7 +491,7 @@ def public_sources(args):
     if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
     commit = git(repo, "rev-parse", "HEAD")
-    for rel in [*("package/" + n for n in PACKAGE_TOOLS + PACKAGE_ROOT), "bridge/nbshim/modavd_bridge.rc"]:
+    for rel in [*("package/" + n for n in PACKAGE_TOOLS), "bridge/nbshim/modavd_bridge.rc"]:
         try:
             git(repo, "cat-file", "-e", f"{commit}:{rel}")
         except RuntimeError:
@@ -562,9 +581,9 @@ def assemble(args):
 
 
 def copy_public_files(own, manager, dest):
-    """Into the package tree `dest`: the bundled scripts, byte for byte from package/ at the recorded ModAVD commit,
+    """Into the package tree `dest`: the bundled script, byte for byte from package/ at the recorded ModAVD commit,
     and the programs from the manager ZIP (both checked by public_sources)."""
-    scripts = {**{"tools/" + n: n for n in PACKAGE_TOOLS}, **{n: n for n in PACKAGE_ROOT}}
+    scripts = {"tools/" + n: n for n in PACKAGE_TOOLS}
     for rel, name in scripts.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         (dest / rel).write_bytes(run("git", "-C", own["modavd"]["repo"], "--no-optional-locks", "cat-file", "blob",
@@ -584,8 +603,8 @@ def render_csv(rows):
 def extend_texts(dest, go):
     """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: NOTICE_GONE_FILES out
     of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
-    (`go`: the Go version the manager was built with), config/readme-tools.txt before the troubleshooting section of
-    说明.txt. Every anchor has to be there exactly once."""
+    (`go`: the Go version the manager was built with), README_EDITS in 说明.txt and config/readme-tools.txt before its
+    troubleshooting section. Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
     for lib, files in NOTICE_GONE_FILES.items():
@@ -640,6 +659,10 @@ def extend_texts(dest, go):
 
     path = dest / "说明.txt"
     text = path.read_text(encoding="utf-8-sig")
+    for old, new in README_EDITS:
+        if text.count(old) != 1:
+            raise ValueError(f"说明.txt: the passage {old.splitlines()[0]!r} not found exactly once")
+        text = text.replace(old, new)
     anchor = "====================\n出问题怎么办\n"
     if text.count(anchor) != 1:
         raise ValueError("说明.txt: the troubleshooting heading not found exactly once")
@@ -648,11 +671,14 @@ def extend_texts(dest, go):
 
 def check_notice_coverage(dest):
     """Every file at the package root and below (not sdk/) is named in NOTICE.txt as "(package root) <path>", and so
-    is every file of ours under sdk/emulator/resources/modavd/ (as "./<path>"); the license texts excepted. Runs
-    before the manifest exists."""
+    is every file of ours under sdk/emulator/resources/modavd/ (as "./<path>"); the license texts excepted. The other
+    way round, every "(package root) <path>" is a file of the package. Runs before the manifest exists."""
     notice = (dest / "LICENSES/NOTICE.txt").read_text(encoding="utf-8-sig")
     named = set(re.findall(r"^\(package root\) (.+)$", notice, re.M))
     named_sdk = set(re.findall(r"^\./(.+)$", notice, re.M))
+    gone = sorted(n for n in named if not (Path(dest) / n).is_file())
+    if gone:
+        raise ValueError("LICENSES/NOTICE.txt names files the package does not have: " + ", ".join(gone))
     missing = []
     for p in sorted(Path(dest).rglob("*")):
         rel = p.relative_to(dest).as_posix()

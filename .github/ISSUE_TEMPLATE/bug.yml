@@ -14,10 +14,10 @@ body:
       description: 拿不准就选「不确定」。 / If you are not sure, pick "Not sure".
       options:
         - 模拟器本体（开机、画面、性能、游戏能不能跑） / The emulator itself
-        - 管理器和命令行（ModAVD.exe、tools\modavd.exe） / Manager and CLI
+        - 管理器和命令行（ModAVD.exe、tools\modavd.exe，含补全组件、收集问题信息、复制配置信息） / Manager and CLI (including fetching components and problem reports)
         - 宿主输入法 / Host IME
         - arm64 执行桥 / arm64 execution bridge
-        - 随包脚本（补全组件、收集问题信息、复制配置信息） / Bundled scripts
+        - 随包脚本（tools\modavd-bridge.ps1；0.38.1 及更早包里的 .bat） / Bundled scripts
         - 文档站 / Docs site
         - 发版前回归（ModAVDE2E） / Pre-release regression (ModAVDE2E)
         - 不确定 / Not sure
@@ -44,4 +44,4 @@ body:
     id: report
     attributes:
       label: 问题包和日志 / Problem report and logs
-      description: 出问题后先别关模拟器，双击「收集问题信息.bat」生成问题包。公开贴只贴不含 crash 文件夹的部分，带崩溃转储的完整问题包请发邮件。 / Before closing the emulator, double-click 收集问题信息.bat to make a problem report. Post only the parts without the crash folder here; e-mail the full report with crash dumps.
+      description: 出问题后先别关模拟器，在管理器「设置」→「组件与问题反馈」里点「收集问题信息」（或运行 tools\modavd.exe collect-info）生成问题包；0.38.1 及更早的包是双击「收集问题信息.bat」。公开贴只贴不含 crash 文件夹的部分，带崩溃转储的完整问题包请发邮件。 / Before closing the emulator, make a problem report: in the manager, 设置 (Settings) → 组件与问题反馈 (Components and feedback) → 收集问题信息 (Collect a problem report), or run tools\modavd.exe collect-info; in 0.38.1 and earlier packages, double-click 收集问题信息.bat. Post only the parts without the crash folder here; e-mail the full report with crash dumps.

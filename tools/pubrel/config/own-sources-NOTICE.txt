@@ -17,9 +17,9 @@ Public License, version 3 or (at your option) any later version
                    (libmodavd_bridge.so, libmodavd_gate.so, modavd_bridge.rc).
                    Public: https://github.com/ModAVD/ModAVD/tree/main/bridge
 
-The scripts and batch files of the package (tools\*.ps1 and the .bat files at
-the package root) are also AGPL-3.0-or-later. They are shipped as source code,
-so they are not in this archive; public:
+The script of the package that installs the bridge (tools\modavd-bridge.ps1)
+is also AGPL-3.0-or-later. It is shipped as source code, so it is not in this
+archive; public:
 https://github.com/ModAVD/ModAVD/tree/main/package
 
 Exceptions and third-party parts:
@@ -60,8 +60,8 @@ Copyright 2026 qiyinxi
   ModAVD/bridge/   sdk\emulator\resources\modavd 里的 arm64 执行桥。
                    公开位置：https://github.com/ModAVD/ModAVD/tree/main/bridge
 
-包里的脚本和批处理文件（tools\*.ps1 和包根的 .bat）也按 AGPL-3.0-or-later 发布。
-它们本身就是源码，随包原样发出，所以不在本归档里；公开位置：
+包里装执行桥的脚本（tools\modavd-bridge.ps1）也按 AGPL-3.0-or-later 发布。
+它本身就是源码，随包原样发出，所以不在本归档里；公开位置：
 https://github.com/ModAVD/ModAVD/tree/main/package
 
 例外和第三方部分：
