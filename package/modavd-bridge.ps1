@@ -18,7 +18,7 @@
 
 .DESCRIPTION
 装进客体的是三个我们自己的文件，外加往 /vendor/build.prop 追加的一行。
-Google 的翻译层 /system/lib64/libndk_translation.so 一个字节都不改。
+本脚本不改 Google 的翻译层 /system/lib64/libndk_translation.so。管理器开机后另挂一份本机生成的补丁副本，只改提示类指令（SEVL、SEV、WFE、WFI）的解码，镜像文件不动。
 
   /system/lib64/libmodavd_bridge.so     native bridge 入口 shim（标签 u:object_r:system_lib_file:s0，644）
   /system/lib64/libmodavd_gate.so       执行桥伴生库（同上）
