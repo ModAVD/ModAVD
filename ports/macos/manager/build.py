@@ -122,6 +122,11 @@ def build(args):
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise RuntimeError("Build requires an Apple Silicon Mac and the macOS SDK")
     version = version_fields(args.version, args.build)
+    if args.notary_profile and args.sign_identity == "-":
+        raise RuntimeError("Notarization requires an explicit Developer ID Application signing identity")
+    signing = ["/usr/bin/codesign", "--force", "--sign", args.sign_identity]
+    if args.sign_identity != "-":
+        signing += ["--options", "runtime", "--timestamp"]
     source = args.source
     space(source.parent)
     state = prepare(source, args.revision)
@@ -157,7 +162,7 @@ def build(args):
             if any(payload not in binary for payload in embedded):
                 raise RuntimeError("Built host executable lacks a generated guest payload: " + name)
             built_hashes[name] = hashlib.sha256(binary).hexdigest()
-            run(["/usr/bin/codesign", "--force", "--sign", "-", tools / name], env=env, timeout=60)
+            run([*signing, tools / name], env=env, timeout=120)
         contents = stage / "ModAVD.app/Contents"
         binaries = contents / "MacOS"
         binaries.mkdir(parents=True)
@@ -167,11 +172,22 @@ def build(args):
                 "CFBundleShortVersionString": state["managerVersion"], "CFBundleVersion": str(args.build),
                 "LSMinimumSystemVersion": "13.0", "NSHighResolutionCapable": True}
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
-        run(["/usr/bin/codesign", "--force", "--sign", "-", stage / "ModAVD.app"], env=env, timeout=60)
+        run([*signing, stage / "ModAVD.app"], env=env, timeout=120)
         # Bundle signing binds Info.plist; the standalone entry keeps its own signature.
         run(["/usr/bin/codesign", "--verify", "--deep", "--strict", stage / "ModAVD.app"], timeout=60)
         for name in ("modavd", "modavd-manager"):
             run(["/usr/bin/codesign", "--verify", "--strict", tools / name], timeout=60)
+        if args.notary_profile:
+            submission = temporary / "notarize.zip"
+            run(["/usr/bin/ditto", "-c", "-k", "--keepParent", stage / "ModAVD.app", submission], timeout=120)
+            result = run(["/usr/bin/xcrun", "notarytool", "submit", submission,
+                          "--keychain-profile", args.notary_profile, "--wait", "--output-format", "json"],
+                         capture=True, timeout=1200)
+            if json.loads(result.stdout).get("status") != "Accepted":
+                raise RuntimeError("Apple did not accept the app notarization submission")
+            run(["/usr/bin/xcrun", "stapler", "staple", stage / "ModAVD.app"], timeout=120)
+            run(["/usr/bin/xcrun", "stapler", "validate", stage / "ModAVD.app"], timeout=120)
+            run(["/usr/sbin/spctl", "--assess", "--type", "execute", stage / "ModAVD.app"], timeout=120)
         for name in ("LICENSE", "NOTICE"):
             if (source / name).is_file():
                 shutil.copy2(source / name, stage / name)
@@ -179,7 +195,8 @@ def build(args):
             raise RuntimeError("Manager source changed during the build")
         receipt = {"schema": 2, "upstream": UPSTREAM, **state, "toolchain": TOOLCHAIN,
                    "platform": "macos-arm64", "version": version, "build": args.build,
-                   "signature": "ad-hoc-integrity", "checks": "skipped" if args.skip_checks else "test-and-vet",
+                   "signature": "ad-hoc-integrity" if args.sign_identity == "-" else "identity-signed",
+                   "appNotarized": bool(args.notary_profile), "checks": "skipped" if args.skip_checks else "test-and-vet",
                    "builtBinarySha256": built_hashes, "guestPayloads": payloads}
         (stage / RECEIPT).write_text(json.dumps(receipt, indent=2) + "\n")
         checksums = {p.relative_to(stage).as_posix(): digest(p) for p in sorted(stage.rglob("*")) if p.is_file()}
@@ -206,6 +223,8 @@ def main():
     parser.add_argument("--build", type=int, help="ModAVD core build Y from X.Y.Z")
     parser.add_argument("--output", type=Path, default=ROOT / ".macos-work/manager-dist")
     parser.add_argument("--developer-dir", type=Path)
+    parser.add_argument("--sign-identity", default="-", help="Explicit local codesign identity; default is ad hoc")
+    parser.add_argument("--notary-profile", help="Explicit notarytool keychain profile; submits only when provided")
     parser.add_argument("--skip-checks", action="store_true", help="Build already verified source; recorded in receipt")
     args = parser.parse_args()
     args.source = args.source.expanduser().resolve()
