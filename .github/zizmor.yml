@@ -2,6 +2,6 @@
 rules:
   unpinned-uses:
     ignore:
-      # Mirror 酱的两个 action 还是 @v1，另有 PR 在钉 SHA；那个 PR 合并后去掉这两行。
+      # Mirror 酱的两个 action 照旧跟随它的 v1 分支（由 Mirror 酱自己往前改），不钉 SHA，长期跳过。
       - mirrorchyan_release.yml
       - mirrorchyan_release_note.yml
