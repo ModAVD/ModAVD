@@ -1,8 +1,11 @@
 name: Source and release checks
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,3 +27,26 @@ jobs:
         run: python3 scripts/checks.py metadata
       - name: Scan tracked files for private identity and paths
         run: python3 scripts/privacy.py .
+
+  zizmor:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install zizmor 1.32.0 (version and wheel hash pinned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+          printf '%s\n' 'zizmor==1.32.0 --hash=sha256:84a6acb975accc13408786a2bd274b572537ca19c933ebbc13e78f3988562071' > "$RUNNER_TEMP/zizmor-requirements.txt"
+          "$RUNNER_TEMP/zizmor/bin/pip" install --quiet --disable-pip-version-check --no-deps --only-binary=:all: \
+            --require-hashes -r "$RUNNER_TEMP/zizmor-requirements.txt"
+      - name: Audit workflows and Dependabot config
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: '"$RUNNER_TEMP/zizmor/bin/zizmor" --format=github --no-progress .'

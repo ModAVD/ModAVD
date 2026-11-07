@@ -1,0 +1,7 @@
+# zizmor 配置：CI 里的 zizmor job 扫 .github/workflows 和 .github/dependabot.yml。
+rules:
+  unpinned-uses:
+    ignore:
+      # Mirror 酱的两个 action 还是 @v1，另有 PR 在钉 SHA；那个 PR 合并后去掉这两行。
+      - mirrorchyan_release.yml
+      - mirrorchyan_release_note.yml
