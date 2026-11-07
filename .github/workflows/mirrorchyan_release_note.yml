@@ -34,7 +34,17 @@ jobs:
           data=$(gh release view "${args[@]}" --jq '{tag: .tagName, note: ((.body // "") | split("<!-- modavd:github-only -->")[0])} | tojson')
           echo "data=$data" >> "$GITHUB_OUTPUT"
 
-      - uses: MirrorChyan/release-note-action@v1
+      # The action downloads python/upload.py from its mutable v1 branch unless
+      # this file already exists, so fetch it from the pinned commit first.
+      - name: Fetch pinned MirrorChyan release note script
+        shell: bash
+        env:
+          SCRIPT_URL: https://raw.githubusercontent.com/MirrorChyan/release-note-action/f392b50c411981ee6d33c8ed5e91d66d84d56202/python/upload.py
+        run: |
+          curl -fsSL --retry 3 -o mirrorchyan_release_note.py "$SCRIPT_URL"
+          python -m pip install aiohttp
+
+      - uses: MirrorChyan/release-note-action@f392b50c411981ee6d33c8ed5e91d66d84d56202 # v1
         with:
           mirrorchyan_rid: ModAVD
           version_name: ${{ fromJSON(steps.release.outputs.data).tag }}

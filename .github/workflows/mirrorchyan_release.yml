@@ -27,7 +27,17 @@ jobs:
             # Legacy mas builds and current platform-suffixed main packages.
             filename: 'ModAVD-{*-mas+([0-9]),*-win-x64}.zip'
     steps:
-      - uses: MirrorChyan/uploading-action@v1
+      # The action downloads python/upload.py from its mutable v1 branch unless
+      # this file already exists, so fetch it from the pinned commit first.
+      - name: Fetch pinned MirrorChyan upload script
+        shell: bash
+        env:
+          SCRIPT_URL: https://raw.githubusercontent.com/MirrorChyan/uploading-action/cca679d5e75017ac9ae236b55406b27f6f24c7db/python/upload.py
+        run: |
+          curl -fsSL --retry 3 -o mirrorchyan_uploading.py "$SCRIPT_URL"
+          python -m pip install requests
+
+      - uses: MirrorChyan/uploading-action@cca679d5e75017ac9ae236b55406b27f6f24c7db # v1
         with:
           filetype: latest-release
           filename: ${{ matrix.filename }}
