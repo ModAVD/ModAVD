@@ -156,6 +156,13 @@ size_t g_real_bytes = 0;                        // how much of *g_real the ctor 
 using GateDetachFn = int (*)(const char* pkg);
 GateDetachFn g_companion_detach = nullptr;
 
+// The companion's modavd_fsync_defer_init (see ShimInitialize). Independent of the
+// arm64 gate: ModAVD#35 defers download fsync for a listed app via a seccomp filter on the
+// host fsync syscall. It is called for the listed package whether or not that package is
+// on the gate list.
+using FsyncDeferInitFn = void (*)(const char* pkg);
+FsyncDeferInitFn g_companion_fsync_init = nullptr;
+
 // Diagnostic logging gate (property modavd.nb.log, default ON for this build),
 // cached per process.  Cached alongside the pid it was read in so that a value
 // inherited through fork() is re-read in the child.
@@ -322,8 +329,15 @@ bool ShimInitialize(const void* runtime_cbs, const char* private_dir,
   // handler, no GOT triggers, no logging.
   const GateDetachFn detach = __atomic_load_n(&g_companion_detach, __ATOMIC_ACQUIRE);
   char pkg[128];
-  if (detach != nullptr && PackageFromPrivateDir(private_dir, pkg, sizeof(pkg)) &&
-      detach(pkg) == 0) {
+  const bool have_pkg = PackageFromPrivateDir(private_dir, pkg, sizeof(pkg));
+  // ModAVD#35: download fsync deferral for the listed app. Done here, before the detach
+  // branch, so it runs for a NON-gate app too. Arknights is one such app: it ships only
+  // arm64 code and so runs under translation (which is why it reaches this native-bridge
+  // initialize() at all), but it is not on the gate list. The companion itself no-ops
+  // unless the package is on modavd.fsync.defer, so this call is free for every other app.
+  const FsyncDeferInitFn fsync_init = __atomic_load_n(&g_companion_fsync_init, __ATOMIC_ACQUIRE);
+  if (fsync_init != nullptr && have_pkg) fsync_init(pkg);
+  if (detach != nullptr && have_pkg && detach(pkg) == 0) {
     memcpy(&NativeBridgeItf, g_real, g_real_bytes);
     __atomic_store_n(&g_log_on, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_log_pid, static_cast<int>(getpid()), __ATOMIC_RELAXED);
@@ -643,8 +657,13 @@ __attribute__((constructor)) void ShimCtor() {
     // Optional export too: an older companion without it leaves every app on the shim.
     const auto dt = reinterpret_cast<GateDetachFn>(dlsym(ch, "modavd_gate_detach_unless_target"));
     __atomic_store_n(&g_companion_detach, dt, __ATOMIC_RELEASE);
-    NB_LOGI("shim-ctor companion %s loaded handle=%p first-chance=%p detach=%p", companion, ch,
-            reinterpret_cast<void*>(fc), reinterpret_cast<void*>(dt));
+    // Optional export too: an older companion without it simply has no #35 fsync
+    // deferral, and every app keeps today's per-block download fsync.
+    const auto fi = reinterpret_cast<FsyncDeferInitFn>(dlsym(ch, "modavd_fsync_defer_init"));
+    __atomic_store_n(&g_companion_fsync_init, fi, __ATOMIC_RELEASE);
+    NB_LOGI("shim-ctor companion %s loaded handle=%p first-chance=%p detach=%p fsync=%p", companion,
+            ch, reinterpret_cast<void*>(fc), reinterpret_cast<void*>(dt),
+            reinterpret_cast<void*>(fi));
   }
 }
 

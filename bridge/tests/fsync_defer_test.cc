@@ -1,0 +1,604 @@
+/* Copyright 2026 qiyinxi. SPDX-License-Identifier: AGPL-3.0-or-later. */
+// Native test for the #35 fsync-deferral module (design "B": seccomp + USER_NOTIF). It
+// compiles the real implementation directly and drives its internals — Classify,
+// ShouldDefer/DecideDefer and PaybackSlotIfDue — with real files, WITHOUT installing a
+// seccomp filter (the deferral is a kernel verdict in production; here we check the
+// decision logic and the payback I/O). No translator, no game. Run on a test instance:
+//   clang++ --target=x86_64-linux-android30 -std=c++17 -O2 -Wall -Wextra -Werror \
+//       -fno-exceptions -fno-rtti -static-libstdc++ bridge/tests/fsync_defer_test.cc \
+//       -llog -o fsync-defer-test  &&  adb push ... && adb shell .../fsync-defer-test
+//
+// Covers: path-pattern and package matching; classify + fd-reuse revalidation; observe
+// never defers; active defers an already-classified matched fd but continues the first
+// (unknown) fsync, an unmatched fd, a foreign (forked-child) pid, and an fd whose file
+// changed; payback pays a dirty slot once per cap, is a no-op when paid recently, and (via
+// the handle dup'd at match time) still flushes a file after it is renamed out of
+// *.downloading -- each payback really issues one fsync on the private handle with the magic
+// (syscall() is interposed below to see it); an idle fully-paid slot is retired, but a slot
+// that still owes a payback is never retired; a full matched list never defers;
+// AccountFsync counts a foreign pid; ForgetAfterFork wipes the tables; exit-flush
+// (FlushAllDeferred / FlushAndTeardown) flushes every unpaid slot immediately -- ignoring the
+// scanner's kPaybackEveryNs cap -- and FlushAndTeardown sets g_shutdown and flushes only when
+// armed; a rename (active) first pays back every unpaid deferred file (real fsync on our handle,
+// with the magic) and does nothing in observe, for a forked child or when nothing is owed; a RECV
+// ENOENT (notification withdrawn before RECV) is counted as an interruption; and the BPF filter
+// program's verdicts (interpreted, no kernel): fsync and the three renames trapped,
+// fdatasync/magic fsync/other/foreign arch allowed.
+#include "../companion/jni/fsync_defer.cc"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+// The module issues its payback / exit-flush fsync as syscall(__NR_fsync, handle, kMagic).
+// The counters alone cannot tell whether that call really went out, with the magic (without it
+// the filter would trap our own payback and, on a matched file, defer it again), on the right
+// handle. So this executable interposes libc's syscall(): every fsync it sees is recorded, then
+// performed for real with the raw instruction. References inside this executable bind here.
+namespace {
+struct SysFsync {
+  long fd;
+  long arg1;
+};
+SysFsync g_sys_fsync[64];
+int g_sys_fsync_n = 0;
+}  // namespace
+
+extern "C" long syscall(long nr, ...) {
+  va_list ap;
+  va_start(ap, nr);
+  const long a0 = va_arg(ap, long), a1 = va_arg(ap, long), a2 = va_arg(ap, long);
+  const long a3 = va_arg(ap, long), a4 = va_arg(ap, long), a5 = va_arg(ap, long);
+  va_end(ap);
+  if (nr == __NR_fsync && g_sys_fsync_n < 64) g_sys_fsync[g_sys_fsync_n++] = {a0, a1};
+  long ret;
+  register long r10 __asm__("r10") = a3;
+  register long r8 __asm__("r8") = a4;
+  register long r9 __asm__("r9") = a5;
+  __asm__ volatile("syscall"
+                   : "=a"(ret)
+                   : "a"(nr), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                   : "rcx", "r11", "memory");
+  if (ret < 0 && ret > -4096) {
+    errno = static_cast<int>(-ret);
+    return -1;
+  }
+  return ret;
+}
+
+namespace {
+int failures = 0;
+#define CHECK(x)                                           \
+  do {                                                     \
+    if (!(x)) {                                            \
+      std::fprintf(stderr, "FAIL %d: %s\n", __LINE__, #x); \
+      ++failures;                                          \
+    }                                                      \
+  } while (0)
+
+// mkdir -p for a directory tree under the test's scratch dir.
+void MakeDirs(const std::string& path) {
+  for (size_t i = 1; i < path.size(); ++i) {
+    if (path[i] == '/') mkdir(path.substr(0, i).c_str(), 0755);
+  }
+  mkdir(path.c_str(), 0755);
+}
+
+int OpenUnder(const std::string& dir, const std::string& rel) {
+  const std::string full = dir + "/" + rel;
+  const size_t slash = full.find_last_of('/');
+  MakeDirs(full.substr(0, slash));
+  const int fd = open(full.c_str(), O_RDWR | O_CREAT, 0644);
+  if (fd < 0) std::fprintf(stderr, "open(%s) errno=%d\n", full.c_str(), errno);
+  return fd;
+}
+
+pid_t MyTid() { return static_cast<pid_t>(syscall(__NR_gettid)); }
+
+// A notification as the supervisor would receive it: fsync on fd, from thread `pid`.
+struct seccomp_notif MakeReq(int fd, pid_t pid, uint32_t nr = kNrFsync) {
+  struct seccomp_notif req;
+  memset(&req, 0, sizeof(req));
+  req.pid = static_cast<uint32_t>(pid);
+  req.data.nr = static_cast<int>(nr);
+  req.data.args[0] = static_cast<uint64_t>(static_cast<uint32_t>(fd));
+  return req;
+}
+
+// Interpret g_filter over a crafted seccomp_data and return its verdict, so the BPF
+// program's offsets and jumps are checked without installing a real seccomp filter
+// (deterministic, needs no kernel support). Handles only the opcodes g_filter uses.
+uint32_t RunFilter(const struct seccomp_data& d) {
+  uint32_t A = 0;
+  const uint8_t* base = reinterpret_cast<const uint8_t*>(&d);
+  const size_t n = sizeof(g_filter) / sizeof(g_filter[0]);
+  for (size_t pc = 0; pc < n;) {
+    const struct sock_filter& ins = g_filter[pc];
+    if (ins.code == (BPF_LD | BPF_W | BPF_ABS)) {
+      memcpy(&A, base + ins.k, sizeof(A));
+      ++pc;
+    } else if (ins.code == (BPF_JMP | BPF_JEQ | BPF_K)) {
+      pc += 1 + (A == ins.k ? ins.jt : ins.jf);
+    } else if (ins.code == (BPF_RET | BPF_K)) {
+      return ins.k;
+    } else {
+      return 0xFFFFFFFFu;  // an opcode the filter does not use
+    }
+  }
+  return 0xFFFFFFFFu;
+}
+
+// Reset the module's runtime state between cases (no filter is ever installed).
+void SetUp(int mode) {
+  g_mode = mode;
+  g_pattern_count = ParseList(kDefaultPaths, g_patterns);
+  if (g_fds == nullptr) {
+    g_fd_cap = 4096;
+    g_fds = new FdEntry[g_fd_cap];
+  }
+  for (int i = 0; i < g_fd_cap; ++i) {
+    g_fds[i].state.store(kUnknown);
+    g_fds[i].dev.store(0);
+    g_fds[i].ino.store(0);
+    g_fds[i].matched_idx.store(-1);
+  }
+  for (int i = 0; i < kMaxMatched; ++i) {
+    ClosePaybackHandle(g_matched[i].payback_fd.exchange(-1));  // tagged close; no-op if -1
+    g_matched[i].fd = -1;
+    g_matched[i].path[0] = '\0';
+    g_matched[i].matched_ns.store(0);
+    g_matched[i].deferred_ns.store(0);
+    g_matched[i].paid_ns.store(0);
+  }
+  g_c_recv.store(0);
+  g_c_real.store(0);
+  g_c_other.store(0);
+  g_c_foreign.store(0);
+  g_c_deferred.store(0);
+  g_c_payback.store(0);
+  g_c_payback_err.store(0);
+  g_shutdown.store(false);
+  g_installed.store(false);
+  g_sys_fsync_n = 0;
+}
+
+// The crash-repair safe length recorded on fd, or -1 if none.
+long long SafeXattr(int fd) {
+  char buf[24] = {};
+  const ssize_t n = fgetxattr(fd, kSafeXattr, buf, sizeof(buf) - 1);
+  return n > 0 ? atoll(buf) : -1;
+}
+
+// The last fsync syscall() saw went to `fd` and carried the payback magic.
+bool LastFsyncWasMagicOn(int fd) {
+  if (g_sys_fsync_n == 0) return false;
+  const SysFsync& s = g_sys_fsync[g_sys_fsync_n - 1];
+  return s.fd == fd && s.arg1 == static_cast<long>(kMagic);
+}
+}  // namespace
+
+int main() {
+  char tmpl[] = "/data/local/tmp/fsdeferXXXXXX";
+  const char* base = mkdtemp(tmpl);
+  if (base == nullptr) base = mkdtemp(strcpy(new char[64], "/tmp/fsdeferXXXXXX"));
+  CHECK(base != nullptr);
+  const std::string dir = base;
+  const std::string match_rel = "files/HGGameUpdate/HGDownload/file_1/download/abc.downloading";
+  const std::string other_rel = "files/other.dat";
+  const pid_t me = MyTid();
+
+  // --- pure matching ---------------------------------------------------------
+  g_pattern_count = ParseList(kDefaultPaths, g_patterns);
+  CHECK(PathMatches("/x/y/files/HGGameUpdate/HGDownload/file_9/download/u.downloading"));
+  CHECK(!PathMatches("/x/y/files/HGGameUpdate/HGDownload/file_9/download/u.dat"));
+  CHECK(!PathMatches("/x/y/Bundles/persistent_res_list.json"));
+  CHECK(PackageOnList("com.hypergryph.arknights", "com.hypergryph.arknights"));
+  CHECK(PackageOnList("com.hypergryph.arknights", "com.hypergryph.arknights:push"));
+  CHECK(!PackageOnList("com.hypergryph.arknights", "com.netease.onmyoji"));
+  CHECK(!PackageOnList("a.b,c.d", "e.f"));
+
+  // --- classify + fd-reuse revalidation --------------------------------------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    CHECK(g_fds[fd].state.load() == kMatched);
+    CHECK(g_fds[fd].matched_idx.load() >= 0);
+    // A matched fd whose cached identity is wiped still reclassifies by path.
+    g_fds[fd].dev.store(0);
+    g_fds[fd].ino.store(0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    close(fd);
+    const int fd2 = OpenUnder(dir, other_rel);
+    CHECK(fd2 >= 0);
+    CHECK(Classify(fd2, nullptr, 0) == kUnmatched);
+    CHECK(g_fds[fd2].matched_idx.load() == -1);
+    close(fd2);
+  }
+
+  // --- observe never defers (even a classified matched fd) -------------------
+  SetUp(kObserve);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    CHECK(g_fds[fd].matched_idx.load() == -1);  // observe takes no payback slot ...
+    for (int i = 0; i < kMaxMatched; ++i) CHECK(g_matched[i].payback_fd.load() == -1);  // ... holds no handle
+    const struct seccomp_notif req = MakeReq(fd, me);
+    CHECK(!ShouldDefer(&req));  // observe: always continue
+    close(fd);
+  }
+
+  // --- active: first (unknown) fsync continues, later ones defer --------------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    const struct seccomp_notif req = MakeReq(fd, me);
+    CHECK(!ShouldDefer(&req));            // not classified yet -> continue (real)
+    CHECK(Classify(fd, nullptr, 0) == kMatched);  // AccountFsync would do this post-SEND
+    CHECK(ShouldDefer(&req));             // now matched -> defer
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    CHECK(g_matched[idx].deferred_ns.load() > 0);  // stamped for payback
+    CHECK(ShouldDefer(&req));             // and again
+    close(fd);
+  }
+
+  // --- active continues: unmatched fd, foreign pid, changed file -------------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, other_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kUnmatched);
+    const struct seccomp_notif req = MakeReq(fd, me);
+    CHECK(!ShouldDefer(&req));            // unmatched -> continue
+    close(fd);
+
+    const int mfd = OpenUnder(dir, match_rel);
+    CHECK(mfd >= 0);
+    CHECK(Classify(mfd, nullptr, 0) == kMatched);
+    // Foreign thread id (not under /proc/self/task): never defer.
+    const struct seccomp_notif foreign = MakeReq(mfd, 0x7fffffff);
+    CHECK(!ShouldDefer(&foreign));
+    // fd-number reuse: cached matched, but the fd now fstats to a different inode.
+    const struct seccomp_notif req2 = MakeReq(mfd, me);
+    g_fds[mfd].ino.store(g_fds[mfd].ino.load() ^ 0x1);  // corrupt cached identity
+    CHECK(!ShouldDefer(&req2));           // dev/ino mismatch -> continue
+    close(mfd);
+  }
+
+  // --- payback: due once per cap, no-op when recent, still flushes after rename -----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const int handle = g_matched[idx].payback_fd.load();
+    CHECK(handle >= 0);                      // a private handle was dup'd at match time
+    CHECK(handle != fd);                     // ... and it is not the game's own fd
+    CHECK(g_sys_fsync_n == 1 && LastFsyncWasMagicOn(handle));  // paid back once at match time ...
+    CHECK(SafeXattr(handle) == 0);           // ... so the (still empty) file has a safe length
+    g_sys_fsync_n = 0;
+    char blob[10000];                        // the download appends 10000 bytes
+    memset(blob, 'd', sizeof(blob));
+    CHECK(write(fd, blob, sizeof(blob)) == static_cast<ssize_t>(sizeof(blob)));
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);   // one unpaid deferred fsync
+    g_matched[idx].paid_ns.store(0);
+    CHECK(PaybackSlotIfDue(idx, now));       // paid=0 -> due
+    CHECK(g_c_payback.load() == 1);          // real fsync ran on the file
+    CHECK(g_c_payback_err.load() == 0);
+    CHECK(g_sys_fsync_n == 1);               // exactly one fsync went out ...
+    CHECK(LastFsyncWasMagicOn(handle));      // ... on our handle, with the magic the filter lets by
+    CHECK(SafeXattr(handle) == 8192);        // the size from BEFORE the fsync, rounded down to a page
+    CHECK(!PaybackSlotIfDue(idx, now));      // deferred <= paid now -> nothing unpaid
+    g_matched[idx].deferred_ns.store(now + 1);               // new defer, paid too recently
+    CHECK(!PaybackSlotIfDue(idx, now + 1));
+    CHECK(g_sys_fsync_n == 1);               // neither no-op issued an fsync
+    CHECK(PaybackSlotIfDue(idx, now + kPaybackEveryNs + 1));  // cap elapsed -> due again
+    CHECK(g_c_payback.load() == 2);
+    CHECK(g_sys_fsync_n == 2);
+    CHECK(LastFsyncWasMagicOn(handle));
+    // 96-2: after the download renames the file out of *.downloading, the deferred tail is
+    // STILL flushed through the handle dup'd at match time -- not lost, not an error.
+    const long paid2 = now + kPaybackEveryNs + 1;  // == current paid_ns
+    const std::string full = dir + "/" + match_rel;
+    MakeDirs(dir + "/files/Bundles");
+    CHECK(rename(full.c_str(), (dir + "/files/Bundles/renamed.ab").c_str()) == 0);
+    g_matched[idx].deferred_ns.store(paid2 + 1);
+    close(fd);                               // the download closes its own fd after the rename
+    CHECK(PaybackSlotIfDue(idx, paid2 + kPaybackEveryNs + 1));
+    CHECK(g_c_payback.load() == 3);          // held handle flushed the renamed file
+    CHECK(g_c_payback_err.load() == 0);
+    CHECK(LastFsyncWasMagicOn(handle));
+  }
+
+  // --- retire never frees a slot that still owes a payback, however long it is idle -----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const long now = NowNs();
+    g_matched[idx].paid_ns.store(now);
+    g_matched[idx].deferred_ns.store(now + 1);       // one deferred fsync after the last payback
+    RetireSlotIfIdle(idx, now + 10 * kRetireIdleNs);  // long idle, but the tail is unpaid
+    CHECK(g_matched[idx].fd == fd);                  // kept
+    CHECK(g_matched[idx].payback_fd.load() >= 0);    // handle kept for the payback
+    CHECK(g_fds[fd].state.load() == kMatched);
+    close(fd);
+  }
+
+  // --- retire: a fully-paid, long-idle slot is freed and its fd reset to kUnknown ----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);
+    g_matched[idx].paid_ns.store(now);               // fully paid
+    RetireSlotIfIdle(idx, now);                      // just paid -> not idle long enough
+    CHECK(g_matched[idx].fd == fd);
+    RetireSlotIfIdle(idx, now + kRetireIdleNs + 1);  // idle past the cap -> retire
+    CHECK(g_matched[idx].fd == -1);                  // slot freed
+    CHECK(g_matched[idx].payback_fd.load() == -1);   // handle closed
+    CHECK(g_fds[fd].matched_idx.load() == -1);
+    CHECK(g_fds[fd].state.load() == kUnknown);       // will reclassify if used again
+    close(fd);
+  }
+
+  // --- slot-full: the (kMaxMatched+1)-th match gets idx -1 and is never deferred -----
+  SetUp(kActive);
+  {
+    int fds[kMaxMatched + 1];
+    for (int i = 0; i <= kMaxMatched; ++i) {
+      char rel[128];
+      snprintf(rel, sizeof(rel),
+               "files/HGGameUpdate/HGDownload/file_%d/download/u%d.downloading", i, i);
+      fds[i] = OpenUnder(dir, rel);
+      CHECK(fds[i] >= 0);
+      Classify(fds[i], nullptr, 0);
+    }
+    CHECK(g_fds[fds[kMaxMatched]].matched_idx.load() == -1);  // the list was full
+    const struct seccomp_notif req = MakeReq(fds[kMaxMatched], me);
+    CHECK(!ShouldDefer(&req));  // no slot -> never deferred, never writes g_matched[-1]
+    for (int i = 0; i <= kMaxMatched; ++i) close(fds[i]);
+  }
+
+  // --- foreign pid: AccountFsync counts it foreign and does not classify ------
+  SetUp(kObserve);
+  {
+    const uint64_t before = g_c_foreign.load();
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    struct seccomp_notif req = MakeReq(fd, 0x7fffffff);  // a tid not under /proc/self/task
+    AccountFsync(&req);
+    CHECK(g_c_foreign.load() == before + 1);
+    CHECK(g_fds[fd].state.load() == kUnknown);   // never classified
+    close(fd);
+  }
+
+  // --- ForgetAfterFork wipes the tables so a forked child never defers --------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    ForgetAfterFork();
+    CHECK(g_fds[fd].state.load() == kUnknown);
+    CHECK(g_fds[fd].matched_idx.load() == -1);
+    const struct seccomp_notif req = MakeReq(fd, me);
+    CHECK(!ShouldDefer(&req));  // child: nothing classified -> never defers
+    close(fd);
+  }
+
+  // --- exit-flush (hardening 1): FlushAllDeferred flushes an unpaid slot NOW, ignoring both the
+  // kPaybackEveryNs cap and the "paid recently" guard that bounds the scanner -----------------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    CHECK(g_matched[idx].payback_fd.load() >= 0);  // a private handle was dup'd at match time
+    g_sys_fsync_n = 0;                          // (forget the match-time payback)
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);
+    g_matched[idx].paid_ns.store(now);          // "just paid": the scanner would skip (cap not elapsed)
+    CHECK(!PaybackSlotIfDue(idx, now));         // confirm the scanner would NOT flush it now
+    g_matched[idx].deferred_ns.store(now + 1);  // one unpaid fsync after that payment
+    FlushAllDeferred();                         // exit flush ignores the cap -> flushes it anyway
+    CHECK(g_c_payback.load() == 1);
+    CHECK(g_c_payback_err.load() == 0);
+    CHECK(g_sys_fsync_n == 1);
+    CHECK(LastFsyncWasMagicOn(g_matched[idx].payback_fd.load()));  // really issued, with the magic
+    CHECK(g_matched[idx].paid_ns.load() >= now + 1);  // marked paid
+    FlushAllDeferred();                         // a clean slot (deferred <= paid) is left alone
+    CHECK(g_c_payback.load() == 1);             // nothing new flushed
+    CHECK(g_sys_fsync_n == 1);
+    close(fd);
+  }
+
+  // --- exit-flush with no captured handle: counts an error, flushes nothing ----------
+  SetUp(kActive);
+  {
+    const long now = NowNs();
+    g_matched[0].matched_ns.store(now);
+    g_matched[0].deferred_ns.store(now);
+    g_matched[0].paid_ns.store(0);
+    g_matched[0].payback_fd.store(-1);  // handle never captured -> nothing to flush
+    FlushAllDeferred();
+    CHECK(g_c_payback.load() == 0);
+    CHECK(g_c_payback_err.load() == 1);
+    g_matched[0].matched_ns.store(0);   // leave the slot clean (SetUp's tagged close expects no handle)
+    g_matched[0].deferred_ns.store(0);
+  }
+
+  // --- FlushAndTeardown (hardening 1 + 3): sets g_shutdown and flushes, but only when armed ----
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const long now = NowNs();
+    g_matched[idx].deferred_ns.store(now);
+    g_matched[idx].paid_ns.store(0);
+    g_sys_fsync_n = 0;             // (forget the match-time payback)
+    g_installed.store(false);
+    FlushAndTeardown();            // not armed -> no-op: no shutdown, no flush
+    CHECK(!g_shutdown.load());
+    CHECK(g_c_payback.load() == 0);
+    CHECK(g_sys_fsync_n == 0);
+    g_installed.store(true);
+    FlushAndTeardown();            // armed -> sets shutdown and flushes the unpaid slot
+    CHECK(g_shutdown.load());
+    CHECK(g_c_payback.load() == 1);
+    CHECK(LastFsyncWasMagicOn(g_matched[idx].payback_fd.load()));
+    g_installed.store(false);      // reset the global for any later case
+    g_shutdown.store(false);
+    close(fd);
+  }
+
+  // --- rename (active): every unpaid deferred file is paid back BEFORE the rename is let through,
+  // so a finished download is on disk before its final name can be; nothing to do otherwise ------
+  SetUp(kActive);
+  {
+    const int fd = OpenUnder(dir, match_rel);
+    CHECK(fd >= 0);
+    CHECK(Classify(fd, nullptr, 0) == kMatched);
+    const int idx = g_fds[fd].matched_idx.load();
+    CHECK(idx >= 0);
+    const int handle = g_matched[idx].payback_fd.load();
+    g_sys_fsync_n = 0;                           // (forget the match-time payback)
+    const long now = NowNs();
+    g_matched[idx].paid_ns.store(now);           // "just paid": the scanner would wait kPaybackEveryNs
+    g_matched[idx].deferred_ns.store(now + 1);   // the download's last fsync, deferred
+    CHECK(IsRenameNr(__NR_rename) && IsRenameNr(__NR_renameat) && IsRenameNr(__NR_renameat2));
+    CHECK(!IsRenameNr(__NR_fsync) && !IsRenameNr(__NR_fdatasync));
+    struct seccomp_notif rn = MakeReq(-1, me, __NR_renameat);
+    CHECK(PayBackBeforeRename(&rn));             // unpaid -> flushed now, ignoring the cap
+    CHECK(g_sys_fsync_n == 1);
+    CHECK(LastFsyncWasMagicOn(handle));          // a real fsync on our handle, with the magic
+    CHECK(g_matched[idx].paid_ns.load() >= now + 1);
+    CHECK(!PayBackBeforeRename(&rn));            // nothing unpaid any more -> no fsync
+    CHECK(g_sys_fsync_n == 1);
+    g_matched[idx].deferred_ns.store(g_matched[idx].paid_ns.load() + 1);
+    struct seccomp_notif foreign = MakeReq(-1, 0x7fffffff, __NR_rename);
+    CHECK(!PayBackBeforeRename(&foreign));       // a forked child's rename: not our slots
+    CHECK(g_sys_fsync_n == 1);
+    g_mode = kObserve;
+    CHECK(!PayBackBeforeRename(&rn));            // observe never defers, never pays back here
+    CHECK(g_sys_fsync_n == 1);
+    close(fd);
+  }
+
+  // --- crash repair at start: a matched file whose safe-length xattr is shorter than the file is
+  // cut back to it; a file without the xattr (never deferred), one not longer than its safe length,
+  // and a file that does not match the patterns are left alone --------------------------------
+  SetUp(kActive);
+  {
+    const std::string root = dir + "/repair";
+    auto make = [&](const std::string& rel, size_t size, long long safe) -> std::string {
+      const int fd = OpenUnder(root, rel);
+      CHECK(fd >= 0);
+      std::string data(size, 'r');
+      CHECK(write(fd, data.data(), size) == static_cast<ssize_t>(size));
+      if (safe >= 0) {
+        const std::string v = std::to_string(safe);
+        CHECK(fsetxattr(fd, kSafeXattr, v.data(), v.size(), 0) == 0);
+      }
+      close(fd);
+      return root + "/" + rel;
+    };
+    auto size_of = [](const std::string& p) -> long long {
+      struct stat st;
+      return stat(p.c_str(), &st) == 0 ? static_cast<long long>(st.st_size) : -1;
+    };
+    const std::string cut = make("files/HGGameUpdate/HGDownload/f/download/a.downloading", 20000, 8192);
+    const std::string unmarked = make("files/HGGameUpdate/HGDownload/f/download/b.downloading", 20000, -1);
+    const std::string shorter = make("files/HGGameUpdate/HGDownload/f/download/c.downloading", 20000, 40960);
+    const std::string other = make("files/HGGameUpdate/HGDownload/f/download/d.dat", 20000, 4096);
+    RepairDir(root.c_str(), 0);
+    CHECK(size_of(cut) == 8192);          // cut back to the safe length
+    CHECK(size_of(unmarked) == 20000);    // never deferred: untouched
+    CHECK(size_of(shorter) == 20000);     // not longer than its safe length: untouched
+    CHECK(size_of(other) == 20000);       // not a download temp file: untouched
+    CHECK(g_c_repaired.load() == 1);
+  }
+
+  // --- repair runs only when the app has no other live process: OtherProcessOfOurUid sees the
+  // other root processes from here, and nothing from a child switched to an unused uid ----------
+  {
+    CHECK(OtherProcessOfOurUid() > 0);  // run as root: plenty of other root processes
+    const pid_t c = fork();
+    if (c == 0) {
+      if (setgid(54321) != 0 || setuid(54321) != 0) _exit(2);
+      _exit(OtherProcessOfOurUid() == 0 ? 0 : 1);
+    }
+    int st = -1;
+    waitpid(c, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);  // the only process of uid 54321
+  }
+
+  // --- RECV errors: a withdrawn notification (ENOENT) is counted as an interruption, our own
+  // EINTR is just retried, anything else is a real error that backs off --------------------
+  {
+    const uint64_t enoent0 = g_c_recv_enoent.load();
+    CHECK(!NoteRecvError(ENOENT));               // retry at once ...
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);  // ... and counted
+    CHECK(!NoteRecvError(EINTR));                // retry, not counted as an interruption
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);
+    CHECK(NoteRecvError(EBADF));                 // listener broken: count/log/back off path
+    CHECK(g_c_recv_enoent.load() == enoent0 + 1);
+  }
+
+  // --- the BPF filter program's verdicts (interpreted; checks offsets + jumps) ------
+  {
+    const uint32_t NOTIF = SECCOMP_RET_USER_NOTIF, ALLOW = SECCOMP_RET_ALLOW;
+    struct seccomp_data d;
+    auto mk = [&d](uint32_t nr, uint32_t arch, uint64_t a1) -> const struct seccomp_data& {
+      memset(&d, 0, sizeof(d));
+      d.nr = static_cast<int>(nr);
+      d.arch = arch;
+      d.args[1] = a1;
+      return d;
+    };
+    CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, 0)) == NOTIF);        // plain fsync
+    CHECK(RunFilter(mk(kNrFdatasync, AUDIT_ARCH_X86_64, 0)) == ALLOW);    // fdatasync: not trapped (SQLite)
+    CHECK(RunFilter(mk(kNrRename, AUDIT_ARCH_X86_64, 0)) == NOTIF);       // renames: trapped (pay back first)
+    CHECK(RunFilter(mk(kNrRenameat, AUDIT_ARCH_X86_64, 0)) == NOTIF);
+    CHECK(RunFilter(mk(kNrRenameat2, AUDIT_ARCH_X86_64, 0)) == NOTIF);
+    CHECK(RunFilter(mk(kNrRenameat2, AUDIT_ARCH_X86_64, kMagic)) == NOTIF);  // the magic only spares fsync
+    CHECK(RunFilter(mk(kNrRename, AUDIT_ARCH_AARCH64, 0)) == ALLOW);      // wrong arch
+    CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64, kMagic)) == ALLOW);   // our own payback
+    CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_X86_64,
+                       (static_cast<uint64_t>(1) << 32) | kMagic)) == NOTIF);  // high bits set
+    CHECK(RunFilter(mk(0, AUDIT_ARCH_X86_64, 0)) == ALLOW);               // some other syscall
+    CHECK(RunFilter(mk(kNrFsync, AUDIT_ARCH_AARCH64, 0)) == ALLOW);       // wrong arch
+  }
+
+  if (failures == 0)
+    std::printf("ALL PASS\n");
+  else
+    std::printf("%d FAILURE(S)\n", failures);
+  return failures == 0 ? 0 : 1;
+}
