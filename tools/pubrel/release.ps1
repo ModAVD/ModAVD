@@ -21,7 +21,8 @@ param(
     # ModAVDManager-<version>-win-x64.zip from the manager's GitHub Release: ModAVD.exe and tools\modavd.exe come from it
     [Parameter(Mandatory)][string]$Manager,
     # checkouts of the public repositories with their tags fetched: the manager ZIP and the IME APK are checked against
-    # the release checksums at their tags, and the source bundle archives those tags (ManagerRepo / ImeRepo)
+    # the release checksums at their tags, and the source bundle archives those tags (ManagerRepo / ImeRepo; ExtrasRepo
+    # below)
     [string]$ManagerRepo,
     [string]$ImeRepo,
     # merged incoming\<topic> held for a later release; every other merged topic must be in the new series
@@ -31,6 +32,15 @@ param(
     # host input method APK, shipped as components\modavd-ime.apk; '' = not shipped. Every APK in the package is pinned
     # in config\components.SHA256SUMS.txt: an unpinned one is refused, a pinned one that is missing fails the release.
     [string]$ImeApk = '',
+    # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll; '' = not shipped. Pinned like
+    # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo,
+    # tags fetched) must list it in release/<version>.SHA256SUMS.txt; the source bundle archives that tag.
+    [string]$ExtrasDll = '',
+    [string]$ExtrasRepo,
+    # candidate package for the regression before that ModAVDExtras release exists: -ExtrasDll is a local build of the
+    # -ExtrasRepo HEAD (committed, at version EXTRAS_VERSION), not checked against the pin. Output <name>-check only, and
+    # no -DraftRelease.
+    [switch]$ExtrasCandidate,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
     [string]$Snapshot,
@@ -62,6 +72,13 @@ $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Obj
 $number = [int]$Build.Substring(3)
 $version = "0.$number.$Patch"
 $defaultName = if ($Patch) { "$Build-p$Patch" } else { $Build }
+# 候选包（-ExtrasCandidate：截图库是本机编的，还没发布）只进 <默认名>-check，也不建草稿
+if ($ExtrasCandidate) {
+    if (-not $ExtrasDll) { throw '-ExtrasCandidate 要和 -ExtrasDll 一起给' }
+    if ($DraftRelease) { throw '-ExtrasCandidate 打的是回归用的候选包，不能 -DraftRelease' }
+    if (-not $OutputName) { $OutputName = "$defaultName-check" }
+    if ($OutputName -ne "$defaultName-check") { throw "-ExtrasCandidate 的输出只能是 $defaultName-check" }
+}
 if (-not $OutputName) { $OutputName = $defaultName }
 if ($OutputName -notin @($defaultName, "$defaultName-check")) { throw "OutputName 只能是 $defaultName 或 $defaultName-check" }
 
@@ -72,6 +89,7 @@ $Package = Use-Local LicensePackage $Package '-Package'
 $Apk = Use-Local LauncherApk $Apk '-Apk'
 $ManagerRepo = Use-Local ManagerRepo $ManagerRepo '-ManagerRepo'
 $ImeRepo = Use-Local ImeRepo $ImeRepo '-ImeRepo' -Optional:(-not $ImeApk)
+$ExtrasRepo = Use-Local ExtrasRepo $ExtrasRepo '-ExtrasRepo' -Optional:(-not $ExtrasDll)
 if (-not $Repository) { $Repository = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 if (-not $MinFreeGB) { $MinFreeGB = [int](Use-Local MinFreeGB $null '-MinFreeGB' -Optional) }
 if (-not $MinFreeGB) { $MinFreeGB = 120 }
@@ -120,10 +138,14 @@ function Step([int]$Number, [string]$Title, [scriptblock]$Action) {
 # disk budget and snapshot before any deletion.
 if (-not $Snapshot) { $Snapshot = Join-Path $Sdk 'build-info.json' }
 $texts = @('--patch', $Patch, '--changes', $Changes, '--changelog', $Changelog)
-$imeArgs = if ($ImeApk) { @('--ime-apk', $ImeApk, '--ime-repo', $ImeRepo) } else { @() }
+$componentArgs = @(if ($ImeApk) { '--ime-apk', $ImeApk, '--ime-repo', $ImeRepo })
+if ($ExtrasDll) {
+    $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo)
+    if ($ExtrasCandidate) { $componentArgs += '--extras-candidate' }
+}
 $public = @('--repository', $Repository, '--manager', $Manager, '--manager-repo', $ManagerRepo) + $protectArgs
 Run-Python (@('preflight', '--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot, '--min-free-gb', $MinFreeGB,
-    '--baseline', $Baseline, '--package', $Package, '--apk', $Apk, '--output', $out) + $public + $imeArgs + $texts)
+    '--baseline', $Baseline, '--package', $Package, '--apk', $Apk, '--output', $out) + $public + $componentArgs + $texts)
 if (Test-Path -LiteralPath $out) {
     if (-not $Force) { throw "输出已存在：$out（-Force 只清理本脚本创建并标记的同名输出目录）" }
     # Reject junctions/symlinks at every level; validate the ownership marker and exact path before Remove-Item.
@@ -135,7 +157,7 @@ Run-Python @('own', '--output', $out, '--build', $Build)
 $common = @('--output', $out)
 Step 1 '组装 release 目录并写清单（管理器取它的 Release 包，随包脚本取 ModAVD 的 package/）' {
     Run-Python (@('assemble') + $common + $texts + $public + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot,
-        '--package', $Package, '--apk', $Apk) + $imeArgs)
+        '--package', $Package, '--apk', $Apk) + $componentArgs)
 }
 # 主包带平台（以后可能有 linux-x64），源码包不带；和 release_tools.py 的 PLATFORM 一致
 $name = "ModAVD-$version-win-x64"
@@ -176,3 +198,4 @@ if ($DraftRelease) {
     if ($LASTEXITCODE -ne 0) { throw "步骤 9（创建草稿）失败：gh 返回 $LASTEXITCODE；未自动重试，请检查草稿状态" }
 }
 Write-Host "完成：$out（v$version）"
+if ($ExtrasCandidate) { Write-Warning "候选包：extras\modavd_extras.dll 是本机编的 $ExtrasDll，只给回归用，不要发布" }

@@ -24,8 +24,10 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 默认只在本地执行到隐私扫描。SDK 和管理器包通过参数指定，源码树、源码基准、说明和许可证目录等外部输入用参数或本机配置给（见 [tools/pubrel/README.md](tools/pubrel/README.md)「外部输入」）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> [-ImeApk <modavd-ime.apk>]
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> [-ImeApk <modavd-ime.apk>] [-ExtrasDll <modavd_extras.dll>]
 ```
+
+0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。截图库还没发布时，回归用的候选包加 `-ExtrasCandidate`、给本机编的 DLL，只进 `<默认名>-check`，不能建草稿（见 [tools/pubrel/README.md](tools/pubrel/README.md)）。
 
 1. **组包**：依据已审核的文件政策复制 SDK、桌面 APK、组件下载/问题收集脚本、说明与许可证，最后写 `modavd-manifest.json`（版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，以及其余每个文件的大小和 SHA-256）。SDK 文件集改变时先复核政策；不在原 SDK 上删除文件。
 2. **主包 ZIP**：`ModAVD-0.34.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录（Mirror 酱按路径比文件，外层文件夹带版本号会让增量等于全量）。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。
