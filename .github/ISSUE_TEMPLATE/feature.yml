@@ -1,5 +1,6 @@
 name: 提建议 / Suggest a feature
 description: 想要新功能或改进，哪个组件都行。 / A new feature or an improvement, for any component.
+labels: ["enhancement"]
 body:
   - type: dropdown
     id: component

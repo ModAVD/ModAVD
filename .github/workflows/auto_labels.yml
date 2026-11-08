@@ -1,0 +1,79 @@
+name: Auto labels
+
+# issue：bug / enhancement 由模板自己的 labels 字段打；这里再按「哪个组件 / Component」的选项打 area:*。
+# PR：正文里 `Refs ModAVD/ModAVD#N` 指到的 issue 带的类型、area:*、platform:* 标签抄到 PR 上。
+# P0–P3 由人判断，待发布由合并时打，这里都不碰。
+#
+# PR 用 pull_request_target，fork 来的 PR 才能拿到加标签的权限。这个 job 不检出、不运行 PR 里的任何代码，
+# issue 和 PR 的正文只从事件文件里当数据读，不拼进命令。
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened, edited]
+
+permissions: {}
+
+jobs:
+  issue:
+    if: ${{ github.repository_owner == 'ModAVD' && github.event_name == 'issues' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Label by component
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # 取「### 哪个组件 / Component」下面第一行非空内容，就是选中的选项。
+          choice=$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH" | tr -d '\r' |
+            awk '/^### / { on = ($0 == "### 哪个组件 / Component"); next } on && NF { print; exit }')
+          case "$choice" in
+            管理器和命令行*) label=area:manager ;;
+            宿主输入法*) label=area:hostime ;;
+            文档站*) label=area:docs ;;
+            "发版前回归（ModAVDE2E）"*) label=area:e2e ;;
+            *) echo "no area label for this component"; exit 0 ;;
+          esac
+          gh api --silent -X POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE/labels" -f "labels[]=$label"
+
+  pull-request:
+    if: ${{ github.repository_owner == 'ModAVD' && github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: read
+      pull-requests: write
+    steps:
+      - name: Copy labels from referenced issues
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # 只认以 Refs 开头的行里的 ModAVD/ModAVD#N，按出现顺序去重，最多看前 10 个。
+          mapfile -t refs < <(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" | tr -d '\r' |
+            { grep -E '^Refs[[:space:]]' || true; } | grep -oE 'ModAVD/ModAVD#[0-9]+' | cut -d'#' -f2 | awk '!seen[$0]++' | head -n 10 || true)
+          declare -A added=()
+          args=()
+          for n in "${refs[@]}"; do
+            # 指到的是 PR 或不存在的编号就跳过。
+            names=$(gh api "repos/$GITHUB_REPOSITORY/issues/$n" \
+              --jq 'select(.pull_request == null) | .labels[].name' 2>/dev/null || true)
+            while IFS= read -r name; do
+              if [[ "$name" =~ ^(bug|enhancement|documentation|area:.+|platform:.+)$ && -z "${added[$name]:-}" ]]; then
+                added[$name]=1
+                args+=(-f "labels[]=$name")
+              fi
+            done <<< "$names"
+          done
+          if (( ${#args[@]} == 0 )); then
+            echo "no labels to copy"
+            exit 0
+          fi
+          gh api --silent -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/labels" "${args[@]}"

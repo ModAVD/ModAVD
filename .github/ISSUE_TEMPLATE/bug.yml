@@ -1,5 +1,6 @@
 name: 报问题 / Report a problem
 description: 出了问题，或者和说明对不上。模拟器、管理器、宿主输入法、文档站的问题都在这里报。 / Something is broken or does not match the docs, in any component.
+labels: ["bug"]
 body:
   - type: markdown
     attributes:
