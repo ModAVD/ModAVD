@@ -1,0 +1,133 @@
+From 8bdf0c8a798a0f3ff6554302ca1d271accc1b997 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 2 Nov 2026 17:33:46 +0100
+Subject: [PATCH 77/98] MAS local: close the lean window at once and shut down
+ behind it
+
+Closing the window (title-bar close, Alt+F4, the taskbar's Close window)
+now hides the emulator windows right away; Android keeps shutting down in
+the background and the process exits on its own, or after the bounded sync
+and forced exit. Nothing shows the windows again during that time.
+
+With the windows gone there is nothing left to click, so drop the
+force-close question: a repeated close request during the shutdown is
+ignored.
+
+Change-Id: I93005213ad2080df55beceaadb50c6162c6b877a
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 28 +++++++++++++++++--
+ .../src/android/skin/qt/emulator-qt-window.h  |  2 ++
+ .../src/android/skin/qt/tool-window.cpp       | 13 ++-------
+ 3 files changed, 30 insertions(+), 13 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 9ff5122c6..4a51aa82a 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1857,7 +1857,9 @@ void EmulatorQtWindow::maskWindowFrame() {
+             mContainer.setMask(bitmap);
+         }
+     }
+-    mContainer.show();
++    if (!mHiddenForSafeShutdown) {
++        mContainer.show();
++    }
+     mToolWindow->dockMainWindow();
+ 
+     if (haveFrame != mPreviouslyFramed) {
+@@ -2029,7 +2031,7 @@ void EmulatorQtWindow::slot_updateGuestScreen(const QImage& frame) {
+ }
+ 
+ void EmulatorQtWindow::show() {
+-    if (mClosed) {
++    if (mClosed || mHiddenForSafeShutdown) {
+         return;
+     }
+     mContainer.show();
+@@ -2663,7 +2665,7 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+                                        QRect rect,
+                                        QSemaphore* semaphore) {
+     QSemaphoreReleaser semReleaser(semaphore);
+-    if (mClosed) {
++    if (mClosed || mHiddenForSafeShutdown) {
+         return;
+     }
+     if (getConsoleAgents()
+@@ -4645,6 +4647,26 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+     }
+ }
+ 
++void EmulatorQtWindow::hideForSafeShutdown() {
++    // The windows go away at once; Android keeps shutting down behind them
++    // and the process exits on its own (or after the bounded sync).
++    mHiddenForSafeShutdown = true;
++    mContainer.hideModalOverlay();
++    if (mToolWindow) {
++        mToolWindow->hide();
++        mToolWindow->closeExtendedWindow();
++    }
++    if (mCarClusterWindow) {
++        mCarClusterWindow->hide();
++    }
++    for (auto const& iter : mMultiDisplayWindow) {
++        if (iter.second != nullptr)
++            iter.second->hide();
++    }
++    mContainer.hide();
++    mOverlay.hide();
++}
++
+ void EmulatorQtWindow::forceCloseNow() {
+     if (mSafeShutdownState == SafeShutdownState::Forced) {
+         return;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index dd00fb9ec..4805a5f5a 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -240,6 +240,7 @@ public:
+ 
+     android::emulation::AdbInterface* getAdbInterface() const;
+     void startSafeShutdown();
++    void hideForSafeShutdown();
+     void forceCloseNow();
+     bool safeShutdownInProgress() const;
+     EmulatorContainer* containerWindow();
+@@ -756,6 +757,7 @@ private:
+     };
+     SafeShutdownState mSafeShutdownState = SafeShutdownState::Idle;
+     QTimer mSafeShutdownTimeout;
++    bool mHiddenForSafeShutdown = false;
+ 
+     bool mSkinRemoved{false};
+     bool mFrameAlways;  // true = no floating emulator
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index b98a72908..726001518 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -2046,16 +2046,8 @@ bool ToolWindow::shouldClose() {
+ 
+ void ToolWindow::on_close_button_clicked() {
+     if (leanToolbar() && mEmulatorWindow->safeShutdownInProgress()) {
+-        QMessageBox box(QMessageBox::Question, QString::fromUtf8("正在关机"),
+-                        QString::fromUtf8("强制关闭？最近几秒写入的数据可能丢失"),
+-                        QMessageBox::Yes | QMessageBox::No,
+-                        mEmulatorWindow->containerWindow());
+-        box.button(QMessageBox::Yes)->setText(QString::fromUtf8("是"));
+-        box.button(QMessageBox::No)->setText(QString::fromUtf8("否"));
+-        const auto answer = box.exec();
+-        if (answer == QMessageBox::Yes) {
+-            mEmulatorWindow->forceCloseNow();
+-        }
++        // The windows are already gone and the shutdown is bounded; a
++        // repeated close request has nothing to ask about.
+         return;
+     }
+ 
+@@ -2078,6 +2070,7 @@ void ToolWindow::on_close_button_clicked() {
+             }
+         }
+         mEmulatorWindow->startSafeShutdown();
++        mEmulatorWindow->hideForSafeShutdown();
+         return;
+     }
+ 

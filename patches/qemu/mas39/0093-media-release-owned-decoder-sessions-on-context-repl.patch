@@ -1,0 +1,193 @@
+From 7dec23368a3b1dfc98bc0ab550c9b7ce7e402f4d Mon Sep 17 00:00:00 2001
+From: jinghero <44921326+jinghero@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 13:08:19 +0800
+Subject: [PATCH 93/98] media: release owned decoder sessions on context
+ replacement
+
+The address-space device clears old contexts before restoring a snapshot. Delete the plugins still in each manager so their generic destructors return queued textures and deinitialize the codec. Free the per-size pool lists when the texture pool itself is destroyed.
+
+Keep the H.264 implementation declaration alongside its HEVC counterpart. The pinned companion header defaults its destructor inline.
+---
+ .../android/emulation/MediaH264Decoder.cpp    |  2 +-
+ .../emulation/MediaH264DecoderDefault.cpp     |  8 ++-
+ .../emulation/MediaH264DecoderDefault.h       | 58 +++++++++++++++++++
+ .../emulation/MediaHevcDecoderDefault.cpp     |  6 ++
+ .../emulation/MediaHevcDecoderDefault.h       |  2 +-
+ .../android/emulation/MediaTexturePool.cpp    |  3 +
+ .../src/android/emulation/MediaVpxDecoder.cpp |  8 ++-
+ 7 files changed, 83 insertions(+), 4 deletions(-)
+ create mode 100644 android/emu/media/src/android/emulation/MediaH264DecoderDefault.h
+
+diff --git a/android/emu/media/src/android/emulation/MediaH264Decoder.cpp b/android/emu/media/src/android/emulation/MediaH264Decoder.cpp
+index a3abe0924..9be230187 100644
+--- a/android/emu/media/src/android/emulation/MediaH264Decoder.cpp
++++ b/android/emu/media/src/android/emulation/MediaH264Decoder.cpp
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-#include "host-common/MediaH264DecoderDefault.h"
++#include "android/emulation/MediaH264DecoderDefault.h"
+ 
+ namespace android {
+ namespace emulation {
+diff --git a/android/emu/media/src/android/emulation/MediaH264DecoderDefault.cpp b/android/emu/media/src/android/emulation/MediaH264DecoderDefault.cpp
+index 4fa82dc1d..4ec7ec0c5 100644
+--- a/android/emu/media/src/android/emulation/MediaH264DecoderDefault.cpp
++++ b/android/emu/media/src/android/emulation/MediaH264DecoderDefault.cpp
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-#include "host-common/MediaH264DecoderDefault.h"
++#include "android/emulation/MediaH264DecoderDefault.h"
+ #include "android/base/system/System.h"
+ #include "host-common/H264PingInfoParser.h"
+ #include "host-common/MediaH264DecoderGeneric.h"
+@@ -44,6 +44,12 @@ MediaH264DecoderPlugin* makeDecoderPlugin(uint64_t pluginid,
+ }; // anon namespace
+ 
+ 
++MediaH264DecoderDefault::~MediaH264DecoderDefault() {
++    for (const auto& entry : mDecoders) {
++        delete entry.second;
++    }
++}
++
+ uint64_t MediaH264DecoderDefault::readId(void* ptr) {
+     if (nullptr == ptr)
+         return 0;
+diff --git a/android/emu/media/src/android/emulation/MediaH264DecoderDefault.h b/android/emu/media/src/android/emulation/MediaH264DecoderDefault.h
+new file mode 100644
+index 000000000..1b72afa94
+--- /dev/null
++++ b/android/emu/media/src/android/emulation/MediaH264DecoderDefault.h
+@@ -0,0 +1,58 @@
++// Copyright (C) 2019 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include "host-common/GoldfishMediaDefs.h"
++#include "host-common/MediaH264DecoderPlugin.h"
++#include "host-common/MediaH264Decoder.h"
++
++#include <stddef.h>
++#include <mutex>
++#include <unordered_map>
++
++namespace android {
++namespace emulation {
++
++
++class MediaH264DecoderDefault : public MediaH264Decoder {
++public:
++    MediaH264DecoderDefault() = default;
++    ~MediaH264DecoderDefault() override;
++
++    // This is the entry point
++    virtual void handlePing(MediaCodecType type, MediaOperation op, void* ptr) override;
++
++    // For snapshots
++    virtual void save(base::Stream* stream) const override;
++    virtual bool load(base::Stream* stream) override;
++
++private:
++    std::mutex mIdLock{};
++    std::mutex mMapLock{};
++    uint64_t mId = 0;
++    std::unordered_map<uint64_t, MediaH264DecoderPlugin*> mDecoders;
++    uint64_t readId(void* ptr);  // read id from the address
++    void removeDecoder(uint64_t id);
++    uint64_t createId();
++    void addDecoder(uint64_t key,
++                    MediaH264DecoderPlugin* val);  // this just add
++    void updateDecoder(
++            uint64_t key,
++            MediaH264DecoderPlugin* val);  // this will overwrite
++    MediaH264DecoderPlugin* getDecoder(uint64_t key);
++};
++
++}  // namespace emulation
++}  // namespace android
+diff --git a/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.cpp b/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.cpp
+index 0485ca78d..c7c939dd2 100644
+--- a/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.cpp
++++ b/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.cpp
+@@ -45,6 +45,12 @@ MediaHevcDecoderPlugin* makeDecoderPlugin(uint64_t pluginid,
+ 
+ };  // namespace
+ 
++MediaHevcDecoderDefault::~MediaHevcDecoderDefault() {
++    for (const auto& entry : mDecoders) {
++        delete entry.second;
++    }
++}
++
+ uint64_t MediaHevcDecoderDefault::readId(void* ptr) {
+     if (nullptr == ptr)
+         return 0;
+diff --git a/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.h b/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.h
+index 3f3872060..86504d0f0 100644
+--- a/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.h
++++ b/android/emu/media/src/android/emulation/MediaHevcDecoderDefault.h
+@@ -28,7 +28,7 @@ namespace emulation {
+ class MediaHevcDecoderDefault : public MediaHevcDecoder {
+ public:
+     MediaHevcDecoderDefault() = default;
+-    virtual ~MediaHevcDecoderDefault() = default;
++    ~MediaHevcDecoderDefault() override;
+ 
+     // This is the entry point
+     virtual void handlePing(MediaCodecType type,
+diff --git a/android/emu/media/src/android/emulation/MediaTexturePool.cpp b/android/emu/media/src/android/emulation/MediaTexturePool.cpp
+index 3b0a7be02..1d622a38b 100644
+--- a/android/emu/media/src/android/emulation/MediaTexturePool.cpp
++++ b/android/emu/media/src/android/emulation/MediaTexturePool.cpp
+@@ -47,6 +47,9 @@ MediaTexturePool::MediaTexturePool() {
+ MediaTexturePool::~MediaTexturePool() {
+     H264_DPRINT("destroyed texturepool");
+     cleanUpTextures();
++    for (const auto& entry : m_WH_to_PoolHandle) {
++        delete entry.second;
++    }
+ }
+ 
+ const uint32_t kGlUnsignedByte = 0x1401;
+diff --git a/android/emu/media/src/android/emulation/MediaVpxDecoder.cpp b/android/emu/media/src/android/emulation/MediaVpxDecoder.cpp
+index 09026bfcf..674c24914 100644
+--- a/android/emu/media/src/android/emulation/MediaVpxDecoder.cpp
++++ b/android/emu/media/src/android/emulation/MediaVpxDecoder.cpp
+@@ -42,7 +42,7 @@ namespace {
+ class MediaVpxDecoderImpl : public MediaVpxDecoder {
+ public:
+     MediaVpxDecoderImpl() = default;
+-    virtual ~MediaVpxDecoderImpl() = default;
++    ~MediaVpxDecoderImpl() override;
+     virtual void handlePing(MediaCodecType type, MediaOperation op, void* ptr) override;
+ 
+ public:
+@@ -69,6 +69,12 @@ MediaVpxDecoderPlugin* makeDecoderPlugin(uint64_t pluginid,
+ }
+ };  // namespace
+ 
++MediaVpxDecoderImpl::~MediaVpxDecoderImpl() {
++    for (const auto& entry : mDecoders) {
++        delete entry.second;
++    }
++}
++
+ uint64_t MediaVpxDecoderImpl::readId(void* ptr) {
+     if (nullptr == ptr)
+         return 0;

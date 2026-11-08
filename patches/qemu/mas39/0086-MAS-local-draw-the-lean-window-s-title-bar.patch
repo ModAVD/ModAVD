@@ -1,0 +1,2490 @@
+From 585659d56f6593c1b99164ac1dc8243bb92d9882 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 4 Nov 2026 20:37:16 +0100
+Subject: [PATCH 86/98] MAS local: draw the lean window's title bar
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The lean window on Windows used the system title bar for minimize and
+close, and kept back and home in a column right of the guest screen. Now
+the window draws its own title bar: the window icon and title on the
+left, then back, home, a divider, minimize and close, with Chinese tool
+tips (返回, 桌面, 最小化, 关机). The column is gone; the guest screen sits
+right under the title bar. The palette is the column's, on Windows 10 and
+11 alike. ANDROID_EMU_FULL_TOOLBAR=1 and headless instances are as
+before.
+
+To Qt the window is frameless. Windows gets the caption style back, with
+WM_NCCALCSIZE making the whole window client area: that keeps the DWM
+shadow and border, and with DWMWCP_ROUND the rounded corners of Windows
+11. There is no resizable frame and no maximize box, and the window is
+moved by the title bar and resized by its edges here, in
+WindowsLeanFrame, never in the system's move and size loops. So Windows
+does not snap, dock or maximize it: no Aero Snap at the screen edges, no
+maximize on a double click or Win+Up, and no Windows 11 layout flyout.
+Maximize and the keyboard move and size are refused as system commands,
+and the system menu (Alt+Space, right click on the title bar) keeps only
+minimize and close. Close, from the title bar, the system menu, Alt+F4 or
+the taskbar, is the safe shutdown as before.
+
+A drag keeps the grabbed point of the title bar under the cursor when the
+window moves onto a screen with another scale. A resize keeps the guest
+screen's aspect ratio and fits the guest screen once released. The
+resize bands lie inside the window: 5 px along the left, right and
+bottom edges, 4 px along the top, 16 px at the corners (logical pixels).
+
+The window's size around the guest screen is now ToolWindow::windowChrome(),
+the title bar's height, where the code added the column's 54 px width.
+The guest screen no longer starts at the window's top-left corner, so the
+GPU subwindow, a child of the whole window, is placed with the offset of
+the guest screen's area (skin_winsys_get_content_offset(); zero headless
+and without the title bar), and so is the zoom overlay.
+The window title (ModAVD#58, the instance name) is worked out by
+instance_window_title(), the arithmetic of the frame by lean-window-frame,
+both without a windowing system and tested in
+aemu-ui-lean-window_unittests.
+
+Refs ModAVD/ModAVD#58
+Refs ModAVD/ModAVD#59
+
+Change-Id: I62148368b98b9eee2e179df7412ef860d192b5af
+---
+ .../src/android/skin/winsys-headless.cpp      |   5 +
+ .../modules/aemu-ui-qt/CMakeLists.txt         |   6 +-
+ .../android/skin/qt/emulator-container.cpp    | 100 +++++-
+ .../src/android/skin/qt/emulator-container.h  |  27 +-
+ .../android/skin/qt/emulator-qt-window.cpp    |  73 ++--
+ .../src/android/skin/qt/emulator-qt-window.h  |   3 +
+ .../src/android/skin/qt/lean-title-bar.cpp    | 159 +++++++++
+ .../src/android/skin/qt/lean-title-bar.h      |  65 ++++
+ .../src/android/skin/qt/tool-window.cpp       | 153 ++++----
+ .../src/android/skin/qt/tool-window.h         |  16 +-
+ .../android/skin/qt/windows-lean-frame.cpp    | 330 ++++++++++++++++++
+ .../src/android/skin/qt/windows-lean-frame.h  |  80 +++++
+ .../android/skin/qt/windows-native-window.cpp |  22 --
+ .../android/skin/qt/windows-native-window.h   |   3 -
+ .../src/android/skin/qt/winsys-qt.cpp         |  13 +
+ .../modules/aemu-ui-window/CMakeLists.txt     |  17 +
+ .../include/android/instance-window-title.h   |  39 +++
+ .../include/android/lean-window-frame.h       | 132 +++++++
+ .../include/android/skin/winsys.h             |   6 +
+ .../src/android/emulator-window.c             |  23 +-
+ .../src/android/instance-window-title.c       |  47 +++
+ .../src/android/lean-window-frame.cpp         | 170 +++++++++
+ .../aemu-ui-window/src/android/skin/window.c  |   9 +-
+ .../instance-window-title_unittest.cpp        |  99 ++++++
+ .../android/lean-window-frame_unittest.cpp    | 295 ++++++++++++++++
+ 25 files changed, 1692 insertions(+), 200 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/include/android/instance-window-title.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/src/android/instance-window-title.c
+ create mode 100644 android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-window/test/android/instance-window-title_unittest.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+
+diff --git a/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp b/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
+index a8383046c..bf9829f8e 100644
+--- a/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
++++ b/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
+@@ -187,6 +187,11 @@ extern void* skin_winsys_get_window_handle() {
+     return nullptr;
+ }
+ 
++extern void skin_winsys_get_content_offset(int* x, int* y) {
++    *x = 0;
++    *y = 0;
++}
++
+ extern void skin_winsys_get_window_pos(int* x, int* y) {
+     D("skin_winsys_get_window_pos (noqt)");
+     *x = 0;
+diff --git a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+index 39321a2c1..5a84d83f8 100644
+--- a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+@@ -29,6 +29,7 @@ android_qt_lib(
+       android/skin/qt/FramelessDetector.cpp
+       android/skin/qt/GlassesStatusOverlay.cpp
+       android/skin/qt/init-qt.cpp
++      android/skin/qt/lean-title-bar.cpp
+       android/skin/qt/left-hand-dialog.cpp
+       android/skin/qt/left-hand-dialog.ui
+       android/skin/qt/ModalOverlay.cpp
+@@ -65,6 +66,7 @@ android_qt_lib(
+       android/window-agent-impl.cpp
+   DEPS aemu-ui-car-property-utils
+        aemu-ui-headless # Yes! The QT ui depends on the headless one..
++       aemu-ui-lean-window
+        aemu-ui-qt-base
+        aemu::recording
+        android-emu
+@@ -119,7 +121,9 @@ endif()
+ 
+ if(WINDOWS_MSVC_X86_64)
+   target_sources(
+-    aemu-ui-qt PRIVATE src/android/skin/qt/windows-native-window.cpp
++    aemu-ui-qt PRIVATE src/android/skin/qt/windows-lean-frame.cpp
++                       src/android/skin/qt/windows-lean-frame.h
++                       src/android/skin/qt/windows-native-window.cpp
+                        src/android/skin/qt/windows-native-window.h)
+   target_link_libraries(aemu-ui-qt PUBLIC dirent-win32)
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 3aa1eb81b..645af82f9 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -29,6 +29,7 @@
+ #include <QTimer>
+ #include <QVector2D>      // for QVector2D
+ #include <algorithm>      // for min, find, max
++#include <cmath>          // for lround
+ #include <functional>     // for __base
+ #include <tuple>          // for tuple
+ #include <utility>        // for move
+@@ -61,11 +62,41 @@ class QStyle;
+ #endif
+ 
+ #if defined(_WIN32)
++#include "android/skin/qt/lean-title-bar.h"
++#include "android/skin/qt/windows-lean-frame.h"
+ #include "android/skin/qt/windows-native-window.h"
+ #endif
+ 
+ static constexpr int kEventBufferSize = 8;
+ 
++#ifdef _WIN32
++// The lean window's title bar and guest screen, as WindowsLeanFrame needs
++// them, in device pixels.
++static WindowsLeanFrame::Geometry leanFrameGeometry(
++        const EmulatorContainer* container,
++        const EmulatorQtWindow* window) {
++    WindowsLeanFrame::Geometry g;
++    g.scale = container->devicePixelRatioF();
++    const auto device = [&g](int logical) {
++        return static_cast<int>(std::lround(logical * g.scale));
++    };
++    g.titleHeight = device(ToolWindow::windowChrome().height());
++    const LeanTitleBar* titleBar =
++            window->toolWindow() ? window->toolWindow()->leanTitleBar() : nullptr;
++    g.buttonsLeft = device(titleBar ? titleBar->buttonsLeft()
++                                    : container->width());
++    // The guest screen widget has the guest's shape, scaled.
++    if (window->width() > 0 && window->height() > 0) {
++        g.guestAspect = static_cast<double>(window->width()) / window->height();
++    }
++    const QSize minGuest =
++            container->minimumSize() - ToolWindow::windowChrome();
++    g.minGuestWidth = std::max(1, device(minGuest.width()));
++    g.minGuestHeight = std::max(1, device(minGuest.height()));
++    return g;
++}
++#endif
++
+ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+     : mEmulatorWindow(window), mMessages(this) {
+     mEventBuffer.reserve(kEventBufferSize);
+@@ -80,13 +111,22 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+     setWindowFlags(Qt::WindowTitleHint | Qt::Window);
+ #else
+     const bool lean = ToolWindow::inWindowNav();
+-    setWindowFlags(Qt::WindowTitleHint | Qt::Window | Qt::CustomizeWindowHint |
+-                   (lean ? (Qt::WindowSystemMenuHint |
+-                            Qt::WindowMinimizeButtonHint |
+-                            Qt::WindowCloseButtonHint)
+-                         : Qt::WindowFlags()));
+     if (lean) {
++        setWindowFlags(kLeanWindowFlags);
+         setStyleSheet(QStringLiteral("EmulatorContainer { background: #20212D; }"));
++#ifdef _WIN32
++        mLeanFrame = std::make_unique<WindowsLeanFrame>(
++                [this] { return leanFrameGeometry(this, mEmulatorWindow); },
++                [this] {
++                    // The window was resized by hand: fit the guest screen to
++                    // it, as after the system's resizing.
++                    stopResizeTimer();
++                    mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
++                });
++#endif
++    } else {
++        setWindowFlags(Qt::WindowTitleHint | Qt::Window |
++                       Qt::CustomizeWindowHint);
+     }
+ #endif
+ 
+@@ -190,6 +230,12 @@ EmulatorContainer::~EmulatorContainer() {
+ }
+ 
+ bool EmulatorContainer::event(QEvent* e) {
++#ifdef _WIN32
++    if (e->type() == QEvent::WinIdChange && mLeanFrame) {
++        // A new native window gets the frame once Qt is done with it.
++        QTimer::singleShot(0, this, [this] { applyLeanFrame(); });
++    }
++#endif
+     // Ignore MetaCall and UpdateRequest events, and don't snap in zoom mode.
+     if (mEmulatorWindow->isInZoomMode() || e->type() == QEvent::MetaCall ||
+         e->type() == QEvent::UpdateRequest) {
+@@ -457,17 +503,15 @@ bool EmulatorContainer::viewportEvent(QEvent* event) {
+ 
+ void EmulatorContainer::showEvent(QShowEvent* event) {
+ #ifdef _WIN32
+-    if (ToolWindow::inWindowNav()) {
+-        setDarkTitleBar(effectiveWinId());
+-        if (!mDarkTitleBarConnected) {
+-            mDarkTitleBarConnected = true;
++    if (mLeanFrame) {
++        applyLeanFrame();
++        if (!mLeanFrameThemeConnected) {
++            mLeanFrameThemeConnected = true;
++            // The dark border, if Windows changes it with the theme.
+             QObject::connect(QGuiApplication::styleHints(),
+                              &QStyleHints::colorSchemeChanged, this, [this] {
+-                                 QTimer::singleShot(0, this, [this] {
+-                                     if (ToolWindow::inWindowNav()) {
+-                                         setDarkTitleBar(effectiveWinId());
+-                                     }
+-                                 });
++                                 QTimer::singleShot(0, this,
++                                                    [this] { applyLeanFrame(); });
+                              });
+         }
+     }
+@@ -566,12 +610,28 @@ void EmulatorContainer::stopResizeTimer() {
+     mResizeTimer.stop();
+ }
+ 
+-QSize EmulatorContainer::viewportSize() const {
+-    QSize output = this->size();
++void EmulatorContainer::applyLeanFrame() {
++#ifdef _WIN32
++    if (mLeanFrame && internalWinId()) {
++        WindowsLeanFrame::apply(internalWinId());
++    }
++#endif
++}
+ 
+-    if (ToolWindow::inWindowNav()) {
+-        output.rwidth() -= 54;
++bool EmulatorContainer::nativeEvent(const QByteArray& eventType,
++                                    void* message,
++                                    qintptr* result) {
++#ifdef _WIN32
++    if (mLeanFrame && eventType == "windows_generic_MSG" &&
++        mLeanFrame->handleMessage(message, result)) {
++        return true;
+     }
++#endif
++    return QScrollArea::nativeEvent(eventType, message, result);
++}
++
++QSize EmulatorContainer::viewportSize() const {
++    QSize output = this->size() - ToolWindow::windowChrome();
+ 
+     QScrollBar* vertical = this->verticalScrollBar();
+     output.setWidth(output.width() -
+@@ -741,8 +801,10 @@ void EmulatorContainer::adjustMessagesOverlayGeometry() {
+                                          (width() - 2 * 150 * scaleFactor)));
+     mMessages->setFixedWidth(w);
+     mMessages->adjustSize();
++    // Below the lean title bar, at the top of the guest screen.
+     mMessages->move(mapToGlobal(QPoint()) +=
+-                    {(width() - mMessages->width()) / 2, 0});
++                    {(width() - mMessages->width()) / 2,
++                     ToolWindow::windowChrome().height()});
+ }
+ 
+ void EmulatorContainer::adjustGlassesStatusOverlayGeometry() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index de9cda358..d012dd232 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -42,11 +42,18 @@ class QString;
+ class QWidget;
+ class VirtualSceneInfoDialog;
+ class GlassesStatusOverlay;
++class WindowsLeanFrame;
+ 
+ class EmulatorContainer : public QScrollArea {
+     Q_OBJECT
+ 
+ public:
++    // The window flags of the lean window, which draws its own title bar
++    // (ModAVD#58): frameless to Qt, see WindowsLeanFrame.
++    static constexpr Qt::WindowFlags kLeanWindowFlags =
++            Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint |
++            Qt::WindowMinimizeButtonHint;
++
+     explicit EmulatorContainer(EmulatorQtWindow* window);
+     virtual ~EmulatorContainer();
+ 
+@@ -70,7 +77,20 @@ public:
+     void stopResizeTimer();
+     QSize viewportSize() const;
+ 
+-    void setLeanToolbarWidth(int width) { setViewportMargins(0, 0, width, 0); }
++    // The lean title bar takes the top of the window, above the guest screen.
++    void setLeanTitleBarHeight(int height) {
++        setViewportMargins(0, height, 0, 0);
++    }
++    // Gives the native window the lean window's frame again; Qt resets the
++    // window style whenever it changes the window flags.
++    void applyLeanFrame();
++
++protected:
++    bool nativeEvent(const QByteArray& eventType,
++                     void* message,
++                     qintptr* result) override;
++
++public:
+ 
+     void prepareForRotation() { mRotating = true; }
+ 
+@@ -116,7 +136,10 @@ private:
+     QList<QEvent::Type> mEventBuffer;
+     QTimer mResizeTimer;
+     bool mRotating = false;
+-    bool mDarkTitleBarConnected = false;
++#ifdef _WIN32
++    std::unique_ptr<WindowsLeanFrame> mLeanFrame;
++    bool mLeanFrameThemeConnected = false;
++#endif
+     std::unique_ptr<android::base::RaiiEventListener<
+             android::DisplayPowerModeNotificationSupport,
+             android::DisplayPowerModeChangeEvent>>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 829f5a72b..90e3932ae 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1837,15 +1837,19 @@ void EmulatorQtWindow::maskWindowFrame() {
+     flags &= ~FRAME_WINDOW_FLAGS_MASK;
+     flags |= (haveFrame ? FRAMED_WINDOW_FLAGS : FRAMELESS_WINDOW_FLAGS);
+ #ifdef _WIN32
+-    if (ToolWindow::inWindowNav() && haveFrame) {
+-        flags |= Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint |
+-                 Qt::WindowCloseButtonHint;
+-        flags &= ~Qt::WindowMaximizeButtonHint;
++    if (ToolWindow::inWindowNav()) {
++        // The lean window draws its own title bar (ModAVD#58); see
++        // EmulatorContainer::kLeanWindowFlags.
++        flags &= ~(FRAME_WINDOW_FLAGS_MASK | Qt::WindowMaximizeButtonHint |
++                   Qt::WindowCloseButtonHint);
++        flags |= EmulatorContainer::kLeanWindowFlags;
+     }
+ #endif
+ 
+     if (!ToolWindow::inWindowNav() || mContainer.windowFlags() != flags) {
+         mContainer.setWindowFlags(flags);
++        // Qt has set the window style anew.
++        mContainer.applyLeanFrame();
+     }
+ 
+     // Re-generate and apply the mask
+@@ -2708,10 +2712,8 @@ void EmulatorQtWindow::slot_setWindowPos(int x, int y, QSemaphore* semaphore) {
+ 
+ void EmulatorQtWindow::slot_setWindowSize(int w, int h, QSemaphore* semaphore) {
+     QSemaphoreReleaser semReleaser(semaphore);
+-    if (ToolWindow::inWindowNav()) {
+-        w += 54;
+-    }
+-    mContainer.resize(w, h);
++    const QSize chrome = ToolWindow::windowChrome();
++    mContainer.resize(w + chrome.width(), h + chrome.height());
+ }
+ 
+ void EmulatorQtWindow::slot_paintWindowOverlayForResize(int mouseX,
+@@ -2791,22 +2793,23 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+     showNormal();
+     setFixedSize(rect.size());
+ 
+-    const int guestMinimumWidth = mContainer.minimumWidth() -
+-                                  (ToolWindow::inWindowNav() ? 54 : 0);
++    const QSize chrome = ToolWindow::windowChrome();
++    const int guestMinimumWidth = mContainer.minimumWidth() - chrome.width();
++    const int guestMinimumHeight = mContainer.minimumHeight() - chrome.height();
+     if (rect.width() < guestMinimumWidth ||
+-        rect.height() < mContainer.minimumHeight()) {
++        rect.height() < guestMinimumHeight) {
+         // We're trying to go smaller than the container will allow.
+         // Increase our size to the container's minimum.
+         double horizIncreaseFactor =
+                 (double)guestMinimumWidth / rect.width();
+         double vertIncreaseFactor =
+-                (double)(mContainer.minimumHeight()) / rect.height();
++                (double)guestMinimumHeight / rect.height();
+         if (horizIncreaseFactor > vertIncreaseFactor) {
+             rect.setWidth(guestMinimumWidth);
+             rect.setHeight((int)(horizIncreaseFactor * rect.height()));
+         } else {
+             rect.setWidth((int)(vertIncreaseFactor * rect.width()));
+-            rect.setHeight(mContainer.minimumHeight());
++            rect.setHeight(guestMinimumHeight);
+         }
+     }
+ 
+@@ -2816,11 +2819,7 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+         mContainer.stopResizeTimer();
+         recenterFocusPoint();
+     } else if (!mNextIsZoom) {
+-        QSize containerSize = rect.size();
+-        if (ToolWindow::inWindowNav()) {
+-            containerSize.rwidth() += 54;
+-        }
+-        mContainer.resize(containerSize);
++        mContainer.resize(rect.size() + chrome);
+     }
+     mNextIsZoom = false;
+ 
+@@ -3101,12 +3100,11 @@ void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
+         QRect screenDimensions;
+         slot_getScreenDimensions(&screenDimensions);
+ 
+-        const int screenWidth = screenDimensions.width() -
+-                                (ToolWindow::inWindowNav() ? 54 : 0);
+-        if (newSize.width() > screenWidth ||
+-            newSize.height() > screenDimensions.height()) {
+-            newSize.scale(QSize(screenWidth, screenDimensions.height()),
+-                          Qt::KeepAspectRatio);
++        const QSize screenArea =
++                screenDimensions.size() - ToolWindow::windowChrome();
++        if (newSize.width() > screenArea.width() ||
++            newSize.height() > screenArea.height()) {
++            newSize.scale(screenArea, Qt::KeepAspectRatio);
+         }
+     }
+ 
+@@ -3235,10 +3233,10 @@ void EmulatorQtWindow::resizeAndChangeAspectRatio(bool isFolded) {
+     setDisplayRegionAndUpdate(0, 0, backingSize.width(), backingSize.height());
+     simulateSetScale(std::max(.2, (double)scale));
+     QRect containerGeo = mContainer.geometry();
++    const QSize chrome = ToolWindow::windowChrome();
+     mContainer.setGeometry(containerGeo.x(), containerGeo.y(),
+-                           windowGeo.width() +
+-                                   (ToolWindow::inWindowNav() ? 54 : 0),
+-                           windowGeo.height());
++                           windowGeo.width() + chrome.width(),
++                           windowGeo.height() + chrome.height());
+ }
+ 
+ void EmulatorQtWindow::resizeAndChangeAspectRatio(int x,
+@@ -3272,10 +3270,10 @@ void EmulatorQtWindow::resizeAndChangeAspectRatio(int x,
+     setDisplayRegionAndUpdate(x, y, backingSize.width(), backingSize.height());
+     simulateSetScale(std::max(.2, (double)scale));
+     QRect containerGeo = mContainer.geometry();
++    const QSize chrome = ToolWindow::windowChrome();
+     mContainer.setGeometry(containerGeo.x(), containerGeo.y(),
+-                           windowGeo.width() +
+-                                   (ToolWindow::inWindowNav() ? 54 : 0),
+-                           windowGeo.height());
++                           windowGeo.width() + chrome.width(),
++                           windowGeo.height() + chrome.height());
+ }
+ 
+ SkinMouseButtonType EmulatorQtWindow::getSkinMouseButton(
+@@ -4136,7 +4134,8 @@ void EmulatorQtWindow::simulateWindowMoved(const QPoint& pos) {
+     event.u.window.y = pos.y();
+     queueSkinEvent(std::move(event));
+ 
+-    mOverlay.move(mContainer.mapToGlobal(QPoint()));
++    // Over the guest screen, which may start below a title bar.
++    mOverlay.move(mContainer.mapToGlobal(contentOffset()));
+ }
+ 
+ void EmulatorQtWindow::simulateZoomedWindowResized(const QSize& size) {
+@@ -4215,11 +4214,13 @@ EmulatorContainer* EmulatorQtWindow::containerWindow() {
+ }
+ 
+ QSize EmulatorQtWindow::guestAreaSize() const {
+-    QSize size = mContainer.size();
+-    if (ToolWindow::inWindowNav()) {
+-        size.rwidth() -= 54;
+-    }
+-    return size;
++    return mContainer.size() - ToolWindow::windowChrome();
++}
++
++QPoint EmulatorQtWindow::contentOffset() const {
++    // The scroll area's viewport: below the lean title bar, at (0, 0) without
++    // one. Scrolling inside it is the skin's to add.
++    return mContainer.viewport()->pos();
+ }
+ 
+ void EmulatorQtWindow::showZoomIfNotUserHidden() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index c63f83807..8b9ced518 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -237,6 +237,9 @@ public:
+     void pollEvent(SkinEvent* event, bool* hasEvent);
+ 
+     WId getWindowId();
++    // Where the guest screen's area starts in the window of getWindowId(), in
++    // logical pixels (see skin_winsys_get_content_offset).
++    QPoint contentOffset() const;
+ 
+     android::emulation::AdbInterface* getAdbInterface() const;
+     void startSafeShutdown();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+new file mode 100644
+index 000000000..288a7bc20
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -0,0 +1,159 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/skin/qt/lean-title-bar.h"
++
++#include <QApplication>
++#include <QEvent>
++#include <QFontMetrics>
++#include <QFrame>
++#include <QHBoxLayout>
++#include <QIcon>
++#include <QLabel>
++#include <QPushButton>
++#include <QResizeEvent>
++#include <QSize>
++
++#include <algorithm>
++
++namespace {
++
++// The palette of the lean window, the same as its navigation buttons had.
++constexpr char kStyle[] =
++        "#leanTitleBar { background: #20212D; }"
++        "#leanTitleBar QLabel { color: #E8E8EC; background: transparent; }"
++        "#leanTitleBar QPushButton { background: #20212D; border: 0; }"
++        "#leanTitleBar QPushButton:hover { background: #303142; }"
++        "#leanTitleBar QPushButton:pressed { background: #3B3D52; }"
++        "#leanTitleBar QPushButton:disabled { background: #20212D; }"
++        "#leanTitleBarDivider { background: #3B3D52; border: 0; }";
++
++constexpr int kButtonWidth = 40;
++constexpr int kNavIconSize = 20;
++constexpr int kWindowIconSize = 16;
++
++}  // namespace
++
++LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
++    setObjectName(QStringLiteral("leanTitleBar"));
++    setAttribute(Qt::WA_StyledBackground);
++    setStyleSheet(QString::fromLatin1(kStyle));
++    setFocusPolicy(Qt::NoFocus);
++    setFixedHeight(kHeight);
++
++    auto* layout = new QHBoxLayout(this);
++    layout->setContentsMargins(10, 0, 0, 0);
++    layout->setSpacing(0);
++
++    mIcon = new QLabel(this);
++    mIcon->setFixedSize(kWindowIconSize, kWindowIconSize);
++    layout->addWidget(mIcon, 0, Qt::AlignVCenter);
++    layout->addSpacing(8);
++
++    mTitle = new QLabel(this);
++    mTitle->setMinimumWidth(0);
++    mTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
++    mTitle->setTextFormat(Qt::PlainText);
++    layout->addWidget(mTitle, 1, Qt::AlignVCenter);
++
++    mBack = addButton("back", QString::fromUtf8("返回"), kNavIconSize);
++    mHome = addButton("home", QString::fromUtf8("桌面"), kNavIconSize);
++    mDivider = new QFrame(this);
++    mDivider->setObjectName(QStringLiteral("leanTitleBarDivider"));
++    mDivider->setFixedSize(1, 16);
++    mMinimize = addButton("minimize", QString::fromUtf8("最小化"), kWindowIconSize);
++    mClose = addButton("close", QString::fromUtf8("关机"), kWindowIconSize);
++
++    layout->addWidget(mBack);
++    layout->addWidget(mHome);
++    layout->addSpacing(4);
++    layout->addWidget(mDivider, 0, Qt::AlignVCenter);
++    layout->addSpacing(4);
++    layout->addWidget(mMinimize);
++    layout->addWidget(mClose);
++
++    mWindow->installEventFilter(this);
++    updateTitle();
++    updateIcon();
++}
++
++QPushButton* LeanTitleBar::addButton(const char* icon,
++                                     const QString& tip,
++                                     int iconSize) {
++    auto* button = new QPushButton(this);
++    button->setFocusPolicy(Qt::NoFocus);
++    button->setFlat(true);
++    button->setFixedSize(kButtonWidth, kHeight);
++    // The dark theme's icons are drawn light.
++    button->setIcon(QIcon(QStringLiteral(":/dark/") + QLatin1String(icon)));
++    button->setIconSize(QSize(iconSize, iconSize));
++    button->setToolTip(tip);
++    button->setAccessibleName(tip);
++    return button;
++}
++
++int LeanTitleBar::buttonsLeft() const {
++    // The first button shown; back or home may be hidden for some AVDs.
++    for (QWidget* widget : {static_cast<QWidget*>(mBack),
++                            static_cast<QWidget*>(mHome),
++                            static_cast<QWidget*>(mDivider)}) {
++        if (!widget->isHidden()) {
++            return widget->x();
++        }
++    }
++    return mMinimize->x();
++}
++
++void LeanTitleBar::setButtonsEnabled(bool enabled) {
++    for (QPushButton* button : {mBack, mHome, mMinimize, mClose}) {
++        button->setEnabled(enabled);
++    }
++}
++
++bool LeanTitleBar::eventFilter(QObject* watched, QEvent* event) {
++    if (watched == mWindow) {
++        if (event->type() == QEvent::WindowTitleChange) {
++            updateTitle();
++        } else if (event->type() == QEvent::WindowIconChange ||
++                   event->type() == QEvent::ApplicationWindowIconChange ||
++                   event->type() == QEvent::ScreenChangeInternal) {
++            // On another screen the icon is drawn for its pixel ratio.
++            updateIcon();
++        }
++    }
++    return QWidget::eventFilter(watched, event);
++}
++
++void LeanTitleBar::resizeEvent(QResizeEvent* event) {
++    QWidget::resizeEvent(event);
++    updateTitle();
++}
++
++void LeanTitleBar::updateTitle() {
++    const QString title = mWindow->windowTitle();
++    const QString shown = mTitle->fontMetrics().elidedText(
++            title, Qt::ElideRight, std::max(0, mTitle->width()));
++    if (mTitle->text() != shown) {
++        mTitle->setText(shown);
++    }
++    mTitle->setToolTip(shown == title ? QString() : title);
++}
++
++void LeanTitleBar::updateIcon() {
++    QIcon icon = mWindow->windowIcon();
++    if (icon.isNull()) {
++        icon = QApplication::windowIcon();
++    }
++    mIcon->setPixmap(icon.pixmap(QSize(kWindowIconSize, kWindowIconSize),
++                                 devicePixelRatioF()));
++}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+new file mode 100644
+index 000000000..30b8f3486
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -0,0 +1,65 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <QString>
++#include <QWidget>
++
++class QEvent;
++class QFrame;
++class QLabel;
++class QPushButton;
++class QResizeEvent;
++
++// The title bar the lean window draws itself (ModAVD#58), at the top of the
++// emulator window: the window's icon and title on the left, then back, home,
++// a divider, minimize and close on the right. It shows the title and icon of
++// the window it sits in. Moving the window by the title bar, and the system
++// menu, are the window's (WindowsLeanFrame); this only has the buttons.
++class LeanTitleBar : public QWidget {
++    Q_OBJECT
++
++public:
++    // Logical pixels.
++    static constexpr int kHeight = 32;
++
++    explicit LeanTitleBar(QWidget* window);
++
++    // Where the buttons start, in logical pixels from the left edge.
++    int buttonsLeft() const;
++    void setButtonsEnabled(bool enabled);
++
++    QPushButton* backButton() const { return mBack; }
++    QPushButton* homeButton() const { return mHome; }
++    QPushButton* minimizeButton() const { return mMinimize; }
++    QPushButton* closeButton() const { return mClose; }
++
++protected:
++    bool eventFilter(QObject* watched, QEvent* event) override;
++    void resizeEvent(QResizeEvent* event) override;
++
++private:
++    QPushButton* addButton(const char* icon, const QString& tip, int iconSize);
++    void updateTitle();
++    void updateIcon();
++
++    QWidget* mWindow;
++    QLabel* mIcon = nullptr;
++    QLabel* mTitle = nullptr;
++    QPushButton* mBack = nullptr;
++    QPushButton* mHome = nullptr;
++    QFrame* mDivider = nullptr;
++    QPushButton* mMinimize = nullptr;
++    QPushButton* mClose = nullptr;
++};
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 7d01fe7c5..44d202c54 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -92,6 +92,7 @@
+ #include "android/skin/qt/extended-pages/common.h"
+ #include "android/skin/qt/extended-pages/virtual-sensors-page.h"
+ #include "android/skin/qt/extended-window.h"
++#include "android/skin/qt/lean-title-bar.h"
+ #include "android/skin/qt/posture-selection-dialog.h"
+ #include "android/skin/qt/qt-settings.h"
+ #include "android/skin/qt/qt-ui-commands.h"
+@@ -225,6 +226,11 @@ bool ToolWindow::inWindowNav() {
+ #endif
+ }
+ 
++// static
++QSize ToolWindow::windowChrome() {
++    return inWindowNav() ? QSize(0, LeanTitleBar::kHeight) : QSize(0, 0);
++}
++
+ template <typename T>
+ ToolWindow::WindowHolder<T>::WindowHolder(ToolWindow* tw,
+                                           OnCreatedCallback onCreated)
+@@ -720,7 +726,7 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+     }
+ 
+     if (inWindowNav()) {
+-        createWindowNavColumn();
++        createLeanTitleBar();
+     }
+ 
+     sToolWindow = this;
+@@ -952,86 +958,72 @@ void ToolWindow::show() {
+ 
+ void ToolWindow::setVisible(bool visible) {
+     if (inWindowNav()) {
++        // The title bar stands in for this window.
+         QFrame::setVisible(false);
+-        if (mWindowNavColumn) {
+-            mWindowNavColumn->setVisible(true);
+-            positionWindowNavColumn();
++        if (mLeanTitleBar) {
++            mLeanTitleBar->setVisible(true);
++            positionLeanTitleBar();
+         }
+         return;
+     }
+     QFrame::setVisible(visible);
+ }
+ 
+-void ToolWindow::createWindowNavColumn() {
+-    if (mWindowNavColumn) {
++void ToolWindow::createLeanTitleBar() {
++    if (mLeanTitleBar) {
+         return;
+     }
+-    mWindowNavColumn = new QWidget(mEmulatorWindow->containerWindow());
+-    mWindowNavColumn->setObjectName(QStringLiteral("windowNavColumn"));
+-    mWindowNavColumn->setStyleSheet(QStringLiteral(
+-            "#windowNavColumn { background: #20212D; }"
+-            "#windowNavColumn QPushButton { background: #20212D; color: #E8E8EC; border: 0; }"
+-            "#windowNavColumn QPushButton:hover { background: #303142; }"
+-            "#windowNavColumn QPushButton:pressed { background: #3B3D52; }"
+-            "#windowNavColumn QPushButton:disabled { color: #777985; background: #20212D; }"));
+-    mWindowNavColumn->setFocusPolicy(Qt::NoFocus);
+-    auto* layout = new QVBoxLayout(mWindowNavColumn);
+-    layout->setContentsMargins(10, 0, 10, 0);
+-    layout->setSpacing(0);
+-    layout->addStretch(1);
+-
+-    auto addButton = [&](QPushButton* source, auto pressed, auto released) {
+-        if (source->isHidden()) {
+-            return;
+-        }
+-        auto* button = new QPushButton(mWindowNavColumn);
+-        button->setObjectName(QStringLiteral("windowNavButton"));
+-        button->setFocusPolicy(Qt::NoFocus);
+-        button->setFixedSize(34, 34);
+-        button->setIcon(source->icon());
+-        button->setIconSize(source->iconSize());
+-        button->setProperty("themeIconName", source->property("themeIconName"));
+-        button->setProperty("ToolWindowButton", true);
+-        button->setProperty("iconSize", source->iconSize());
+-        button->setProperty("minimumSize", QSize(34, 34));
+-        button->setToolTip(source->toolTip());
+-        QObject::connect(button, &QPushButton::pressed, this, pressed);
+-        QObject::connect(button, &QPushButton::released, this, released);
+-        layout->addWidget(button, 0, Qt::AlignHCenter);
+-    };
+-    addButton(mToolsUi->back_button, &ToolWindow::on_back_button_pressed,
+-              &ToolWindow::on_back_button_released);
+-    QPushButton* homeSource = mToolsUi->home_button->isHidden()
+-                                      ? mToolsUi->all_apps_button
+-                                      : mToolsUi->home_button;
+-    if (homeSource == mToolsUi->all_apps_button) {
+-        addButton(homeSource, &ToolWindow::on_all_apps_button_pressed,
+-                  &ToolWindow::on_all_apps_button_released);
++    mLeanTitleBar = new LeanTitleBar(mEmulatorWindow->containerWindow());
++    // Room for it from the start, before the guest screen is placed.
++    mEmulatorWindow->containerWindow()->setLeanTitleBarHeight(
++            LeanTitleBar::kHeight);
++
++    QPushButton* back = mLeanTitleBar->backButton();
++    back->setVisible(!mToolsUi->back_button->isHidden());
++    QObject::connect(back, &QPushButton::pressed, this,
++                     &ToolWindow::on_back_button_pressed);
++    QObject::connect(back, &QPushButton::released, this,
++                     &ToolWindow::on_back_button_released);
++
++    // AVDs whose home is in the all apps button (AllAppsForHomeTray) hide the
++    // home button and keep that one.
++    QPushButton* home = mLeanTitleBar->homeButton();
++    if (mToolsUi->home_button->isHidden()) {
++        home->setVisible(!mToolsUi->all_apps_button->isHidden());
++        QObject::connect(home, &QPushButton::pressed, this,
++                         &ToolWindow::on_all_apps_button_pressed);
++        QObject::connect(home, &QPushButton::released, this,
++                         &ToolWindow::on_all_apps_button_released);
+     } else {
+-        addButton(homeSource, &ToolWindow::on_home_button_pressed,
+-                  &ToolWindow::on_home_button_released);
++        QObject::connect(home, &QPushButton::pressed, this,
++                         &ToolWindow::on_home_button_pressed);
++        QObject::connect(home, &QPushButton::released, this,
++                         &ToolWindow::on_home_button_released);
+     }
+-    mWindowNavColumn->show();
+-    positionWindowNavColumn();
++
++    QObject::connect(mLeanTitleBar->minimizeButton(), &QPushButton::clicked,
++                     this, [this] { mEmulatorWindow->showMinimized(); });
++    QObject::connect(mLeanTitleBar->closeButton(), &QPushButton::clicked, this,
++                     [this] { on_close_button_clicked(); });
++
++    mLeanTitleBar->show();
++    positionLeanTitleBar();
+ }
+ 
+-void ToolWindow::positionWindowNavColumn() {
+-    if (!mWindowNavColumn || !inWindowNav()) {
++void ToolWindow::positionLeanTitleBar() {
++    if (!mLeanTitleBar || !inWindowNav()) {
+         return;
+     }
+     auto* container = mEmulatorWindow->containerWindow();
+-    const QRect vr = container->viewport()->geometry();
+-    mWindowNavColumn->setGeometry(vr.right() + 1, vr.top(), 54, vr.height());
+-    mWindowNavColumn->raise();
++    mLeanTitleBar->setGeometry(0, 0, container->width(), LeanTitleBar::kHeight);
++    mLeanTitleBar->raise();
+ }
+ 
+-void ToolWindow::syncWindowNavEnabled() {
+-    if (mWindowNavColumn) {
+-        mWindowNavColumn->setEnabled(isEnabled());
++void ToolWindow::syncLeanTitleBarEnabled() {
++    if (mLeanTitleBar) {
++        mLeanTitleBar->setEnabled(isEnabled());
+         if (safeShutdownInProgress()) {
+-            for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
+-                button->setEnabled(false);
+-            }
++            mLeanTitleBar->setButtonsEnabled(false);
+         }
+     }
+ }
+@@ -1039,7 +1031,7 @@ void ToolWindow::syncWindowNavEnabled() {
+ void ToolWindow::changeEvent(QEvent* event) {
+     QFrame::changeEvent(event);
+     if (event->type() == QEvent::EnabledChange) {
+-        syncWindowNavEnabled();
++        syncLeanTitleBarEnabled();
+     }
+ }
+ 
+@@ -1733,13 +1725,11 @@ void ToolWindow::closeExtendedWindow() {
+ 
+ void ToolWindow::dockMainWindow() {
+     if (inWindowNav()) {
+-        const int toolbarWidth = 54;
++        // This window stays hidden; the title bar is in the main window,
++        // above the guest screen.
+         if (auto* area = qobject_cast<EmulatorContainer*>(parentWidget())) {
+-            area->setLeanToolbarWidth(toolbarWidth);
+-            const QRect frame = area->frameGeometry();
+-            move(frame.right() + TOOL_GAP_FRAMED - width() + 1,
+-                 frame.top() + mEmulatorWindow->getTopTransparency());
+-            positionWindowNavColumn();
++            area->setLeanTitleBarHeight(LeanTitleBar::kHeight);
++            positionLeanTitleBar();
+         }
+     } else if (leanToolbar()) {
+         const int toolbarHeight = std::max(1, parentWidget()->height() -
+@@ -1776,10 +1766,6 @@ bool ToolWindow::isLeanToolbar() const {
+     return leanToolbar();
+ }
+ 
+-int ToolWindow::leanToolbarWidth() const {
+-    return inWindowNav() ? 54 : (leanToolbar() ? std::max(1, sizeHint().width()) : 0);
+-}
+-
+ bool ToolWindow::safeShutdownInProgress() const {
+     return mEmulatorWindow && mEmulatorWindow->safeShutdownInProgress();
+ }
+@@ -1794,16 +1780,8 @@ void ToolWindow::updateTheme(const QString& styleSheet) {
+             [&] { mVirtualSceneControlWindow.get()->updateTheme(styleSheet); });
+     mTouchpadWindow.ifExists(
+             [&] { mTouchpadWindow.get()->setStyleSheet(styleSheet); });
++    // The lean title bar keeps its own dark palette whatever the theme.
+     setStyleSheet(styleSheet);
+-    if (mWindowNavColumn) {
+-        mWindowNavColumn->setStyleSheet(QStringLiteral(
+-                "#windowNavColumn { background: #20212D; }"
+-                "#windowNavColumn QPushButton { background: #20212D; color: #E8E8EC; border: 0; }"
+-                "#windowNavColumn QPushButton:hover { background: #303142; }"
+-                "#windowNavColumn QPushButton:pressed { background: #3B3D52; }"
+-                "#windowNavColumn QPushButton:disabled { color: #777985; background: #20212D; }"));
+-        remaskButtons();
+-    }
+ }
+ 
+ // static
+@@ -2103,10 +2081,8 @@ void ToolWindow::beginLeanSafeShutdown(bool hideWindows) {
+     for (QPushButton* button : findChildren<QPushButton*>()) {
+         button->setEnabled(false);
+     }
+-    if (mWindowNavColumn) {
+-        for (QPushButton* button : mWindowNavColumn->findChildren<QPushButton*>()) {
+-            button->setEnabled(false);
+-        }
++    if (mLeanTitleBar) {
++        mLeanTitleBar->setButtonsEnabled(false);
+     }
+     // Snapshot saves and loads from the extended controls would race the
+     // shutdown when the windows stay up.
+@@ -2943,10 +2919,7 @@ WorkerProcessingResult ToolWindow::foldableSyncToAndroidItemFunction(
+ }
+ 
+ void ToolWindow::remaskButtons() {
+-    QList<QPushButton*> buttons = findChildren<QPushButton*>();
+-    if (mWindowNavColumn) {
+-        buttons += mWindowNavColumn->findChildren<QPushButton*>();
+-    }
++    const QList<QPushButton*> buttons = findChildren<QPushButton*>();
+     for (QPushButton* button : buttons) {
+         const QString icon_name = button->property("themeIconName").toString();
+         if (!icon_name.isNull()) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index 8d5f0faba..3e6a6b2a8 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -51,6 +51,7 @@
+ #include "android/xr-defines.h"
+ #include "host-common/qt_ui_defs.h"
+ 
++class LeanTitleBar;
+ class PostureSelectionDialog;
+ class XrEnvironmentModeDialog;
+ class XrInputModeDialog;
+@@ -150,8 +151,13 @@ public:
+     void beginLeanSafeShutdown(bool hideWindows);
+ 
+     bool isLeanToolbar() const;
+-    int leanToolbarWidth() const;
++    // Whether the window draws its own title bar with the navigation and
++    // window buttons (ModAVD#58): the lean toolbar on Windows, with a window.
+     static bool inWindowNav();
++    // What the window adds around the guest screen, in logical pixels: the
++    // title bar's height with inWindowNav(), nothing otherwise.
++    static QSize windowChrome();
++    LeanTitleBar* leanTitleBar() const { return mLeanTitleBar; }
+ 
+     bool clipboardSharingSupported() const { return mClipboardSupported; }
+     void forwardKeyToEmulator(uint32_t keycode, bool down);
+@@ -223,9 +229,9 @@ private:
+     virtual void paintEvent(QPaintEvent*) override;
+     virtual void hideEvent(QHideEvent* event) override;
+     void rebuildBackingStoreIfStale();
+-    void createWindowNavColumn();
+-    void positionWindowNavColumn();
+-    void syncWindowNavEnabled();
++    void createLeanTitleBar();
++    void positionLeanTitleBar();
++    void syncLeanTitleBarEnabled();
+ 
+     EmulatorQtWindow* mEmulatorWindow;
+     android::base::MemberOnDemandT<ExtendedWindowHolder,
+@@ -242,7 +248,7 @@ private:
+                                    void (ToolWindow::*)(TouchpadWindow*)>
+             mTouchpadWindow;
+     std::unique_ptr<Ui::ToolControls> mToolsUi;
+-    QWidget* mWindowNavColumn = nullptr;
++    LeanTitleBar* mLeanTitleBar = nullptr;
+     bool mStartedAdbStopProcess = false;
+     ShortcutKeyStore<QtUICommand> mShortcutKeyStore;
+     bool mIsExtendedWindowVisibleOnShow = false;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+new file mode 100644
+index 000000000..82d13e084
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -0,0 +1,330 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/skin/qt/windows-lean-frame.h"
++
++#include <windows.h>
++#include <windowsx.h>
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++#include <vector>
++
++namespace lw = android::lean_window;
++
++namespace {
++
++// Resize bands inside the window, in logical pixels: along the left, right
++// and bottom edges (over the guest screen), along the top edge (over the
++// title bar), and how far the corners reach.
++constexpr int kBorder = 5;
++constexpr int kTopBorder = 4;
++constexpr int kCorner = 16;
++
++HWND hwndOf(void* hwnd) {
++    return static_cast<HWND>(hwnd);
++}
++
++int devicePixels(double scale, int logical) {
++    return std::max(1, static_cast<int>(std::lround(logical * scale)));
++}
++
++// The window's DPI scale as Windows has it, which is what it scales the window
++// by when it moves onto another screen.
++double windowScale(HWND hwnd) {
++    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
++    static const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
++            GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
++    const UINT dpi = getDpiForWindow ? getDpiForWindow(hwnd) : 0;
++    return dpi ? dpi / 96.0 : 1.0;
++}
++
++// The IDC_SIZE* cursors, by number: this code is built without UNICODE.
++const wchar_t* resizeCursor(lw::Hit hit) {
++    switch (hit) {
++        case lw::Hit::Left:
++        case lw::Hit::Right:
++            return MAKEINTRESOURCEW(32644);  // IDC_SIZEWE
++        case lw::Hit::Top:
++        case lw::Hit::Bottom:
++            return MAKEINTRESOURCEW(32645);  // IDC_SIZENS
++        case lw::Hit::TopLeft:
++        case lw::Hit::BottomRight:
++            return MAKEINTRESOURCEW(32642);  // IDC_SIZENWSE
++        default:
++            return MAKEINTRESOURCEW(32643);  // IDC_SIZENESW
++    }
++}
++
++void pruneSystemMenu(HWND hwnd) {
++    HMENU menu = GetSystemMenu(hwnd, FALSE);
++    if (!menu) {
++        return;
++    }
++    const int count = GetMenuItemCount(menu);
++    std::vector<unsigned> ids;
++    for (int i = 0; i < count; ++i) {
++        MENUITEMINFOW info = {};
++        info.cbSize = sizeof(info);
++        info.fMask = MIIM_FTYPE | MIIM_ID;
++        if (!GetMenuItemInfoW(menu, i, TRUE, &info)) {
++            ids.push_back(0xFFFFFFFFu);  // unknown: not kept
++            continue;
++        }
++        ids.push_back((info.fType & MFT_SEPARATOR) ? 0u : info.wID);
++    }
++    for (int position : lw::systemMenuItemsToDelete(ids)) {
++        DeleteMenu(menu, position, MF_BYPOSITION);
++    }
++}
++
++}  // namespace
++
++WindowsLeanFrame::WindowsLeanFrame(std::function<Geometry()> geometry,
++                                   std::function<void()> resizeDone)
++    : mGeometry(std::move(geometry)), mResizeDone(std::move(resizeDone)) {}
++
++// static
++void WindowsLeanFrame::apply(WId wid) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    if (!hwnd) {
++        return;
++    }
++    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
++    const LONG_PTR wanted = (style | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX) &
++                            ~static_cast<LONG_PTR>(WS_THICKFRAME | WS_MAXIMIZEBOX);
++    if (wanted != style) {
++        SetWindowLongPtrW(hwnd, GWL_STYLE, wanted);
++        // Windows asks for the client area again (WM_NCCALCSIZE).
++        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
++                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
++                             SWP_NOOWNERZORDER | SWP_NOACTIVATE);
++    }
++
++    if (HMODULE dwm = LoadLibraryW(L"dwmapi.dll")) {
++        struct Margins {
++            int left, right, top, bottom;
++        };
++        using ExtendFrameFn = HRESULT(WINAPI*)(HWND, const Margins*);
++        using SetAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
++        const auto extendFrame = reinterpret_cast<ExtendFrameFn>(
++                GetProcAddress(dwm, "DwmExtendFrameIntoClientArea"));
++        const auto setAttribute = reinterpret_cast<SetAttributeFn>(
++                GetProcAddress(dwm, "DwmSetWindowAttribute"));
++        if (extendFrame) {
++            // Any frame at all in the client area keeps the shadow.
++            const Margins margins = {0, 0, 1, 0};
++            extendFrame(hwnd, &margins);
++        }
++        if (setAttribute) {
++            // DWMWA_USE_IMMERSIVE_DARK_MODE (19 before Windows 10 20H1): the
++            // border around the window.
++            const BOOL dark = TRUE;
++            if (FAILED(setAttribute(hwnd, 20, &dark, sizeof(dark)))) {
++                setAttribute(hwnd, 19, &dark, sizeof(dark));
++            }
++            // DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND, Windows 11 only.
++            const DWORD round = 2;
++            setAttribute(hwnd, 33, &round, sizeof(round));
++        }
++        FreeLibrary(dwm);
++    }
++    pruneSystemMenu(hwnd);
++}
++
++// static
++void WindowsLeanFrame::showSystemMenu(WId wid, int x, int y) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    if (!hwnd) {
++        return;
++    }
++    pruneSystemMenu(hwnd);
++    HMENU menu = GetSystemMenu(hwnd, FALSE);
++    if (!menu) {
++        return;
++    }
++    EnableMenuItem(menu, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
++    EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_ENABLED);
++    SetMenuDefaultItem(menu, SC_CLOSE, FALSE);
++    const UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN
++                                                               : TPM_LEFTALIGN;
++    const int command = TrackPopupMenuEx(
++            menu, align | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y,
++            hwnd, nullptr);
++    if (command) {
++        // Close goes the usual way, WM_CLOSE, and so to the safe shutdown.
++        PostMessageW(hwnd, WM_SYSCOMMAND, static_cast<WPARAM>(command),
++                     MAKELPARAM(x, y));
++    }
++}
++
++bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
++    MSG* msg = static_cast<MSG*>(message);
++    HWND hwnd = msg->hwnd;
++    switch (msg->message) {
++        case WM_NCCALCSIZE:
++            // The client area is the whole window, for wParam TRUE (the first
++            // rectangle stays as proposed) and FALSE alike.
++            *result = 0;
++            return true;
++
++        case WM_NCHITTEST: {
++            if (IsIconic(hwnd)) {
++                return false;
++            }
++            RECT window;
++            if (!GetWindowRect(hwnd, &window)) {
++                return false;
++            }
++            const Geometry g = mGeometry();
++            const lw::Layout layout = {window.right - window.left,
++                                       window.bottom - window.top,
++                                       g.titleHeight,
++                                       g.buttonsLeft,
++                                       devicePixels(g.scale, kBorder),
++                                       devicePixels(g.scale, kTopBorder),
++                                       devicePixels(g.scale, kCorner)};
++            const lw::Hit hit =
++                    lw::hitTest(layout, GET_X_LPARAM(msg->lParam) - window.left,
++                                GET_Y_LPARAM(msg->lParam) - window.top);
++            *result = static_cast<qintptr>(hit);
++            return true;
++        }
++
++        case WM_SETCURSOR: {
++            const lw::Hit hit =
++                    static_cast<lw::Hit>(static_cast<short>(LOWORD(msg->lParam)));
++            if (reinterpret_cast<HWND>(msg->wParam) != hwnd || !lw::isResize(hit)) {
++                return false;
++            }
++            SetCursor(LoadCursorW(nullptr, resizeCursor(hit)));
++            *result = TRUE;
++            return true;
++        }
++
++        case WM_NCLBUTTONDOWN:
++        case WM_NCLBUTTONDBLCLK: {
++            // A double click on the title bar does not maximize; it is just
++            // another press.
++            const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
++            if (hit != lw::Hit::Caption && !lw::isResize(hit)) {
++                return false;
++            }
++            startTracking(hwnd, hit, GET_X_LPARAM(msg->lParam),
++                          GET_Y_LPARAM(msg->lParam));
++            *result = 0;
++            return true;
++        }
++
++        case WM_NCRBUTTONDOWN:
++            if (msg->wParam != HTCAPTION) {
++                return false;
++            }
++            *result = 0;
++            return true;
++
++        case WM_NCRBUTTONUP:
++            if (msg->wParam != HTCAPTION) {
++                return false;
++            }
++            showSystemMenu(reinterpret_cast<WId>(hwnd), GET_X_LPARAM(msg->lParam),
++                           GET_Y_LPARAM(msg->lParam));
++            *result = 0;
++            return true;
++
++        case WM_MOUSEMOVE:
++        case WM_LBUTTONUP: {
++            if (mMode == Mode::None) {
++                return false;
++            }
++            POINT cursor = {GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
++            ClientToScreen(hwnd, &cursor);
++            track(hwnd, cursor.x, cursor.y);
++            if (msg->message == WM_LBUTTONUP) {
++                stopTracking(hwnd, true);
++            }
++            *result = 0;
++            return true;
++        }
++
++        case WM_CAPTURECHANGED:
++            if (mMode != Mode::None && reinterpret_cast<HWND>(msg->lParam) != hwnd) {
++                stopTracking(hwnd, false);
++            }
++            return false;
++
++        case WM_SYSCOMMAND:
++            if (!lw::refusesSysCommand(static_cast<unsigned>(msg->wParam))) {
++                return false;
++            }
++            *result = 0;
++            return true;
++
++        default:
++            return false;
++    }
++}
++
++void WindowsLeanFrame::startTracking(void* handle, lw::Hit hit, int x, int y) {
++    HWND hwnd = hwndOf(handle);
++    RECT window;
++    if (!GetWindowRect(hwnd, &window)) {
++        return;
++    }
++    mStartRect = {window.left, window.top, window.right, window.bottom};
++    mGrab = {x, y};
++    mHit = hit;
++    mStartScale = windowScale(hwnd);
++    mMode = hit == lw::Hit::Caption ? Mode::Move : Mode::Resize;
++    SetCapture(hwnd);
++}
++
++void WindowsLeanFrame::track(void* handle, int x, int y) {
++    HWND hwnd = hwndOf(handle);
++    constexpr UINT kFlags = SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE;
++    if (mMode == Mode::Move) {
++        const lw::Point topLeft =
++                lw::dragTopLeft({mStartRect.left, mStartRect.top}, mGrab,
++                                mStartScale, {x, y}, windowScale(hwnd));
++        RECT window;
++        if (GetWindowRect(hwnd, &window) && window.left == topLeft.x &&
++            window.top == topLeft.y) {
++            return;
++        }
++        SetWindowPos(hwnd, nullptr, topLeft.x, topLeft.y, 0, 0,
++                     kFlags | SWP_NOSIZE);
++    } else if (mMode == Mode::Resize) {
++        const Geometry g = mGeometry();
++        if (g.guestAspect <= 0) {
++            return;
++        }
++        const lw::Rect r = lw::resizeRect(mStartRect, mHit, mGrab, {x, y},
++                                          g.titleHeight, g.guestAspect,
++                                          g.minGuestWidth, g.minGuestHeight);
++        SetWindowPos(hwnd, nullptr, r.left, r.top, r.width(), r.height(),
++                     kFlags);
++    }
++}
++
++void WindowsLeanFrame::stopTracking(void* handle, bool releaseCapture) {
++    const bool resized = mMode == Mode::Resize;
++    // Before ReleaseCapture(), which sends WM_CAPTURECHANGED.
++    mMode = Mode::None;
++    if (releaseCapture && GetCapture() == hwndOf(handle)) {
++        ReleaseCapture();
++    }
++    if (resized && mResizeDone) {
++        mResizeDone();
++    }
++}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+new file mode 100644
+index 000000000..4676ae5c0
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <qwindowdefs.h>
++
++#include <functional>
++
++#include "android/lean-window-frame.h"
++
++// The Win32 side of the lean window's frame (ModAVD#58, see
++// android/lean-window-frame.h). Qt sees a frameless window. Windows sees a
++// window with the system caption style, but its client area covers the whole
++// window: the caption style brings back the DWM shadow and border, and the
++// title bar the emulator draws (LeanTitleBar) sits at the top of the client
++// area. There is no resizable frame and no maximize box, and the window is
++// moved and resized here, never in the system's move and size loops, so
++// Windows never snaps, docks or maximizes it.
++class WindowsLeanFrame {
++public:
++    struct Geometry {
++        // Device pixels per logical pixel.
++        double scale = 1.0;
++        // The title bar's height and where its buttons start, in device
++        // pixels from the window's top-left corner.
++        int titleHeight = 0;
++        int buttonsLeft = 0;
++        // The guest screen's width / height; 0 while it is not known.
++        double guestAspect = 0;
++        // The smallest guest screen, in device pixels.
++        int minGuestWidth = 1;
++        int minGuestHeight = 1;
++    };
++
++    WindowsLeanFrame(std::function<Geometry()> geometry,
++                     std::function<void()> resizeDone);
++
++    // Gives the native window |wid| its frame: the caption style without the
++    // resizable frame and the maximize box, the frame extended into the
++    // client area for the shadow, rounded corners on Windows 11, the dark
++    // border, and a system menu with only minimize and close. Safe to repeat,
++    // and repeated whenever Qt may have reset the window style.
++    static void apply(WId wid);
++
++    // Shows the window's system menu at the screen point (x, y) and carries
++    // out the command picked.
++    static void showSystemMenu(WId wid, int x, int y);
++
++    // Handles a message (MSG*) of the window. Returns true, with the window
++    // procedure's |result|, when it handled it.
++    bool handleMessage(void* message, qintptr* result);
++
++    bool tracking() const { return mMode != Mode::None; }
++
++private:
++    enum class Mode { None, Move, Resize };
++
++    void startTracking(void* hwnd, android::lean_window::Hit hit, int x, int y);
++    void track(void* hwnd, int x, int y);
++    void stopTracking(void* hwnd, bool releaseCapture);
++
++    std::function<Geometry()> mGeometry;
++    std::function<void()> mResizeDone;
++    Mode mMode = Mode::None;
++    android::lean_window::Hit mHit = android::lean_window::Hit::Nowhere;
++    android::lean_window::Rect mStartRect = {0, 0, 0, 0};
++    android::lean_window::Point mGrab = {0, 0};
++    double mStartScale = 1.0;
++};
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+index 1c4b965be..836bf63f6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+@@ -27,25 +27,3 @@ int numHeldMouseButtons() {
+     }
+     return numHeld;
+ }
+-
+-void setDarkTitleBar(WId wid) {
+-    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+-    if (!dwm || !wid) {
+-        return;
+-    }
+-    using SetAttr = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+-    auto setAttr = reinterpret_cast<SetAttr>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+-    if (!setAttr) {
+-        FreeLibrary(dwm);
+-        return;
+-    }
+-    const BOOL dark = TRUE;
+-    if (FAILED(setAttr(reinterpret_cast<HWND>(wid), 20, &dark, sizeof(dark)))) {
+-        setAttr(reinterpret_cast<HWND>(wid), 19, &dark, sizeof(dark));
+-    }
+-    const DWORD caption = 0x002d2120;
+-    const DWORD text = 0x00ece8e8;
+-    setAttr(reinterpret_cast<HWND>(wid), 35, &caption, sizeof(caption));
+-    setAttr(reinterpret_cast<HWND>(wid), 36, &text, sizeof(text));
+-    FreeLibrary(dwm);
+-}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
+index 39cc14fbb..6a77749f3 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
+@@ -12,10 +12,7 @@
+ 
+ #pragma once
+ 
+-#include <qwindowdefs.h>
+-
+ #ifdef __cplusplus
+ extern "C"
+ #endif
+ int numHeldMouseButtons();
+-void setDarkTitleBar(WId wid);
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp
+index fd442d2cb..d304e0245 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/winsys-qt.cpp
+@@ -364,6 +364,19 @@ extern void* skin_winsys_get_window_handle() {
+     return (void*)handle;
+ }
+ 
++extern void skin_winsys_get_content_offset(int* x, int* y) {
++    *x = 0;
++    *y = 0;
++    EmulatorQtWindow* window = EmulatorQtWindow::getInstance();
++    if (window == NULL) {
++        D("%s: Could not get window handle", __FUNCTION__);
++        return;
++    }
++    const QPoint offset = window->contentOffset();
++    *x = offset.x();
++    *y = offset.y();
++}
++
+ extern void skin_winsys_get_window_pos(int* x, int* y) {
+     D("skin_winsys_get_window_pos");
+     GlobalState* g = globalState();
+diff --git a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+index 480752ca4..e9c6fe983 100644
+--- a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+@@ -1,3 +1,19 @@
++# ModAVD#58: the window title and the lean window's frame arithmetic, without a
++# windowing system, so that they can be tested on their own.
++android_add_library(
++  TARGET aemu-ui-lean-window
++  LICENSE Apache-2.0
++  SOURCE_DIR src
++  INCLUDES include
++  SRC android/instance-window-title.c android/lean-window-frame.cpp)
++
++android_add_test(
++  TARGET aemu-ui-lean-window_unittests
++  SOURCE_DIR test
++  SRC android/instance-window-title_unittest.cpp
++      android/lean-window-frame_unittest.cpp
++  DEPS aemu-ui-lean-window gmock_main)
++
+ android_qt_lib(
+   TARGET aemu-ui-window
+   # SHARED
+@@ -5,6 +21,7 @@ android_qt_lib(
+   SRC android/emulator-environment.cpp android/emulator-window.c android/main-common-ui.c android/resource.c
+       android/skin/ui.c android/skin/user-config.c android/skin/window.c
+   DEPS aemu-gl-init
++       aemu-ui-lean-window
+        aemu-gl-init
+        aemu-recording
+        android-emu-agents
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/instance-window-title.h b/android/android-ui/modules/aemu-ui-window/include/android/instance-window-title.h
+new file mode 100644
+index 000000000..6b9c35b8a
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/include/android/instance-window-title.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// The longest title, in bytes: skin_ui_update_title copies the title into 128
++// bytes.
++#define INSTANCE_WINDOW_TITLE_MAX 127
++
++// Writes the window title of an instance into |buff|: the instance's name
++// alone, as the manager shows it and keeps it in avd.ini.displayname
++// (|display_name|, leading spaces and tabs dropped). Without one, or with an
++// empty one, the AVD name |avd_name| stands in. The title is cut to
++// |buff_len| - 1 and at most INSTANCE_WINDOW_TITLE_MAX bytes, between UTF-8
++// characters. Either name may be NULL. Returns the length written.
++size_t instance_window_title(const char* display_name,
++                             const char* avd_name,
++                             char* buff,
++                             size_t buff_len);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+new file mode 100644
+index 000000000..ba250ce99
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -0,0 +1,132 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <vector>
++
++// The window frame of the lean window (ModAVD#58): the window has no system
++// title bar and no resizable frame, the emulator draws the title bar and moves
++// and resizes the window itself. This is the arithmetic of it, without any
++// windowing system, so that it can be tested on its own. All lengths are in
++// device pixels, all points in screen coordinates unless said otherwise.
++namespace android {
++namespace lean_window {
++
++// Where a point of the window is, with the values of the Win32 HT* codes.
++enum class Hit : int {
++    Nowhere = 0,
++    Client = 1,
++    Caption = 2,
++    Left = 10,
++    Right = 11,
++    Top = 12,
++    TopLeft = 13,
++    TopRight = 14,
++    Bottom = 15,
++    BottomLeft = 16,
++    BottomRight = 17,
++};
++
++struct Point {
++    int x;
++    int y;
++};
++
++struct Rect {
++    int left;
++    int top;
++    int right;
++    int bottom;
++    int width() const { return right - left; }
++    int height() const { return bottom - top; }
++};
++
++// The parts of the window, relative to its top-left corner.
++struct Layout {
++    int width;
++    int height;
++    // The title bar is the band [0, titleHeight) at the top.
++    int titleHeight;
++    // The title bar buttons take [buttonsLeft, width) of the title bar.
++    int buttonsLeft;
++    // Resize bands inside the window along the left, right and bottom edges,
++    // and along the top edge.
++    int border;
++    int topBorder;
++    // How far from a corner, along either edge, the corner's diagonal resize
++    // reaches.
++    int corner;
++};
++
++// What is under the point (x, y) of the window: a resize band, the part of the
++// title bar that moves the window, or the client (the buttons, the guest
++// screen). The buttons stay clickable except in the bands of the corners and
++// along the right edge.
++Hit hitTest(const Layout& layout, int x, int y);
++
++// Whether |hit| resizes the window.
++bool isResize(Hit hit);
++
++// Where the window's top-left corner goes while the title bar is dragged: the
++// point that was grabbed at |grab|, with the window at |startTopLeft| and the
++// screen scale |startScale|, stays under the cursor at |cursor| when the
++// window is at scale |scale| (it changes when the window moves onto a screen
++// with another scale and Windows resizes it).
++Point dragTopLeft(Point startTopLeft,
++                  Point grab,
++                  double startScale,
++                  Point cursor,
++                  double scale);
++
++// The window while the resize band |hit| is dragged from |grab| to |cursor|,
++// starting from |start|. The guest screen, the window below the title bar of
++// |titleHeight|, keeps the ratio |aspect| (width / height) and is at least
++// |minGuestWidth| x |minGuestHeight|. The edges opposite the dragged ones stay
++// where they are; a side edge grows the window downwards, the top and bottom
++// edges grow it to the right.
++Rect resizeRect(const Rect& start,
++                Hit hit,
++                Point grab,
++                Point cursor,
++                int titleHeight,
++                double aspect,
++                int minGuestWidth,
++                int minGuestHeight);
++
++// Win32 system commands (WM_SYSCOMMAND, low four bits masked off).
++enum SysCommand : unsigned {
++    kScSize = 0xF000,
++    kScMove = 0xF010,
++    kScMinimize = 0xF020,
++    kScMaximize = 0xF030,
++    kScClose = 0xF060,
++    kScRestore = 0xF120,
++};
++
++// The system menu (Alt+Space, right click on the title bar) keeps only
++// minimize and close.
++bool keepsSystemMenuItem(unsigned id);
++
++// The positions to delete, last first, from a system menu whose items have
++// the ids |ids| (0 for a separator): every item but the kept ones, and every
++// separator that would not stand between two kept items.
++std::vector<int> systemMenuItemsToDelete(const std::vector<unsigned>& ids);
++
++// Whether the window refuses the system command |wparam| (the WM_SYSCOMMAND
++// wParam): maximize, and the keyboard move and size, which would start the
++// system's move and size loops and with them Snap.
++bool refusesSysCommand(unsigned wparam);
++
++}  // namespace lean_window
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/skin/winsys.h b/android/android-ui/modules/aemu-ui-window/include/android/skin/winsys.h
+index f8eb07264..c6db02bc1 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/skin/winsys.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/skin/winsys.h
+@@ -29,6 +29,12 @@ extern "C" {
+ // Return window handle of main UI. MUST BE CALLED FROM THE MAIN UI THREAD.
+ void* skin_winsys_get_window_handle();
+ 
++// Where the guest screen's area starts inside the window of
++// skin_winsys_get_window_handle(), in logical pixels: below the title bar the
++// lean window draws itself (ModAVD#58), at the window's top-left otherwise.
++// MUST BE CALLED FROM THE MAIN UI THREAD.
++void skin_winsys_get_content_offset(int* x, int* y);
++
+ // Return rectangle of current monitor in pixels.
+ void skin_winsys_get_monitor_rect(SkinRect* rect);
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c b/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
+index a745c35b3..f28dcfefe 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
++++ b/android/android-ui/modules/aemu-ui-window/src/android/emulator-window.c
+@@ -30,6 +30,7 @@
+ #include "android/emulation/control/user_event_agent.h"
+ #include "android/emulation/resizable_display_config.h"
+ #include "android/hw-sensors.h"
++#include "android/instance-window-title.h"
+ #include "android/network/globals.h"
+ #include "android/skin/keycode.h"
+ #include "android/skin/trackball.h"
+@@ -74,8 +75,7 @@ extern bool emulator_window_load_environment();
+ // ModAVD titles the window with the instance's name alone: the name the
+ // manager shows, which it keeps as avd.ini.displayname in the AVD's
+ // config.ini. Without one, or with an empty one, the AVD name stands in. The
+-// console port is left out. skin_ui_update_title copies the title into 128
+-// bytes, so a long name is cut there, between UTF-8 characters.
++// console port is left out. See instance_window_title().
+ static void write_window_name(char* buff,
+                               size_t buff_len,
+                               int base_port,
+@@ -86,24 +86,7 @@ static void write_window_name(char* buff,
+     char* display_name =
+             config ? iniFile_getString(config, "avd.ini.displayname", NULL)
+                    : NULL;
+-    const char* name = avd_name ? avd_name : "";
+-    if (display_name) {
+-        const char* trimmed = display_name + strspn(display_name, " \t");
+-        if (*trimmed) {
+-            name = trimmed;
+-        }
+-    }
+-    size_t len = strlen(name);
+-    const size_t max_len = (buff_len < 128 ? buff_len : 128) - 1;
+-    if (len > max_len) {
+-        len = max_len;
+-        // Back up to the first byte of a UTF-8 sequence.
+-        while (len > 0 && ((unsigned char)name[len] & 0xC0) == 0x80) {
+-            --len;
+-        }
+-    }
+-    memcpy(buff, name, len);
+-    buff[len] = '\0';
++    instance_window_title(display_name, avd_name, buff, buff_len);
+     free(display_name);
+ }
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/instance-window-title.c b/android/android-ui/modules/aemu-ui-window/src/android/instance-window-title.c
+new file mode 100644
+index 000000000..70d20c37f
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/src/android/instance-window-title.c
+@@ -0,0 +1,47 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/instance-window-title.h"
++
++#include <string.h>
++
++size_t instance_window_title(const char* display_name,
++                             const char* avd_name,
++                             char* buff,
++                             size_t buff_len) {
++    if (!buff || buff_len == 0) {
++        return 0;
++    }
++    const char* name = avd_name ? avd_name : "";
++    if (display_name) {
++        const char* trimmed = display_name + strspn(display_name, " \t");
++        if (*trimmed) {
++            name = trimmed;
++        }
++    }
++    size_t len = strlen(name);
++    size_t max_len = buff_len - 1;
++    if (max_len > INSTANCE_WINDOW_TITLE_MAX) {
++        max_len = INSTANCE_WINDOW_TITLE_MAX;
++    }
++    if (len > max_len) {
++        len = max_len;
++        // Back up to the first byte of a UTF-8 sequence.
++        while (len > 0 && ((unsigned char)name[len] & 0xC0) == 0x80) {
++            --len;
++        }
++    }
++    memcpy(buff, name, len);
++    buff[len] = '\0';
++    return len;
++}
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+new file mode 100644
+index 000000000..12cf9b04d
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -0,0 +1,170 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/lean-window-frame.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace android {
++namespace lean_window {
++
++Hit hitTest(const Layout& l, int x, int y) {
++    if (x < 0 || y < 0 || x >= l.width || y >= l.height) {
++        return Hit::Nowhere;
++    }
++    const bool left = x < l.border;
++    const bool right = x >= l.width - l.border;
++    const bool top = y < l.topBorder;
++    const bool bottom = y >= l.height - l.border;
++    const bool nearLeft = x < l.corner;
++    const bool nearRight = x >= l.width - l.corner;
++    const bool nearTop = y < l.corner;
++    const bool nearBottom = y >= l.height - l.corner;
++
++    if (bottom) {
++        return nearLeft ? Hit::BottomLeft
++                        : (nearRight ? Hit::BottomRight : Hit::Bottom);
++    }
++    if (top) {
++        if (nearLeft) {
++            return Hit::TopLeft;
++        }
++        if (nearRight) {
++            return Hit::TopRight;
++        }
++        // The buttons reach up to the top edge.
++        return x >= l.buttonsLeft ? Hit::Client : Hit::Top;
++    }
++    if (left) {
++        return nearTop ? Hit::TopLeft
++                       : (nearBottom ? Hit::BottomLeft : Hit::Left);
++    }
++    if (right) {
++        return nearTop ? Hit::TopRight
++                       : (nearBottom ? Hit::BottomRight : Hit::Right);
++    }
++    if (y < l.titleHeight) {
++        return x >= l.buttonsLeft ? Hit::Client : Hit::Caption;
++    }
++    return Hit::Client;
++}
++
++bool isResize(Hit hit) {
++    return static_cast<int>(hit) >= static_cast<int>(Hit::Left) &&
++           static_cast<int>(hit) <= static_cast<int>(Hit::BottomRight);
++}
++
++Point dragTopLeft(Point startTopLeft,
++                  Point grab,
++                  double startScale,
++                  Point cursor,
++                  double scale) {
++    const double ratio = startScale > 0 && scale > 0 ? scale / startScale : 1.0;
++    const int offsetX = static_cast<int>(
++            std::lround((grab.x - startTopLeft.x) * ratio));
++    const int offsetY = static_cast<int>(
++            std::lround((grab.y - startTopLeft.y) * ratio));
++    return {cursor.x - offsetX, cursor.y - offsetY};
++}
++
++Rect resizeRect(const Rect& start,
++                Hit hit,
++                Point grab,
++                Point cursor,
++                int titleHeight,
++                double aspect,
++                int minGuestWidth,
++                int minGuestHeight) {
++    if (!isResize(hit) || aspect <= 0) {
++        return start;
++    }
++    const bool left = hit == Hit::Left || hit == Hit::TopLeft ||
++                      hit == Hit::BottomLeft;
++    const bool right = hit == Hit::Right || hit == Hit::TopRight ||
++                       hit == Hit::BottomRight;
++    const bool top =
++            hit == Hit::Top || hit == Hit::TopLeft || hit == Hit::TopRight;
++    const bool bottom = hit == Hit::Bottom || hit == Hit::BottomLeft ||
++                        hit == Hit::BottomRight;
++    const int dx = cursor.x - grab.x;
++    const int dy = cursor.y - grab.y;
++    const double startWidth = start.width();
++    const double startHeight = std::max(1, start.height() - titleHeight);
++
++    // The guest height each dragged edge asks for; the larger one wins, so a
++    // corner follows the cursor along whichever edge it moved further.
++    double height = 0;
++    if (left || right) {
++        const double width = startWidth + (right ? dx : -dx);
++        height = width / aspect;
++    }
++    if (top || bottom) {
++        height = std::max(height, startHeight + (bottom ? dy : -dy));
++    }
++    height = std::max({height, static_cast<double>(minGuestHeight),
++                       minGuestWidth / aspect, 1.0});
++    const int guestHeight = static_cast<int>(std::lround(height));
++    const int guestWidth = std::max(
++            1, static_cast<int>(std::lround(guestHeight * aspect)));
++
++    Rect r = start;
++    if (left) {
++        r.left = start.right - guestWidth;
++    } else {
++        r.right = start.left + guestWidth;
++    }
++    if (top) {
++        r.top = start.bottom - guestHeight - titleHeight;
++    } else {
++        r.bottom = start.top + titleHeight + guestHeight;
++    }
++    return r;
++}
++
++bool keepsSystemMenuItem(unsigned id) {
++    return id == kScMinimize || id == kScClose;
++}
++
++std::vector<int> systemMenuItemsToDelete(const std::vector<unsigned>& ids) {
++    std::vector<int> remove;
++    bool keptBefore = false;  // a kept item before the current position
++    int pendingSeparator = -1;
++    for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
++        if (ids[i] == 0) {
++            if (keptBefore && pendingSeparator < 0) {
++                pendingSeparator = i;  // kept if another kept item follows
++            } else {
++                remove.push_back(i);
++            }
++        } else if (keepsSystemMenuItem(ids[i])) {
++            keptBefore = true;
++            pendingSeparator = -1;
++        } else {
++            remove.push_back(i);
++        }
++    }
++    if (pendingSeparator >= 0) {
++        remove.push_back(pendingSeparator);
++    }
++    std::sort(remove.rbegin(), remove.rend());
++    return remove;
++}
++
++bool refusesSysCommand(unsigned wparam) {
++    const unsigned command = wparam & 0xFFF0;
++    return command == kScMaximize || command == kScMove || command == kScSize;
++}
++
++}  // namespace lean_window
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/skin/window.c b/android/android-ui/modules/aemu-ui-window/src/android/skin/window.c
+index 314d6ee8e..1c70b7a0f 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/skin/window.c
++++ b/android/android-ui/modules/aemu-ui-window/src/android/skin/window.c
+@@ -1565,9 +1565,14 @@ typedef struct {
+ 
+ static void skin_window_run_opengles_show(void* p) {
+     gles_show_data* data = p;
++    // The subwindow is a child of the whole window; the layout places it in
++    // the guest screen's area, which may start below a title bar.
++    int dx = 0;
++    int dy = 0;
++    skin_winsys_get_content_offset(&dx, &dy);
+     data->window->win_funcs->opengles_show(
+-            skin_winsys_get_window_handle(), data->wx, data->wy, data->ww,
+-            data->wh, data->fbw, data->fbh, data->dpr, data->rot,
++            skin_winsys_get_window_handle(), data->wx + dx, data->wy + dy,
++            data->ww, data->wh, data->fbw, data->fbh, data->dpr, data->rot,
+             data->deleteExisting);
+     AFREE(data);
+ }
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/instance-window-title_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/instance-window-title_unittest.cpp
+new file mode 100644
+index 000000000..b3d81ca5e
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/test/android/instance-window-title_unittest.cpp
+@@ -0,0 +1,99 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/instance-window-title.h"
++
++#include <gtest/gtest.h>
++
++#include <cstring>
++#include <string>
++
++namespace {
++
++std::string title(const char* displayName,
++                  const char* avdName,
++                  size_t buffLen = 128) {
++    std::string buff(buffLen + 1, '#');  // '#' past the end catches overruns
++    const size_t len =
++            instance_window_title(displayName, avdName, &buff[0], buffLen);
++    EXPECT_EQ(buff[buffLen], '#');
++    EXPECT_EQ(len, strlen(buff.c_str()));
++    return buff.c_str();
++}
++
++// "方" is three bytes in UTF-8.
++const char kFang[] = "\xE6\x96\xB9";
++
++}  // namespace
++
++TEST(InstanceWindowTitle, DisplayName) {
++    EXPECT_EQ(title("\xE6\x96\xB9\xE8\x88\x9F", "mas_1"), "\xE6\x96\xB9\xE8\x88\x9F");
++    EXPECT_EQ(title("Daily", "mas_1"), "Daily");
++}
++
++TEST(InstanceWindowTitle, NoPortNoPrefix) {
++    const std::string t = title("Daily", "mas_1");
++    EXPECT_EQ(t.find("Android Emulator"), std::string::npos);
++    EXPECT_EQ(t.find(':'), std::string::npos);
++}
++
++TEST(InstanceWindowTitle, AvdNameWithoutDisplayName) {
++    EXPECT_EQ(title(nullptr, "mas_6"), "mas_6");
++    EXPECT_EQ(title("", "mas_6"), "mas_6");
++    EXPECT_EQ(title(" \t ", "mas_6"), "mas_6");
++}
++
++TEST(InstanceWindowTitle, LeadingBlanksDropped) {
++    EXPECT_EQ(title("  \tDaily", "mas_1"), "Daily");
++    // Only leading ones; the rest of the name is the user's.
++    EXPECT_EQ(title("My  phone ", "mas_1"), "My  phone ");
++}
++
++TEST(InstanceWindowTitle, NoNamesAtAll) {
++    EXPECT_EQ(title(nullptr, nullptr), "");
++    EXPECT_EQ(title("", nullptr), "");
++}
++
++TEST(InstanceWindowTitle, CutAt127Bytes) {
++    const std::string ascii(200, 'a');
++    EXPECT_EQ(title(ascii.c_str(), "mas_1"), std::string(127, 'a'));
++    EXPECT_EQ(title(ascii.c_str(), "mas_1", 1000), std::string(127, 'a'));
++    const std::string exact(127, 'b');
++    EXPECT_EQ(title(exact.c_str(), "mas_1"), exact);
++}
++
++TEST(InstanceWindowTitle, CutBetweenUtf8Characters) {
++    std::string fifty;
++    for (int i = 0; i < 50; ++i) {
++        fifty += kFang;  // 150 bytes
++    }
++    // 127 bytes would end inside the 43rd character: 42 characters remain.
++    std::string fortyTwo;
++    for (int i = 0; i < 42; ++i) {
++        fortyTwo += kFang;
++    }
++    EXPECT_EQ(title(fifty.c_str(), "mas_1"), fortyTwo);
++    // A smaller buffer cuts earlier, still between characters.
++    EXPECT_EQ(title(fifty.c_str(), "mas_1", 8), std::string(kFang) + kFang);
++    EXPECT_EQ(title(fifty.c_str(), "mas_1", 3), "");
++}
++
++TEST(InstanceWindowTitle, BufferEdges) {
++    char one[1] = {'x'};
++    EXPECT_EQ(instance_window_title("Daily", "mas_1", one, 1), 0u);
++    EXPECT_EQ(one[0], '\0');
++    char untouched[1] = {'x'};
++    EXPECT_EQ(instance_window_title("Daily", "mas_1", untouched, 0), 0u);
++    EXPECT_EQ(untouched[0], 'x');
++    EXPECT_EQ(instance_window_title("Daily", "mas_1", nullptr, 10), 0u);
++}
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+new file mode 100644
+index 000000000..83190b784
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -0,0 +1,295 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/lean-window-frame.h"
++
++#include <gtest/gtest.h>
++
++#include <vector>
++
++namespace lw = android::lean_window;
++using lw::Hit;
++
++namespace {
++
++// A 720x1312 guest screen under a 32 px title bar at 100%; the buttons take
++// the last 4 x 40 + 9 px.
++const lw::Layout kLayout = {/*width=*/720, /*height=*/1312,
++                            /*titleHeight=*/32, /*buttonsLeft=*/551,
++                            /*border=*/5, /*topBorder=*/4, /*corner=*/16};
++
++Hit at(int x, int y) {
++    return lw::hitTest(kLayout, x, y);
++}
++
++}  // namespace
++
++TEST(LeanWindowFrame, HitTestTitleBar) {
++    EXPECT_EQ(at(100, 16), Hit::Caption);
++    EXPECT_EQ(at(5, 4), Hit::Caption);          // just inside both bands
++    EXPECT_EQ(at(550, 31), Hit::Caption);       // last pixel before buttons
++    EXPECT_EQ(at(551, 16), Hit::Client);        // first button
++    EXPECT_EQ(at(714, 16), Hit::Client);        // close, left of the border
++    EXPECT_EQ(at(100, 32), Hit::Client);        // guest screen below
++}
++
++TEST(LeanWindowFrame, HitTestGuestScreen) {
++    EXPECT_EQ(at(360, 600), Hit::Client);
++    EXPECT_EQ(at(5, 600), Hit::Client);
++    EXPECT_EQ(at(714, 600), Hit::Client);
++    EXPECT_EQ(at(360, 1306), Hit::Client);
++}
++
++TEST(LeanWindowFrame, HitTestEdges) {
++    EXPECT_EQ(at(0, 600), Hit::Left);
++    EXPECT_EQ(at(4, 600), Hit::Left);
++    EXPECT_EQ(at(719, 600), Hit::Right);
++    EXPECT_EQ(at(715, 600), Hit::Right);
++    EXPECT_EQ(at(360, 1311), Hit::Bottom);
++    EXPECT_EQ(at(360, 1307), Hit::Bottom);
++    EXPECT_EQ(at(100, 0), Hit::Top);
++    EXPECT_EQ(at(100, 3), Hit::Top);
++    // Along the top edge the buttons stay buttons, up to the very top.
++    EXPECT_EQ(at(600, 0), Hit::Client);
++    // The right edge runs past the close button.
++    EXPECT_EQ(at(717, 20), Hit::Right);
++}
++
++TEST(LeanWindowFrame, HitTestCorners) {
++    EXPECT_EQ(at(0, 0), Hit::TopLeft);
++    EXPECT_EQ(at(15, 2), Hit::TopLeft);    // along the top edge
++    EXPECT_EQ(at(2, 15), Hit::TopLeft);    // along the left edge
++    EXPECT_EQ(at(16, 2), Hit::Top);
++    EXPECT_EQ(at(2, 16), Hit::Left);
++    EXPECT_EQ(at(719, 0), Hit::TopRight);  // over the close button
++    EXPECT_EQ(at(704, 3), Hit::TopRight);
++    EXPECT_EQ(at(703, 3), Hit::Client);    // close button, top edge
++    EXPECT_EQ(at(718, 15), Hit::TopRight);
++    EXPECT_EQ(at(0, 1311), Hit::BottomLeft);
++    EXPECT_EQ(at(15, 1308), Hit::BottomLeft);
++    EXPECT_EQ(at(2, 1296), Hit::BottomLeft);
++    EXPECT_EQ(at(2, 1295), Hit::Left);
++    EXPECT_EQ(at(719, 1311), Hit::BottomRight);
++    EXPECT_EQ(at(704, 1309), Hit::BottomRight);
++    EXPECT_EQ(at(703, 1309), Hit::Bottom);
++}
++
++TEST(LeanWindowFrame, HitTestOutside) {
++    EXPECT_EQ(at(-1, 10), Hit::Nowhere);
++    EXPECT_EQ(at(10, -1), Hit::Nowhere);
++    EXPECT_EQ(at(720, 10), Hit::Nowhere);
++    EXPECT_EQ(at(10, 1312), Hit::Nowhere);
++}
++
++TEST(LeanWindowFrame, HitTestScaled) {
++    // At 150% everything is half as big again.
++    const lw::Layout l = {1080, 1968, 48, 827, 8, 6, 24};
++    EXPECT_EQ(lw::hitTest(l, 300, 40), Hit::Caption);
++    EXPECT_EQ(lw::hitTest(l, 300, 48), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 826, 20), Hit::Caption);
++    EXPECT_EQ(lw::hitTest(l, 827, 20), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 7, 900), Hit::Left);
++    EXPECT_EQ(lw::hitTest(l, 8, 900), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 300, 5), Hit::Top);
++    EXPECT_EQ(lw::hitTest(l, 300, 6), Hit::Caption);
++}
++
++TEST(LeanWindowFrame, IsResize) {
++    for (Hit hit : {Hit::Left, Hit::Right, Hit::Top, Hit::TopLeft,
++                    Hit::TopRight, Hit::Bottom, Hit::BottomLeft,
++                    Hit::BottomRight}) {
++        EXPECT_TRUE(lw::isResize(hit)) << static_cast<int>(hit);
++    }
++    for (Hit hit : {Hit::Nowhere, Hit::Client, Hit::Caption}) {
++        EXPECT_FALSE(lw::isResize(hit)) << static_cast<int>(hit);
++    }
++}
++
++TEST(LeanWindowFrame, DragSameScale) {
++    const lw::Point p = lw::dragTopLeft({100, 200}, {150, 210}, 1.0, {450, 610},
++                                        1.0);
++    EXPECT_EQ(p.x, 400);
++    EXPECT_EQ(p.y, 600);
++    // Off to the left and above the screen origin.
++    const lw::Point q = lw::dragTopLeft({100, 200}, {150, 210}, 1.5, {-20, -5},
++                                        1.5);
++    EXPECT_EQ(q.x, -70);
++    EXPECT_EQ(q.y, -15);
++}
++
++TEST(LeanWindowFrame, DragOntoAnotherScale) {
++    // Grabbed 300 px right of the window's left edge at 100%; on a 150% screen
++    // the same point of the title bar is 450 px in, and stays under the cursor.
++    const lw::Point p = lw::dragTopLeft({0, 0}, {300, 16}, 1.0, {3000, 500},
++                                        1.5);
++    EXPECT_EQ(p.x, 3000 - 450);
++    EXPECT_EQ(p.y, 500 - 24);
++    // And back.
++    const lw::Point q = lw::dragTopLeft({2550, 476}, {3000, 500}, 1.5,
++                                        {1000, 300}, 1.0);
++    EXPECT_EQ(q.x, 1000 - 300);
++    EXPECT_EQ(q.y, 300 - 16);
++}
++
++TEST(LeanWindowFrame, DragBadScale) {
++    const lw::Point p = lw::dragTopLeft({0, 0}, {30, 10}, 0, {100, 100}, 2.0);
++    EXPECT_EQ(p.x, 70);
++    EXPECT_EQ(p.y, 90);
++}
++
++namespace {
++
++// A 9:16 guest screen 360x640 under a 32 px title bar, at (100, 100).
++const lw::Rect kStart = {100, 100, 460, 772};
++constexpr double kAspect = 360.0 / 640.0;
++
++lw::Rect resize(Hit hit, int dx, int dy, int minW = 1, int minH = 1) {
++    const lw::Point grab = {300, 400};
++    return lw::resizeRect(kStart, hit, grab, {grab.x + dx, grab.y + dy}, 32,
++                          kAspect, minW, minH);
++}
++
++void expectGuest(const lw::Rect& r, int width, int height) {
++    EXPECT_EQ(r.width(), width);
++    EXPECT_EQ(r.height() - 32, height);
++}
++
++}  // namespace
++
++TEST(LeanWindowFrame, ResizeRightKeepsAspectAndTopLeft) {
++    const lw::Rect r = resize(Hit::Right, 90, 0);
++    expectGuest(r, 450, 800);
++    EXPECT_EQ(r.left, 100);
++    EXPECT_EQ(r.top, 100);
++}
++
++TEST(LeanWindowFrame, ResizeLeftKeepsRightEdge) {
++    const lw::Rect r = resize(Hit::Left, -90, 0);
++    expectGuest(r, 450, 800);
++    EXPECT_EQ(r.right, 460);
++    EXPECT_EQ(r.top, 100);
++}
++
++TEST(LeanWindowFrame, ResizeBottomGrowsToTheRight) {
++    const lw::Rect r = resize(Hit::Bottom, 0, 160);
++    expectGuest(r, 450, 800);
++    EXPECT_EQ(r.left, 100);
++    EXPECT_EQ(r.top, 100);
++}
++
++TEST(LeanWindowFrame, ResizeTopKeepsBottomEdge) {
++    const lw::Rect r = resize(Hit::Top, 0, -160);
++    expectGuest(r, 450, 800);
++    EXPECT_EQ(r.bottom, 772);
++    EXPECT_EQ(r.left, 100);
++}
++
++TEST(LeanWindowFrame, ResizeCornerFollowsTheLongerPull) {
++    // Pulled further down than right: the height leads.
++    expectGuest(resize(Hit::BottomRight, 10, 160), 450, 800);
++    // Pulled further right: the width leads.
++    expectGuest(resize(Hit::BottomRight, 90, 10), 450, 800);
++    const lw::Rect r = resize(Hit::TopLeft, -90, -10);
++    expectGuest(r, 450, 800);
++    EXPECT_EQ(r.right, 460);
++    EXPECT_EQ(r.bottom, 772);
++    const lw::Rect s = resize(Hit::TopRight, 90, 0);
++    EXPECT_EQ(s.left, 100);
++    EXPECT_EQ(s.bottom, 772);
++    const lw::Rect t = resize(Hit::BottomLeft, -90, 0);
++    EXPECT_EQ(t.right, 460);
++    EXPECT_EQ(t.top, 100);
++}
++
++TEST(LeanWindowFrame, ResizeShrinks) {
++    expectGuest(resize(Hit::Right, -180, 0), 180, 320);
++    expectGuest(resize(Hit::Bottom, 0, -320), 180, 320);
++}
++
++TEST(LeanWindowFrame, ResizeStopsAtTheMinimum) {
++    // At least 200 wide and 168 high: 200 wide wins for a 9:16 screen.
++    const lw::Rect r = resize(Hit::Right, -1000, 0, 200, 168);
++    expectGuest(r, 200, 356);
++    const lw::Rect s = resize(Hit::Left, 1000, 0, 200, 168);
++    expectGuest(s, 200, 356);
++    EXPECT_EQ(s.right, 460);
++    // A landscape screen is held by its height.
++    const lw::Rect wide = lw::resizeRect({0, 0, 640, 392}, Hit::Bottom,
++                                         {0, 0}, {0, -1000}, 32, 640.0 / 360.0,
++                                         200, 168);
++    EXPECT_EQ(wide.height() - 32, 168);
++    EXPECT_EQ(wide.width(), 299);
++}
++
++TEST(LeanWindowFrame, ResizeIgnoresNonResizeHits) {
++    for (Hit hit : {Hit::Caption, Hit::Client, Hit::Nowhere}) {
++        const lw::Rect r = resize(hit, 50, 50);
++        EXPECT_EQ(r.left, kStart.left);
++        EXPECT_EQ(r.top, kStart.top);
++        EXPECT_EQ(r.right, kStart.right);
++        EXPECT_EQ(r.bottom, kStart.bottom);
++    }
++    const lw::Rect r = lw::resizeRect(kStart, Hit::Right, {0, 0}, {50, 0}, 32,
++                                      0.0, 1, 1);
++    EXPECT_EQ(r.right, kStart.right);
++}
++
++TEST(LeanWindowFrame, SystemMenuKeepsMinimizeAndClose) {
++    EXPECT_TRUE(lw::keepsSystemMenuItem(lw::kScMinimize));
++    EXPECT_TRUE(lw::keepsSystemMenuItem(lw::kScClose));
++    for (unsigned id : std::vector<unsigned>{lw::kScRestore, lw::kScMove, lw::kScSize,
++                        lw::kScMaximize, 0u, 0xF100u /*SC_KEYMENU*/}) {
++        EXPECT_FALSE(lw::keepsSystemMenuItem(id)) << std::hex << id;
++    }
++}
++
++TEST(LeanWindowFrame, SystemMenuItemsToDelete) {
++    // Windows' own menu: Restore, Move, Size, Minimize, Maximize, -, Close.
++    const std::vector<unsigned> standard = {
++            lw::kScRestore, lw::kScMove,    lw::kScSize, lw::kScMinimize,
++            lw::kScMaximize, 0,             lw::kScClose};
++    EXPECT_EQ(lw::systemMenuItemsToDelete(standard),
++              (std::vector<int>{4, 2, 1, 0}));
++    // What is left: Minimize, -, Close. Nothing more to delete.
++    EXPECT_EQ(lw::systemMenuItemsToDelete(
++                      {lw::kScMinimize, 0, lw::kScClose}),
++              std::vector<int>{});
++}
++
++TEST(LeanWindowFrame, SystemMenuSeparators) {
++    // Leading, trailing, doubled separators go.
++    EXPECT_EQ(lw::systemMenuItemsToDelete({0, lw::kScMinimize, 0, 0,
++                                           lw::kScClose, 0}),
++              (std::vector<int>{5, 3, 0}));
++    // A separator between a kept and a dropped item goes with it.
++    EXPECT_EQ(lw::systemMenuItemsToDelete(
++                      {lw::kScMinimize, 0, lw::kScMaximize, 0, lw::kScClose}),
++              (std::vector<int>{3, 2}));
++    EXPECT_EQ(lw::systemMenuItemsToDelete({lw::kScClose, 0, lw::kScMaximize}),
++              (std::vector<int>{2, 1}));
++    EXPECT_EQ(lw::systemMenuItemsToDelete({}), std::vector<int>{});
++}
++
++TEST(LeanWindowFrame, RefusedSysCommands) {
++    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMaximize));
++    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMaximize | 2));  // e.g. 0xF032
++    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMove));
++    EXPECT_TRUE(lw::refusesSysCommand(0xF012));  // SC_DRAGMOVE
++    EXPECT_TRUE(lw::refusesSysCommand(lw::kScSize));
++    EXPECT_TRUE(lw::refusesSysCommand(lw::kScSize | 8));  // bottom right
++    for (unsigned command : std::vector<unsigned>{lw::kScMinimize, lw::kScClose, lw::kScRestore,
++                             0xF100u /*SC_KEYMENU*/, 0xF090u /*SC_MOUSEMENU*/,
++                             0xF130u /*SC_TASKLIST*/}) {
++        EXPECT_FALSE(lw::refusesSysCommand(command)) << std::hex << command;
++    }
++}

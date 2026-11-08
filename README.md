@@ -12,7 +12,7 @@
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
-> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.38.2` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
+> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.39.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
 
 - [这是什么](#这是什么)
 - [适用环境](#适用环境)
@@ -31,9 +31,9 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由管理器的「补全组件」（或命令行 `tools\modavd.exe components fetch`）在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，已发布的 0.38.2 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服和《如鸢》国服（0.37.0 起）上实测，《阴阳师》的其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.39.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服和《如鸢》国服（0.37.0 起）上实测，《阴阳师》的其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
-版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.38.2`（构建号 mas-38）。
+版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.39.0`（构建号 mas-39）。
 
 这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)。
 
@@ -52,7 +52,7 @@
 
 ## 安装
 
-1. 从 [Releases](../../releases) 下载 `ModAVD-0.38.2-win-x64.zip`。
+1. 从 [Releases](../../releases) 下载 `ModAVD-0.39.0-win-x64.zip`。
 2. 右键「全部解压缩」（压缩包里没有外层文件夹，不要用「解压到当前文件夹」），把得到的文件夹放到一个只含英文、数字的路径，例如 `D:\ModAVD`。
 3. 双击文件夹里的 `ModAVD.exe`（管理器），点上方提示里的「补全组件」，选好下载源、同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。也可以在这个文件夹里运行 `tools\modavd.exe components fetch`。0.38.1 及更早的包里是双击「补全组件.bat」。
 4. 在 AUTO-MAS 的「模拟器管理」里点「管理模拟器」→「添加魔改 AVD（内测）」，选这个文件夹，检查通过后添加；也可以直接用包里的 `ModAVD.exe` 或 `tools\modavd.exe` 指向这个根目录。
@@ -76,7 +76,7 @@
   - QEMU 仓库（`platform/external/qemu`）里，改 QEMU 本体文件的、改带 GPL-2.0 文件头的文件的，按 GPL-2.0；改带 Apache-2.0 文件头的文件的（`android/`、`android-qemu2-glue/` 下的一部分），按 Apache License 2.0。逐个补丁的许可证见 [patches/BASE.md](patches/BASE.md)。
   - gfxstream 和 Crashpad 的补丁按 Apache License 2.0 发布，与它们本身相同。
 - **Release 里的程序**：含有 QEMU（GPL-2.0）、FFmpeg（GPL-2.0 或更新版本，静态链接）、Qt 6.5.3（LGPL-3.0）、GLib 和 libusb（LGPL-2.1）等第三方组件。`qemu-system` 等程序整体按 GPL-2.0 发布。每个组件的许可证见包里的 `LICENSES\NOTICE.txt`，摘要见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-- **源码**：同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里有完整的对应源码：编进程序的 24 个仓库在编译时的确切版本（每个仓库一个 `.tar.xz`，QEMU 仓库里含构建脚本）、FFmpeg / libvpx / libxml2 / pixman 的源码包、SeaBIOS 和 iPXE 源码、Qt 6.5.3 源码、`netsimd.exe` 静态链接的 GLib 2.82.2 及其构建模块和 netsim 源码、两份仓库清单（本仓库的 [manifests/](manifests/) 里也有）；0.36.0 起还有 `modavd-src-<提交>.tar.xz`，是 ModAVD 自己的程序（管理器和命令行、arm64 执行桥、宿主输入法，0.39.0 起还有截图库）的源码，按 AGPL-3.0-or-later 发布（截图库是 LGPL-3.0-or-later），`LICENSE` 和 `NOTICE` 在归档里；以及逐个说明这些文件的 `SOURCES.txt`。补丁在本仓库的 [patches/](patches/)，自己编译见文档站的[从源码构建](https://modavd.github.io/develop/build)。打好补丁的源码也放在 [ModAVDQemu](https://github.com/ModAVD/ModAVDQemu)、[ModAVDGfxstream](https://github.com/ModAVD/ModAVDGfxstream)、[ModAVDCrashpad](https://github.com/ModAVD/ModAVDCrashpad) 三个仓库：AOSP 的历史加上 ModAVD 的补丁，每一版一个 `release/0.<N>` 分支和 `v0.<N>.<P>` tag（0.36.0 是 `release/0.36`、`v0.36.0`），源码树和用 `patches/` 回放出来的相同。
+- **源码**：同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里有完整的对应源码：编进程序的 24 个仓库在编译时的确切版本（每个仓库一个 `.tar.xz`，QEMU 仓库里含构建脚本）、FFmpeg / libvpx / libxml2 / pixman 的源码包、SeaBIOS 和 iPXE 源码、Qt 6.5.3 源码、`netsimd.exe` 静态链接的 GLib 2.82.2 及其构建模块和 netsim 源码、两份仓库清单（本仓库的 [manifests/](manifests/) 里也有）；0.36.0 起还有 `modavd-src.tar.xz`（0.36.0 时叫 `modavd-src-<提交>.tar.xz`），是 ModAVD 自己的程序（管理器和命令行、arm64 执行桥、宿主输入法，0.39.0 起还有截图库）的源码，按 AGPL-3.0-or-later 发布（截图库是 LGPL-3.0-or-later），`LICENSE` 和 `NOTICE` 在归档里；以及逐个说明这些文件的 `SOURCES.txt`。补丁在本仓库的 [patches/](patches/)，自己编译见文档站的[从源码构建](https://modavd.github.io/develop/build)。打好补丁的源码也放在 [ModAVDQemu](https://github.com/ModAVD/ModAVDQemu)、[ModAVDGfxstream](https://github.com/ModAVD/ModAVDGfxstream)、[ModAVDCrashpad](https://github.com/ModAVD/ModAVDCrashpad) 三个仓库：AOSP 的历史加上 ModAVD 的补丁，每一版一个 `release/0.<N>` 分支和 `v0.<N>.<P>` tag（0.36.0 是 `release/0.36`、`v0.36.0`），源码树和用 `patches/` 回放出来的相同。
 - **Google 的组件**：adb 和系统镜像不在 Release 里，由管理器的「补全组件」或 `tools\modavd.exe components fetch` 从官方渠道下载，受《Android 软件开发套件许可协议》约束，下载前要你同意。
 
 ## 反馈

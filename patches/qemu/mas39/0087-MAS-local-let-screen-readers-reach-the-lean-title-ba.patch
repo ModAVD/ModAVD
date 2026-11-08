@@ -1,0 +1,75 @@
+From 338c89a6cbfcca650454c74af24905edfac2a316 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 4 Nov 2026 22:46:02 +0100
+Subject: [PATCH 87/98] MAS local: let screen readers reach the lean title bar
+
+The lean window's title bar is a child of the scroll area, in its top
+margin, outside the viewport. Qt's accessible interface for scroll areas
+lists only the viewport and the scroll bars, so screen readers and UI
+Automation saw none of the title bar's buttons. The lean container now
+gets a plain widget interface, which lists every child widget.
+
+Like the system's caption buttons, the title bar's buttons also show
+their tool tips while the window is not the active one.
+
+Refs ModAVD/ModAVD#58
+Refs ModAVD/ModAVD#59
+
+Change-Id: I4f9edb4a71027b58d485fed8ee362d0e6c20f369
+---
+ .../android/skin/qt/emulator-container.cpp    | 28 +++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 645af82f9..d69c08856 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -16,6 +16,8 @@
+ #include <qlist.h>        // for QList<>::iterator
+ #include <qnamespace.h>   // for WindowMinimized
+ #include <qwindowdefs.h>  // for WId
++#include <QAccessible>
++#include <QAccessibleWidget>
+ #include <QFlags>         // for QFlags
+ #include <QByteArray>      // for qgetenv
+ #include <QFrame>         // for QFrame
+@@ -69,6 +71,22 @@ class QStyle;
+ 
+ static constexpr int kEventBufferSize = 8;
+ 
++#if QT_CONFIG(accessibility)
++// The lean window's title bar sits in the scroll area's top margin, outside
++// its viewport. Qt's accessible interface for scroll areas lists only the
++// viewport and the scroll bars, so screen readers and UI Automation would not
++// find the title bar's buttons. A plain widget interface lists every child.
++static QAccessibleInterface* leanContainerAccessible(const QString& className,
++                                                     QObject* object) {
++    if (className != QLatin1String("EmulatorContainer") || !object ||
++        !object->isWidgetType()) {
++        return nullptr;
++    }
++    return new QAccessibleWidget(static_cast<QWidget*>(object),
++                                 QAccessible::Window);
++}
++#endif
++
+ #ifdef _WIN32
+ // The lean window's title bar and guest screen, as WindowsLeanFrame needs
+ // them, in device pixels.
+@@ -114,6 +132,16 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+     if (lean) {
+         setWindowFlags(kLeanWindowFlags);
+         setStyleSheet(QStringLiteral("EmulatorContainer { background: #20212D; }"));
++#if QT_CONFIG(accessibility)
++        static const bool accessibleInstalled = [] {
++            QAccessible::installFactory(leanContainerAccessible);
++            return true;
++        }();
++        (void)accessibleInstalled;
++#endif
++        // Like the system's caption buttons, the title bar's buttons show
++        // their tool tips while the window is not the active one.
++        setAttribute(Qt::WA_AlwaysShowToolTips);
+ #ifdef _WIN32
+         mLeanFrame = std::make_unique<WindowsLeanFrame>(
+                 [this] { return leanFrameGeometry(this, mEmulatorWindow); },
