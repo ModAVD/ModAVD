@@ -1,0 +1,80 @@
+From c4db3662c9d5f1237c79a5e4aeb5362830e15643 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 07:03:38 +0800
+Subject: [PATCH 96/98] tempfile: clean temporary cache overlays on normal exit
+
+The temporary raw cache is already removed at exit, but its same-name qcow2 overlay is not registered. Copy an owned path into the existing cleanup list without creating a file, and register the cache sidecar before the block layer creates it. This applies to all host platforms and leaves permanent caches and read-only overlay creation unchanged.
+---
+ android-qemu2-glue/main.cpp                   |  9 ++++++--
+ .../android-emu-base/android/utils/tempfile.c | 21 +++++++++++++++++--
+ .../android-emu-base/android/utils/tempfile.h |  4 ++++
+ 3 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/android-qemu2-glue/main.cpp b/android-qemu2-glue/main.cpp
+index 708fa1846..c74920aa0 100644
+--- a/android-qemu2-glue/main.cpp
++++ b/android-qemu2-glue/main.cpp
+@@ -2849,8 +2849,13 @@ extern "C" int main(int argc, char** argv) {
+     // Make sure there's a temp cache partition if there wasn't a permanent one
+     if ((!hw->disk_cachePartition_path ||
+          strcmp(hw->disk_cachePartition_path, "") == 0)) {
+-        str_reset(&hw->disk_cachePartition_path,
+-                  tempfile_path(tempfile_create()));
++        const char* cachePath = tempfile_path(tempfile_create());
++        if (!cachePath ||
++            !tempfile_register_path((std::string(cachePath) + ".qcow2").c_str())) {
++            android_panic("Could not register temporary cache files for cleanup");
++            return 1;
++        }
++        str_reset(&hw->disk_cachePartition_path, cachePath);
+         createEmptyCacheFile = true;
+     }
+ 
+diff --git a/android/android-emu-base/android/utils/tempfile.c b/android/android-emu-base/android/utils/tempfile.c
+index e68a40dcb..85e59b76b 100644
+--- a/android/android-emu-base/android/utils/tempfile.c
++++ b/android/android-emu-base/android/utils/tempfile.c
+@@ -121,9 +121,26 @@ tempfile_create_with_ext( const char* ext )
+     close(tempfd);
+     tempname = template;
+ #endif
+-    tempfile = malloc( sizeof(*tempfile) + strlen(tempname) + 1 );
++    tempfile = tempfile_register_path(tempname);
++    if (!tempfile) {
++        android_unlink(tempname);
++    }
++    return tempfile;
++}
++
++TempFile*
++tempfile_register_path(const char* path)
++{
++    TempFile* tempfile;
++    if (!path || !*path) {
++        return NULL;
++    }
++    tempfile = malloc(sizeof(*tempfile) + strlen(path) + 1);
++    if (!tempfile) {
++        return NULL;
++    }
+     tempfile->name = (char*)(tempfile + 1);
+-    strcpy( (char*)tempfile->name, tempname );
++    strcpy((char*)tempfile->name, path);
+ 
+     tempfile->next = _all_tempfiles;
+     _all_tempfiles = tempfile;
+diff --git a/android/android-emu-base/android/utils/tempfile.h b/android/android-emu-base/android/utils/tempfile.h
+index 1487b7e86..c4930d006 100644
+--- a/android/android-emu-base/android/utils/tempfile.h
++++ b/android/android-emu-base/android/utils/tempfile.h
+@@ -34,6 +34,10 @@ typedef struct TempFile   TempFile;
+ 
+ extern  TempFile*    tempfile_create( );
+ extern  TempFile*    tempfile_create_with_ext( const char* ext );
++// Register an owned path for exit cleanup without creating or opening a file.
++// The path is copied and may name a file that will be created later.
++// Returns NULL for an empty path or allocation failure.
++extern  TempFile*    tempfile_register_path(const char* path);
+ extern  const char*  tempfile_path( TempFile*  temp );
+ extern  void         tempfile_close( TempFile*  temp );
+ extern void tempfile_unref_and_close(const char* temp);

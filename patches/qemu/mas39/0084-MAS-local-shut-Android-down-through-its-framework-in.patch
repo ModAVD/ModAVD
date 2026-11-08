@@ -1,0 +1,161 @@
+From 61cb77da77d0c884b53be784a7e7014d77594a99 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 20:02:15 +0100
+Subject: [PATCH 84/98] MAS local: shut Android down through its framework in
+ the lean safe shutdown
+
+The lean toolbar's safe shutdown set sys.powerctl, which hands the
+shutdown to init directly: the shutdown broadcast is never sent and the
+foreground app is killed without being paused or stopped, perhaps
+halfway through rewriting a file. Run "svc power shutdown" instead, the
+framework's shutdown that the power menu uses. It needs no root.
+
+svc does not return while Android shuts down: adbd goes away and adb
+fails without printing anything. When svc refuses, it prints why and
+still exits with 0; then set sys.powerctl as before.
+
+The framework may wait up to 10 s for the shutdown broadcast and 10 s
+for the activities, so wait 25 s instead of 15 s for Android to power
+off, and move the guard from 25 s to 35 s to keep the last sync's 5 s
+and a margin for QEMU to stop. The sync before the shutdown request
+stays.
+
+Change-Id: I1fe1727fb3c1e016aa3ad9eacbe444d1b17e4984
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 81 ++++++++++++++++++-
+ .../src/android/skin/qt/emulator-qt-window.h  |  1 +
+ 2 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 7a968eaf1..829f5a72b 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -165,6 +165,14 @@ using android::emulation::AvdCompatibilityManager;
+ using android::emulation::FilePusher;
+ using android::emulation::ModavdImePipe;
+ 
++// How long the lean toolbar's safe shutdown waits for Android to power off.
++// Android's own shutdown may wait up to 10 s for the shutdown broadcast and
++// 10 s for the activities to stop before init stops the services and
++// unmounts; it usually takes 4-7 s in all. Then comes a last sync (up to 5 s)
++// and the quit; the guard kills the process if even that does not finish.
++static constexpr int kSafeShutdownPowerOffMs = 25000;
++static constexpr int kSafeShutdownGuardSec = 35;
++
+ // The adb callbacks of the lean toolbar's safe shutdown run on the
+ // AdbInterface looper and can complete after the window is gone (Qt tears it
+ // down once Android has powered off). They post to the window only while it
+@@ -853,7 +861,7 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+     QObject::connect(this, &EmulatorQtWindow::requestClose, this,
+                      &EmulatorQtWindow::slot_requestClose);
+     mSafeShutdownTimeout.setSingleShot(true);
+-    mSafeShutdownTimeout.setInterval(15000);
++    mSafeShutdownTimeout.setInterval(kSafeShutdownPowerOffMs);
+     QObject::connect(&mSafeShutdownTimeout, &QTimer::timeout, this, [this] {
+         if (mSafeShutdownState == SafeShutdownState::StoppingGuest) {
+             dwarning("Safe toolbar shutdown timed out; syncing guest");
+@@ -4709,7 +4717,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+         sSafeShutdownWindow = this;
+     }
+     dinfo("Safe toolbar shutdown: syncing the guest, then asking Android to power off");
+-    System::get()->waitAndKillSelf(25);
++    System::get()->waitAndKillSelf(kSafeShutdownGuardSec);
+     updateWindowTitle();
+     mSafeShutdownTimeout.start();
+     resumePausedVmForSafeShutdown();
+@@ -4759,7 +4767,72 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ }
+ 
++// The first line of what an adb command printed, trimmed; empty if it printed
++// nothing.
++static std::string firstOutputLine(
++        const android::emulation::OptionalAdbCommandResult& result) {
++    if (!result || !result->output) {
++        return {};
++    }
++    std::string line;
++    while (std::getline(*result->output, line)) {
++        const auto begin = line.find_first_not_of(" \t\r\n");
++        if (begin != std::string::npos) {
++            const auto end = line.find_last_not_of(" \t\r\n");
++            return line.substr(begin, end - begin + 1);
++        }
++    }
++    return {};
++}
++
++// Android's own shutdown, as its power menu runs it: apps get the shutdown
++// broadcast and the foreground activity is paused and stopped before init
++// stops everything. Setting sys.powerctl would go to init directly, which
++// kills the apps wherever they are, perhaps halfway through rewriting a file.
++// It needs no root. The command does not return: adbd goes away as Android
++// shuts down, and adb then fails without printing anything. When svc refuses,
++// it prints why (and still exits with 0); then init does it.
+ void EmulatorQtWindow::requestGuestPowerOff() {
++    auto* adb = *mAdbInterface;
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "svc", "power", "shutdown"},
++            [this](const android::emulation::OptionalAdbCommandResult& result) {
++                const bool timedOut = !result;
++                const std::string output = firstOutputLine(result);
++                AutoLock lock(safeShutdownLock());
++                if (sSafeShutdownWindow != this) {
++                    return;
++                }
++                QMetaObject::invokeMethod(
++                        this,
++                        [this, timedOut, output] {
++                            if (mSafeShutdownState !=
++                                SafeShutdownState::StoppingGuest) {
++                                return;
++                            }
++                            if (timedOut) {
++                                dinfo("Safe toolbar shutdown: Android is still shutting down");
++                                return;
++                            }
++                            if (!output.empty()) {
++                                dwarning("Safe toolbar shutdown: Android did not take the shutdown request ('%s'); asking init to power off",
++                                         output.c_str());
++                                requestInitPowerOff();
++                                return;
++                            }
++                            dinfo("Guest shutdown command accepted; waiting for Android to power off");
++                        },
++                        Qt::QueuedConnection);
++            },
++            kSafeShutdownPowerOffMs);
++    if (!command) {
++        dwarning("Safe toolbar shutdown command could not start; syncing guest");
++        startSafeShutdownSync();
++    }
++}
++
++// sys.powerctl is root-only; these userdebug images allow `su 0`.
++void EmulatorQtWindow::requestInitPowerOff() {
+     auto* adb = *mAdbInterface;
+     auto command = adb->runAdbCommand(
+             {"wait-for-device", "shell", "su", "0", "setprop", "sys.powerctl",
+@@ -4835,8 +4908,8 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+                         },
+                         Qt::QueuedConnection);
+             },
+-            // The window is gone and the 25 s guard is still far off: give a
+-            // sync with a lot of dirty data time to finish.
++            // The window is gone and the guard is still far off: give a sync
++            // with a lot of dirty data time to finish.
+             5000);
+     if (!command) {
+         safeShutdownSyncFinished();
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index f9dac7853..c63f83807 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -568,6 +568,7 @@ private:
+ 
+     void runAdbShellPowerDownAndQuit();
+     void requestGuestPowerOff();
++    void requestInitPowerOff();
+     void startSafeShutdownSync();
+     void startSessionEndSync();
+     void setVisibleExtent(QBitmap bitMap);
