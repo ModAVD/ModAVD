@@ -21,9 +21,10 @@
     # 发版隐私扫描的缓存（文件哈希 → 上次扫过干净）：只在本机，不能在仓库和发版输出里。空着就是 <TempRoot>\pubrel\privacy-cache.json；
     # 扫描器或规则一变整个作废，release.ps1 -NoPrivacyCache 全部重扫；-DraftRelease（真要上传）那一轮不读缓存、全部重扫
     PrivacyCache   = ''
-    # ModAVDManager、ModAVDHostIME 的工作克隆（只读 tag，先 git fetch upstream --tags）
+    # ModAVDManager、ModAVDHostIME、ModAVDExtras 的工作克隆（只读 tag，先 git fetch upstream --tags）
     ManagerRepo    = ''
     ImeRepo        = ''
+    ExtrasRepo     = ''
     # 源码基准目录：没变的源码归档逐个核对冻结的哈希后复用（做法见 tools\pubrel\README.md「外部输入」）
     Baseline       = ''
     # 已审核的说明和许可证目录（说明.txt、LICENSES\）

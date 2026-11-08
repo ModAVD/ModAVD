@@ -80,10 +80,11 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 | `ModAVD.exe`（管理器）、`tools\modavd.exe`（命令行、MCP），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接的 Go 运行时和标准库是 BSD-3-Clause；`ModAVD.exe` 的程序图标是同人创作，同上文「程序图标」。源码在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) |
 | `components\modavd-ime.apk`（宿主输入法），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi。源码在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) |
 | `sdk\emulator\resources\modavd\*`（arm64 执行桥：`libmodavd_bridge.so`、`libmodavd_gate.so`、`modavd_bridge.rc`），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；`libmodavd_gate.so` 静态链接的 Android NDK 的 LLVM libc++ / libc++abi 是 Apache-2.0 WITH LLVM-exception。源码在本仓库的 [bridge/](bridge/) |
+| `extras\modavd_extras.dll`（截图库），0.39.0 起 | LGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接 Microsoft 的 C 运行库。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) |
 
 `补全组件.bat` 那一行是 `37.2.10-mas30` 的情况。0.36.0 起，其中包根的 `.bat` 和 `tools\*.ps1`（源码在本仓库的 [package/](package/)）改按 AGPL-3.0-or-later 发布；见 README 的[许可证与源码](README.md#许可证与源码)。0.38.2 起包里不再有 `.bat`，`tools\` 下的脚本只剩装执行桥的 `modavd-bridge.ps1`，补全组件、收集问题信息由管理器和命令行做。
 
-最后三行是 ModAVD 自己的程序，源码都在同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里的 `modavd-src-<提交>.tar.xz`，`LICENSE` 和 `NOTICE` 在归档里；许可证全文是包里的 `LICENSES\AGPL-3.0.txt`。
+最后四行是 ModAVD 自己的程序，源码都在同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里的 `modavd-src-<提交>.tar.xz`，`LICENSE` 和 `NOTICE` 在归档里；许可证全文是包里的 `LICENSES\AGPL-3.0.txt`，截图库是 `LICENSES\LGPL-3.0.txt` 和它所补充的 `LICENSES\GPL-3.0.txt`。
 
 ## 不在包里的
 
