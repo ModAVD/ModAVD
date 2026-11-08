@@ -5,7 +5,7 @@
     "min_automas": "5.7.0",
     "changes": {
       "新增": [
-        "World of Airports 3.7.3 这类用新版 Unity（6000.3）做的、只有 arm64 版本的游戏能跑了：管理器和命令行开机时多挂一个 ARM 转译层补丁，客体 Vulkan 驱动补丁多修一处；按实例的实验开关「报告 GLES 3.2」让 Play 商店能装上。（[#131](https://github.com/ModAVD/ModAVD/issues/131)）",
+        "World of Airports 3.7.3（新版 Unity 6000.3、只有 arm64 版本）能跑了：管理器和命令行开机时多挂一个 ARM 转译层补丁，客体 Vulkan 驱动补丁多修一处；按实例的实验开关「报告 GLES 3.2」让 Play 商店能装上。（[#131](https://github.com/ModAVD/ModAVD/issues/131)）",
         "包里多了截图库 extras\\modavd_extras.dll（[ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) v0.1.1）：自动化工具可以从根目录的 extras\\ 载入它，直接读模拟器共享的画面，不经 adb。MAA、AUTO-MAS 还没有接入，现在的截图方式照旧能用。"
       ],
       "变更": [
@@ -17,7 +17,7 @@
         "实例的 config.ini 读不到或没写 abi.type 时，客体 Vulkan 驱动补丁不再被跳过。（[#130](https://github.com/ModAVD/ModAVD/issues/130)）"
       ],
       "说明": [
-        "「报告 GLES 3.2」只改报给应用的版本，实际渲染还是 GLES 3.1：走 Vulkan 的游戏能用，真要 GLES 3.2 渲染的应用装得上、打不开。默认关，有问题先关掉。",
+        "「报告 GLES 3.2」只改报给应用的版本，实际渲染还是 GLES 3.1：走 Vulkan 的游戏能用，真要 GLES 3.2 渲染的应用装得上、打不开。默认关，只在要用的实例上开，有问题先关掉；真正支持 GLES 3.2 由 [#152](https://github.com/ModAVD/ModAVD/issues/152) 跟着。",
         "这次的磁盘读写改动没有让明日方舟下资源变快（回归里约 8.9 MB/s，和以前差不多），下载慢的问题还在查。（[#35](https://github.com/ModAVD/ModAVD/issues/35)）"
       ]
     }
