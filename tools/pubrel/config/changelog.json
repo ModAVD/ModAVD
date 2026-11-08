@@ -1,5 +1,28 @@
 [
   {
+    "version": "v0.39.0",
+    "build": 39,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "World of Airports 3.7.3 这类用新版 Unity（6000.3）做的、只有 arm64 版本的游戏能跑了：管理器和命令行开机时多挂一个 ARM 转译层补丁，客体 Vulkan 驱动补丁多修一处；按实例的实验开关「报告 GLES 3.2」让 Play 商店能装上。（[#131](https://github.com/ModAVD/ModAVD/issues/131)）",
+        "包里多了截图库 extras\\modavd_extras.dll（[ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) v0.1.1）：自动化工具可以从根目录的 extras\\ 载入它，直接读模拟器共享的画面，不经 adb。MAA、AUTO-MAS 还没有接入，现在的截图方式照旧能用。"
+      ],
+      "变更": [
+        "模拟器重新编译（mas-38 到 mas-39）：Windows 上一次读写的多段缓冲首尾相接时，直接一次读写，不再先复制或逐段调用（[#126](https://github.com/ModAVD/ModAVD/pull/126)）；gfxstream、Crashpad 没变。",
+        "包里的管理器和命令行升到 0.6.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases)；开机进度里的「客体 Vulkan 修复」改叫「客体库补丁」。"
+      ],
+      "修复": [
+        "不用永久 cache 时（disk.cachePartition=no 或 -no-cache），正常关机后临时目录里不再留下 cache 的 .qcow2 写层。（[#123](https://github.com/ModAVD/ModAVD/pull/123)）",
+        "实例的 config.ini 读不到或没写 abi.type 时，客体 Vulkan 驱动补丁不再被跳过。（[#130](https://github.com/ModAVD/ModAVD/issues/130)）"
+      ],
+      "说明": [
+        "「报告 GLES 3.2」只改报给应用的版本，实际渲染还是 GLES 3.1：走 Vulkan 的游戏能用，真要 GLES 3.2 渲染的应用装得上、打不开。默认关，有问题先关掉。",
+        "这次的磁盘读写改动没有让明日方舟下资源变快（回归里约 8.9 MB/s，和以前差不多），下载慢的问题还在查。（[#35](https://github.com/ModAVD/ModAVD/issues/35)）"
+      ]
+    }
+  },
+  {
     "version": "v0.38.2",
     "build": 38,
     "min_automas": "5.7.0",
@@ -104,37 +127,6 @@
       "说明": [
         "点 × 以后，模拟器进程还会在后台运行 5–20 秒（安卓在关机），任务管理器里还能看到它，请不要结束它。这段时间里用管理器或命令行重开同一台，会等它关完再开机。",
         "Windows 标题栏上会多出一个灰色、点不了的最大化按钮，× 的悬停提示是系统的「关闭」；以后改成自己画标题栏（[#58](https://github.com/ModAVD/ModAVD/issues/58)）。没有窗口的实例（例如 AUTO-MAS 后台运行的）不受这次改动影响。"
-      ]
-    }
-  },
-  {
-    "version": "v0.36.0",
-    "build": 36,
-    "min_automas": "5.7.0",
-    "changes": {
-      "新增": [
-        "只有 arm64 版本、带加固的游戏可以跑起来了（先验的是《阴阳师》）：包里多了一个执行桥，装进实例以后，游戏加固库装在系统库里的钩子能正确执行并返回。不修改游戏的任何文件，也不修改安卓自带的转译层。",
-        "执行桥不用自己装：用管理器 ModAVD.exe 或命令行 tools\\modavd.exe 开机时，实例会自动装上（新建的和已有的都一样，第一次要多关机再开机一两次，约 1–2 分钟）。只用 AUTO-MAS 开机的实例暂时不会自动装，用管理器开一次机就装上。装过桥的实例照常用 AUTO-MAS 开机，桥一直在。",
-        "执行桥只对《阴阳师》的各渠道包生效：官服、雷电 / MuMu 下载的官服、bilibili、华为、OPPO、vivo、应用宝。别的应用一启动就回到原来的转译层，和没装桥一样。",
-        "包根多了实例管理器 ModAVD.exe（双击打开，新建、设置、开关实例，看画面、装 APK、看日志）和命令行 tools\\modavd.exe（也能当 MCP 服务器给 AI 助手用）。和 AUTO-MAS 管的是同一批实例。",
-        "数据盘可以改大，游戏数据不动：用命令行 tools\\modavd.exe 的 set 命令（modavd help set 看用法），下次开机生效，只能改大。",
-        "用管理器 ModAVD.exe 或命令行 tools\\modavd.exe 开机的实例，会自动装上宿主输入法并设成默认输入法：在模拟器窗口里点到输入框，就能直接用 Windows 输入法打中文等文字。默认输入法只在第一次装好时改一次，而且只替换镜像自带的键盘，之后换成别的输入法不会被改回。用 AUTO-MAS 开机的实例暂时不会自动装。",
-        "装了执行桥的实例，图形命令改走共享内存（asg）传给电脑显卡，不再经内核管道逐条写入：《阴阳师》庭院从 44–48 fps 提到 60 fps，战斗约 57 fps。装桥后下次冷启动生效，卸桥时改回；别的实例不变。"
-      ],
-      "变更": [
-        "以后新建的实例少占约 0.7 GB 磁盘：建数据盘时 inode 最多 1,048,576 个，64 GB 分区的 inode 表从 1024 MiB 降到 256 MiB。已有实例不变。（[#6](https://github.com/ModAVD/ModAVD/issues/6)）",
-        "ModAVD 自己的程序和随包脚本（管理器、命令行、arm64 执行桥、宿主输入法、补全组件和问题收集等脚本）都按 AGPL-3.0-or-later 发布（随包脚本以前是 Apache-2.0），源码在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)、[ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) 两个仓库和 ModAVD 仓库的 [package](https://github.com/ModAVD/ModAVD/tree/main/package)、[bridge](https://github.com/ModAVD/ModAVD/tree/main/bridge) 目录，这一版的源码也都在 Release 的附件里。"
-      ],
-      "修复": [
-        "以后按 16 GB 建的数据盘可以完整地改大。之前的版本按 16 GB 及以下建的盘结构有缺陷，只能改到约 30 GB。",
-        "修好模拟器偶尔整个退出的问题：adb 断开又重连的那一下（例如实例重启后），模拟器注销网络监听时可能读到空指针而崩溃。这是官方模拟器代码里的问题，以前的版本都有，发版前回归里遇到一次。"
-      ],
-      "说明": [
-        "退回更早的版本之前，请先在装过桥的实例上把桥卸掉，见「怎么更新」。不先卸可能让那台实例跑不了任何只有 arm64 版本的应用，而且界面上看不出来。",
-        "arm64 执行桥只在《阴阳师》官服上实测过；其他渠道包是同一个游戏、同一套加固，一并放进了名单。其它只有 arm64 版本的游戏机理相同，要逐个验证后才会加进清单。",
-        "0.36.0 之前按 16 GB 及以下建的实例，数据盘只能改到约 30 GB，更大要新建实例再搬游戏。管理器的设置里还没有数据盘大小这一项，要用命令行改。",
-        "装了宿主输入法的实例带窗口时，应用自己收起输入框以后（例如聊天框点「发送」后输入框消失），窗口仍停在打字状态，键盘上的字母、数字键不会传给游戏；回一下桌面再切回来即可恢复。",
-        "《阴阳师》走菜单（探索、御魂选层等）约 44 fps，进出战斗读条时会停顿 1 秒上下：这是游戏主逻辑在 arm64 转译下的开销，不是显卡或磁盘。同一台电脑上开着别的模拟器时更明显（实测同机三台模拟器挂机时庭院和战斗约 50 fps）。"
       ]
     }
   }
