@@ -108,6 +108,5 @@ Issues 是公开的，谁都能下载附件。问题包里有日志、截图，�
 
 ## 图标与美术
 
-- `assets/` 下的图片（横幅、头像、社交预览图），以及编进程序里的图标（`emulator.exe`、`emulator-check.exe`、`qemu-system-x86_64*.exe` 的程序图标和窗口图标），都是同人创作，**不在本仓库的 Apache-2.0 许可范围内**，也不随本项目的任何其他许可证授权。
-- 画中角色是《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有。
+- `assets/` 下的图片（横幅、头像、社交预览图），以及编进程序里的图标（`emulator.exe`、`emulator-check.exe`、`qemu-system-x86_64*.exe` 的程序图标和窗口图标），是 ModAVD 自己的图标和美术，**不在本仓库的 Apache-2.0 许可范围内**，也不随本项目的任何其他许可证授权。
 - 如有版权问题，请通过 [Issues](https://github.com/ModAVD/ModAVD/issues) 或邮件 qiyinxi@foxmail.com 联系，我们会立即处理。

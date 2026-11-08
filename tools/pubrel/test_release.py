@@ -662,26 +662,29 @@ class ReleaseChecks(unittest.TestCase):
     def test_texts_extended_and_every_package_file_named(self):
         tree = self.folder()
         sep = "=" * 59
-        def entry(lib, files):
-            return "\n".join([sep, "Notices for file(s):", *files, f"The notices is included for the library: {lib}", "", sep, "body", "", ""])
+        def entry(lib, files, body="body"):
+            return "\n".join([sep, "Notices for file(s):", *files, f"The notices is included for the library: {lib}", "", sep, body, "", ""])
+        # the reviewed NOTICE calls the icon fan art, in Part 1 and in its own entry (ICON_NOTICE_EDITS)
+        icon_ref, _ = release.ICON_NOTICE_EDITS[0]
+        icon_body = "The icon (from qemu as changed by\n" + release.ICON_NOTICE_EDITS[2][0] + "\nNot licensed."
         # the reviewed texts still name the batch files and scripts the package no longer ships (NOTICE_GONE_FILES)
         gone = ["tools/fetch-components.ps1", "tools/collect-info.ps1", "补全组件.bat", "收集问题信息.bat"]
         icon_files, script_files = ["./emulator.exe"], [*(f"(package root) {n}" for n in gone), "(package root) 说明.txt",
                                                          "(package root) LICENSES/NOTICE.txt", "(package root) LICENSES/NOTICE.csv"]
-        notice = ("header\n\n" + entry("ModAVD program icon (fan art)", icon_files) +
+        notice = ("header: " + icon_ref + "\n\n" + entry(release.ICON_ENTRY_OLD, icon_files, icon_body) +
                   entry("ModAVD scripts and documents", script_files) + "#" * 79 + "\n# PART 3. Full license texts\n")
         (tree / "LICENSES").mkdir()
         (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
         rows = [["External Library Name", "Link to License", "License Name", "Binaries using the license", "URL", "ModAVD note"],
-                ["ModAVD program icon (fan art)", "", "Not licensed (see text)", " ".join(icon_files), "", "a, quoted note"],
+                [release.ICON_ENTRY_OLD, "", "Not licensed (see text)", " ".join(icon_files), "", "a, quoted note"],
                 ["ModAVD scripts and documents", "", "AGPL-3.0-or-later (scripts and batch files) / Apache-2.0 (documents)",
                  " ".join(script_files), "", ""]]
         (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "LICENSES/Apache-2.0.txt").write_text("license text", encoding="utf-8")
         # the reviewed 说明.txt has each passage README_EDITS rewrites
-        step, trouble, licence = (old for old, _ in release.README_EDITS)
+        step, trouble, licence, icon = (old for old, _ in release.README_EDITS)
         readme = ("安装\n\n1. 解压。\n\n" + step + "\n3. 新建实例。\n\n====================\n出问题怎么办\n====================\n\n" +
-                  trouble + "\n====================\n许可证\n====================\n\n" + licence + "AGPL-3.0-or-later 发布。\n")
+                  trouble + "\n====================\n许可证\n====================\n\n" + licence + "AGPL-3.0-or-later 发布。\n" + icon)
         (tree / "说明.txt").write_text(readme, encoding="utf-8")
         shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1", release.EXTRAS_DLL,
                    "sdk/emulator/emulator.exe", *(f"sdk/emulator/resources/modavd/{n}" for n in
@@ -702,7 +705,11 @@ class ReleaseChecks(unittest.TestCase):
         release.extend_texts(tree, "go1.26.5")
         release.check_notice_coverage(tree)
         text = (tree / "LICENSES/NOTICE.txt").read_text(encoding="utf-8")
-        self.assertIn("(package root) ModAVD.exe\nThe notices is included for the library: ModAVD program icon (fan art)", text)
+        self.assertIn("(package root) ModAVD.exe\nThe notices is included for the library: ModAVD program icon\n", text)
+        self.assertIn('header: see "ModAVD program icon" in Part 2.\n', text)
+        self.assertIn("as changed by\nModAVD) is ModAVD's own icon.\n\nNot licensed.", text)
+        for old in ["fan art", "Eyjafjalla", "Hypergryph"]:
+            self.assertNotIn(old, text)
         self.assertIn("Go go1.26.5 (runtime and standard library)", text)
         self.assertLess(text.index("ModAVD arm64 execution bridge"), text.index("# PART 3."))
         # the extras DLL: its own entry, LGPL-3.0-or-later with both texts it needs
@@ -712,7 +719,7 @@ class ReleaseChecks(unittest.TestCase):
             self.assertIn(part, extras)
         self.assertNotIn("{{", text)
         csv_rows = list(release.csv.reader(io.StringIO((tree / "LICENSES/NOTICE.csv").read_text(encoding="utf-8"))))
-        self.assertEqual(csv_rows[1][5], "a, quoted note")
+        self.assertEqual([csv_rows[1][0], csv_rows[1][5]], [release.ICON_ENTRY, release.ICON_CSV_NOTE])
         self.assertTrue(csv_rows[1][3].endswith("(package root) ModAVD.exe"))
         self.assertEqual(len(csv_rows), 7)
         self.assertEqual(csv_rows[6][2:4], ["LGPL-3.0-or-later", "(package root) extras/modavd_extras.dll"])
@@ -728,6 +735,7 @@ class ReleaseChecks(unittest.TestCase):
         shown = (tree / "说明.txt").read_text(encoding="utf-8")
         self.assertIn("管理器和命令行", shown)
         self.assertNotIn(".bat", shown)
+        self.assertNotIn("同人", shown)
         for _, new in release.README_EDITS:
             self.assertEqual(shown.count(new), 1)
         self.assertIn("tools\\modavd.exe components fetch", shown)
@@ -742,9 +750,22 @@ class ReleaseChecks(unittest.TestCase):
                 (tree / "说明.txt").write_text(broken, encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "说明.txt: the passage " + re.escape(repr(old.splitlines()[0]))):
                     release.extend_texts(tree, "go1.26.5")
-        # a file to take out that the reviewed texts do not name (any more): refuse rather than guess, in either text
+        # an icon passage missing or twice in NOTICE.txt, or the icon entry missing from NOTICE.csv: refuse
         (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "说明.txt").write_text(readme, encoding="utf-8")
+        for old, _ in release.ICON_NOTICE_EDITS:
+            for broken in [notice.replace(old, "\n"), notice + old]:
+                (tree / "LICENSES/NOTICE.txt").write_text(broken, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "NOTICE.txt: the passage " + re.escape(repr(old.strip().splitlines()[0]))):
+                    release.extend_texts(tree, "go1.26.5")
+        (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
+        rows_icon = [list(r) for r in rows]
+        rows_icon[1][0] = release.ICON_ENTRY
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows_icon), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "NOTICE.csv: entry 'ModAVD program icon \\(fan art\\)'"):
+            release.extend_texts(tree, "go1.26.5")
+        # a file to take out that the reviewed texts do not name (any more): refuse rather than guess, in either text
+        (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "LICENSES/NOTICE.txt").write_text(notice.replace("(package root) tools/collect-info.ps1\n", ""), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "NOTICE.txt.*collect-info.ps1"):
             release.extend_texts(tree, "go1.26.5")

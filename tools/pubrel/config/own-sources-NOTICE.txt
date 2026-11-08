@@ -36,10 +36,9 @@ Exceptions and third-party parts:
     it is not built into ModAVD.exe or modavd.exe.
   - The icons ModAVDManager/cmd/modavd-gui/modavd.ico, rsrc_windows_amd64.syso
     (the same icon as a Windows resource) and the images in
-    ModAVDManager/internal/ui/web/assets/ are fan art of Eyjafjalla from
-    Arknights; the character is copyright Shanghai Hypergryph Network
-    Technology Co., Ltd. They are not covered by the AGPL or any other license
-    here, and no license to them is granted.
+    ModAVDManager/internal/ui/web/assets/ are ModAVD's own icon. They are not
+    covered by the AGPL or any other license here, and no license to them is
+    granted.
   - ModAVD/bridge/nbshim/jni/native_bridge_shim.cc declares the
     NativeBridgeCallbacks structure following AOSP libnativebridge's
     native_bridge.h (Apache License 2.0), so that libnativebridge and the
@@ -80,8 +79,8 @@ https://github.com/ModAVD/ModAVD/tree/main/package
   - ModAVDManager/internal/avd/testdata/instances_ref.py 复制自 AUTO-MAS，版权归
     AUTO-MAS 的作者，按 AGPL-3.0-or-later 许可；只供测试运行，不编进程序。
   - 管理器的图标（modavd.ico、rsrc_windows_amd64.syso 和 internal/ui/web/assets/
-    下的图片）是《明日方舟》艾雅法拉的同人创作，角色版权归上海鹰角网络所有，不在
-    AGPL 或这里任何其他许可证的范围内，也不授予任何许可。
+    下的图片）是 ModAVD 自己的图标，不在 AGPL 或这里任何其他许可证的范围内，也不
+    授予任何许可。
   - native_bridge_shim.cc 里的 NativeBridgeCallbacks 结构体按 AOSP libnativebridge
     的 native_bridge.h（Apache License 2.0）的布局声明。
   - libmodavd_gate.so 静态链接 NDK 的 LLVM libc++ / libc++abi（Apache-2.0 WITH

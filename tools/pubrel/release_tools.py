@@ -49,7 +49,7 @@ LGPL_TEXTS = {"LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee0
 # What shipped after the P3 review of the NOTICE and 说明.txt (see extend_texts): files added to entries already
 # there, the entries appended to Part 2 (NOTICE.txt / NOTICE.csv), and a section for 说明.txt.
 NOTICE_MORE_FILES = {
-    "ModAVD program icon (fan art)": ["(package root) ModAVD.exe"],
+    "ModAVD program icon": ["(package root) ModAVD.exe"],  # named so by ICON_NOTICE_EDITS
     "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1"],
 }
 # Files the reviewed NOTICE still names but the package no longer ships: fetching the components, collecting a problem
@@ -80,7 +80,23 @@ README_EDITS = [
      "（或者在这个文件夹里运行 tools\\modavd.exe collect-info），桌面上会生成一个问题包 zip。\n"),
     ("ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥、宿主输入法、补全组件和问题收集脚本）按\n",
      "ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按\n"),
+    ("程序图标是同人创作（《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有），\n不随本包的任何许可证授权。\n",
+     "程序图标是 ModAVD 自己的图标，不随本包的任何许可证授权。\n"),
 ]
+# The program icon is ModAVD's own; the reviewed NOTICE called it fan art. Its passages that said so and what they say
+# now, applied first in extend_texts, each old passage exactly once; in NOTICE.csv the entry gets ICON_ENTRY as its name
+# and ICON_CSV_NOTE as its note.
+ICON_ENTRY_OLD, ICON_ENTRY = "ModAVD program icon (fan art)", "ModAVD program icon"
+ICON_NOTICE_EDITS = [
+    (f'see "{ICON_ENTRY_OLD}" in Part 2.', f'see "{ICON_ENTRY}" in Part 2.'),
+    (f"\nThe notices is included for the library: {ICON_ENTRY_OLD}\n",
+     f"\nThe notices is included for the library: {ICON_ENTRY}\n"),
+    ("ModAVD) is a fan-made image of the\ncharacter Eyjafjalla from the game Arknights. The character is copyright\n"
+     "Shanghai Hypergryph Network Technology Co., Ltd. (Hypergryph).\n",
+     "ModAVD) is ModAVD's own icon.\n"),
+]
+ICON_CSV_NOTE = ("Added by ModAVD: missing from the AOSP-generated notices. The program icon images are ModAVD's own icon; "
+                 "not licensed under Apache-2.0, the GPL or any other license here.")
 # The Go programs come from the ModAVDManager release ZIP (--manager), checked against release/<version>.SHA256SUMS.txt
 # at tag v<version> of a ModAVDManager checkout (--manager-repo): path in the ZIP -> package path.
 MODAVD_FILES = {"tools/modavd.exe": "tools/modavd.exe", "ModAVD.exe": "ModAVD.exe"}
@@ -706,12 +722,16 @@ def render_csv(rows):
 
 
 def extend_texts(dest, go):
-    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: NOTICE_GONE_FILES out
-    of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
+    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: ICON_NOTICE_EDITS
+    (and the icon entry's name and note in NOTICE.csv), NOTICE_GONE_FILES out of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
     (`go`: the Go version the manager was built with), README_EDITS in 说明.txt and config/readme-tools.txt before its
     troubleshooting section. Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
+    for old, new in ICON_NOTICE_EDITS:
+        if text.count(old) != 1:
+            raise ValueError(f"NOTICE.txt: the passage {old.strip().splitlines()[0]!r} not found exactly once")
+        text = text.replace(old, new)
     for lib, files in NOTICE_GONE_FILES.items():
         anchor = f"\nThe notices is included for the library: {lib}\n"
         if text.count(anchor) != 1:
@@ -741,6 +761,10 @@ def extend_texts(dest, go):
     if render_csv(rows) != original:
         raise ValueError("NOTICE.csv does not read back the way it was written; refusing to rewrite it")
     name_col, files_col = rows[0].index("External Library Name"), rows[0].index("Binaries using the license")
+    hits = [r for r in rows[1:] if r[name_col] == ICON_ENTRY_OLD]
+    if len(hits) != 1:
+        raise ValueError(f"NOTICE.csv: entry {ICON_ENTRY_OLD!r} not found exactly once")
+    hits[0][name_col], hits[0][rows[0].index("ModAVD note")] = ICON_ENTRY, ICON_CSV_NOTE
     for lib, files in NOTICE_GONE_FILES.items():
         hits = [r for r in rows[1:] if r[name_col] == lib]
         if len(hits) != 1:

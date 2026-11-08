@@ -46,7 +46,7 @@ The notices is included for the library: ModAVD manager and command line (modavd
 ModAVD.exe (the instance manager) and tools\modavd.exe (the command line and
 MCP server), written in Go by the ModAVD project. Both contain the Go runtime
 and standard library (see the next entry); the icon of ModAVD.exe is covered
-by "ModAVD program icon (fan art)" above. Source code:
+by "ModAVD program icon" above. Source code:
 https://github.com/ModAVD/ModAVDManager; the source of this build is
 ModAVDManager in modavd-src.tar.xz, in the sources ZIP of the same GitHub
 Release.

@@ -45,6 +45,6 @@ adb 与 Android 系统镜像由管理器的「补全组件」或 `tools\modavd.e
 
 `SHA256SUMS.txt` 记录上述全部附件的 SHA-256。请核对后再安装。
 ModAVD 自己的程序和随包脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按 AGPL-3.0-or-later 发布，源码在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)（管理器、命令行，补全组件和问题收集也在这里）、[ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)（宿主输入法）和本仓库的 [package/](https://github.com/ModAVD/ModAVD/tree/main/package)（装执行桥的脚本）、[bridge/](https://github.com/ModAVD/ModAVD/tree/main/bridge)（执行桥），这一版程序的源码也在源码包的 `modavd-src.tar.xz` 里，随包脚本本身就是源码；截图库 `extras\modavd_extras.dll` 按 LGPL-3.0-or-later 发布，源码在 [ModAVDExtras](https://github.com/ModAVD/ModAVDExtras)，也在同一个归档里；文档按 Apache-2.0；模拟器和补丁按所用第三方许可证发布。见包内 `LICENSES/` 和仓库 `patches/BASE.md`。
-程序图标为《明日方舟》艾雅法拉的同人创作，角色版权归上海鹰角网络所有，不在上述许可证范围内。
+程序图标是 ModAVD 自己的图标，不在上述许可证范围内。
 
 [已有 Mirror酱 CDK？前往 Mirror酱 高速下载](https://mirrorchyan.com/zh/projects?rid=ModAVD&source=modavdgh-release)

@@ -67,9 +67,9 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 - Microsoft Visual C++ 2022 运行库 14.42.34433（根目录和 `qemu\windows-x86_64\` 下的 `concrt140`、`msvcp140*`、`vccorlib140`、`vcruntime140*`）；
 - `lib64\gles_angle\d3dcompiler_47.dll`（文件版本 10.0.22621.755，Direct3D 着色器编译器，随 AOSP 的 ANGLE 预编译件原样附带）。依据是 Windows SDK 许可条款第 2.a 节「Distributable Code」：列在 REDIST.TXT 清单上的文件可以随自己的程序以目标代码形式分发；清单在许可条款给出的 http://go.microsoft.com/fwlink/?LinkId=524842 。这里只引用条款和清单地址，没有附原文。
 
-## 程序图标（同人创作）
+## 程序图标
 
-`emulator.exe`、`emulator-check.exe`、`qemu\windows-x86_64\qemu-system-x86_64.exe`、`qemu-system-x86_64-headless.exe` 里编进去的程序图标和窗口图标，是 ModAVD 换上的同人创作图像，画的是《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有。这些图像**不随 Apache-2.0、GPL 或本包里的任何其他许可证授权**。见 `NOTICE.txt` 第 2 部分「ModAVD program icon (fan art)」和仓库 README 的「图标与美术」。
+`emulator.exe`、`emulator-check.exe`、`qemu\windows-x86_64\qemu-system-x86_64.exe`、`qemu-system-x86_64-headless.exe` 里编进去的程序图标和窗口图标，是 ModAVD 换上的自己的图标。这些图像**不随 Apache-2.0、GPL 或本包里的任何其他许可证授权**。见 `NOTICE.txt` 第 2 部分的程序图标条目和仓库 README 的「图标与美术」。
 
 ## 包根目录的其他文件
 
@@ -77,7 +77,7 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 |---|---|
 | `components\de.jrpie.android.launcher_57.apk`（µLauncher 0.2.12，F-Droid 发布的原包） | MIT；按它的构建文件，APK 里还有 AndroidX、Material Components、Kotlin 标准库、kotlinx.serialization，都是 Apache-2.0 |
 | `补全组件.bat`、`收集问题信息.bat`、`tools\*.ps1`、`说明.txt`、`LICENSES\NOTICE.*` | Apache-2.0，Copyright 2026 qiyinxi |
-| `ModAVD.exe`（管理器）、`tools\modavd.exe`（命令行、MCP），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接的 Go 运行时和标准库是 BSD-3-Clause；`ModAVD.exe` 的程序图标是同人创作，同上文「程序图标」。源码在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) |
+| `ModAVD.exe`（管理器）、`tools\modavd.exe`（命令行、MCP），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接的 Go 运行时和标准库是 BSD-3-Clause；`ModAVD.exe` 的程序图标同上文「程序图标」。源码在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) |
 | `components\modavd-ime.apk`（宿主输入法），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi。源码在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) |
 | `sdk\emulator\resources\modavd\*`（arm64 执行桥：`libmodavd_bridge.so`、`libmodavd_gate.so`、`modavd_bridge.rc`），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；`libmodavd_gate.so` 静态链接的 Android NDK 的 LLVM libc++ / libc++abi 是 Apache-2.0 WITH LLVM-exception。源码在本仓库的 [bridge/](bridge/) |
 | `extras\modavd_extras.dll`（截图库），0.39.0 起 | LGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接 Microsoft 的 C 运行库。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) |
