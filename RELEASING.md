@@ -24,8 +24,10 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 默认只在本地执行到隐私扫描。SDK 和管理器包通过参数指定，源码树、源码基准、说明和许可证目录等外部输入用参数或本机配置给（见 [tools/pubrel/README.md](tools/pubrel/README.md)「外部输入」）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> [-ImeApk <modavd-ime.apk>] [-ExtrasDll <modavd_extras.dll>]
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> -ImeApk <modavd-ime.apk> -ExtrasDll <modavd_extras.dll>
 ```
+
+`-ImeApk`、`-ExtrasDll` 在 `release.ps1` 的参数里是可选的，但宿主输入法 APK 和截图库的哈希都钉在 `tools/pubrel/config/components.SHA256SUMS.txt` 里，钉了没给就停，所以 0.39.0 起打包这两项都必须给。
 
 0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。截图库还没发布时，回归用的候选包加 `-ExtrasCandidate`、给本机编的 DLL，只进 `<默认名>-check`，不能建草稿（见 [tools/pubrel/README.md](tools/pubrel/README.md)）。
 
