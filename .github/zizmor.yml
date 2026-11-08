@@ -5,3 +5,7 @@ rules:
       # Mirror 酱的两个 action 照旧跟随它的 v1 分支（由 Mirror 酱自己往前改），不钉 SHA，长期跳过。
       - mirrorchyan_release.yml
       - mirrorchyan_release_note.yml
+  dangerous-triggers:
+    ignore:
+      # 给 fork 来的 PR 抄标签要用 pull_request_target；这个 workflow 不检出、不运行 PR 的代码，正文只当数据读。
+      - auto_labels.yml
