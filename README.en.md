@@ -108,6 +108,5 @@ For details see [Privacy](https://modavd.github.io/en/guide/privacy) on the docs
 
 ## Icon and artwork
 
-- The images under `assets/` (banner, avatar, social preview image) and the icons built into the programs (the program icons and window icons of `emulator.exe`, `emulator-check.exe` and `qemu-system-x86_64*.exe`) are fan art. **They are not covered by this repository's Apache-2.0 license**, and no other license of this project covers them.
-- The character in the artwork is Eyjafjalla from *Arknights*; the character is © Shanghai Hypergryph.
+- The images under `assets/` (banner, avatar, social preview image) and the icons built into the programs (the program icons and window icons of `emulator.exe`, `emulator-check.exe` and `qemu-system-x86_64*.exe`) are ModAVD's own icon and artwork. **They are not covered by this repository's Apache-2.0 license**, and no other license of this project covers them.
 - If you have a copyright concern, contact us through [Issues](https://github.com/ModAVD/ModAVD/issues) or by e-mail at qiyinxi@foxmail.com, and we will deal with it right away.

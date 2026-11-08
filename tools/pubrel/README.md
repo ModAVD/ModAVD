@@ -131,7 +131,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 
 0.36.0 起包里还有 `ModAVD.exe`（管理器）和 `tools/modavd.exe`（命令行、MCP），取自 `-Manager` 那个 Release 包（ModAVDManager 自己的发版流程可复现编译并核对过）。
 
-P3 审核过的 NOTICE 和 `说明.txt` 之后新发的、不再发的东西，由 assemble 按锚点改进去：已有条目里拿掉不再发的文件（`NOTICE_GONE_FILES`）、
+P3 审核过的 NOTICE 和 `说明.txt` 之后新发的、不再发的东西，由 assemble 按锚点改进去：程序图标条目去掉「同人」的说法、改名「ModAVD program icon」（`ICON_NOTICE_EDITS`，`说明.txt` 那句在 `README_EDITS` 里）、已有条目里拿掉不再发的文件（`NOTICE_GONE_FILES`）、
 加上新发的文件（`NOTICE_MORE_FILES`）、Part 2 末尾加 `config/notice-additions.txt` / `.csv` 的条目（执行桥载荷、modavd 两个 exe、Go 运行时的 BSD-3 声明，Go 版本取自管理器 tag 的 go.mod；0.39.0 起还有截图库的 LGPL-3.0-or-later 声明）、
 `说明.txt` 里讲批处理的几段换成管理器和命令行的说法（`README_EDITS`），在「出问题怎么办」前加 `config/readme-tools.txt`。锚点或原文找不到、不止一处就停。
 补完两个方向都核对：包根以下（`sdk/` 除外）每个文件、`sdk/emulator/resources/modavd/` 每个文件都要在 NOTICE.txt 里有条目，许可证全文除外；
@@ -147,7 +147,7 @@ NOTICE.txt 里每个 `(package root)` 文件都要在包里。以后往包里加
 管理器 https://github.com/ModAVD/ModAVDManager，输入法 https://github.com/ModAVD/ModAVDHostIME，随包脚本（装执行桥的 `modavd-bridge.ps1`）https://github.com/ModAVD/ModAVD/tree/main/package，
 执行桥 https://github.com/ModAVD/ModAVD/tree/main/bridge。
 截图库（`extras\modavd_extras.dll`）按 LGPL-3.0-or-later 发布，源码在 https://github.com/ModAVD/ModAVDExtras，`modavd-src` 的 NOTICE 写明这个例外。
-补丁按所改文件的许可证；ModAVD 仓库根目录的 LICENSE 仍是 Apache-2.0；图标是同人创作，不在任何许可证范围内。
+补丁按所改文件的许可证；ModAVD 仓库根目录的 LICENSE 仍是 Apache-2.0；图标不在任何许可证范围内。
 24 个源项目发生变化时重新 `git archive`；其他 manifest 项目（尤其 prebuilts）发生变化会停止，需重新审核对应源码及 NOTICE。
 P3 审核过的说明和 NOTICE 里写的是 `37.2.10-mas30`，组包时换成新版本号，`mas-30` / `mas30` 换成本次构建号。
 清单模板是仓库里审核过的 `manifests/manifest-mas30.xml`。
