@@ -14,7 +14,7 @@
 
 <#
 .SYNOPSIS
-魔改 AVD：给一台实例装上 / 卸掉 arm64 执行桥（阴阳师等只有 arm64 版本、带加固的游戏要靠它）。
+ModAVD：给一台实例装上 / 卸掉 arm64 执行桥（阴阳师等只有 arm64 版本、带加固的游戏要靠它）。
 
 .DESCRIPTION
 装进客体的是三个我们自己的文件，外加往 /vendor/build.prop 追加的一行。
@@ -420,7 +420,7 @@ if (-not $PSBoundParameters.ContainsKey('AdbPort')) {
         } catch { Warn "读不了 $meta（$($_.Exception.Message)），按默认 20050" }
     }
 }
-if ($AdbPort -eq 5037) { Die '拒绝 adb 的默认端口 5037（-AdbPort）。魔改 AVD 一律用自己的私有 server。' 2 }
+if ($AdbPort -eq 5037) { Die '拒绝 adb 的默认端口 5037（-AdbPort）。ModAVD 一律用自己的私有 server。' 2 }
 if ($AdbPort -lt 1 -or $AdbPort -gt 65535) { Die "-AdbPort 不是合法端口：$AdbPort" 2 }
 
 # 提示「重跑」时照用户这一次实际给的参数拼命令：改过端口、路径的人照抄也不会跑错

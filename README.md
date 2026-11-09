@@ -1,4 +1,4 @@
-# ModAVD（魔改 AVD）
+# ModAVD
 
 **简体中文** | [English](README.en.md)
 
