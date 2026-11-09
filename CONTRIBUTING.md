@@ -6,6 +6,10 @@
 
 完整的参与说明在文档站：**[参与开发](https://modavd.github.io/develop/)**。各部分要什么环境和硬件、怎么验证、用 AI 工具时选什么模型，见[分区一览和通用要求](https://modavd.github.io/develop/overview)；想让一个游戏跑起来，见[适配新游戏](https://modavd.github.io/develop/adapt-game)。
 
+issue、PR、评论和提交说明用中文或英文都可以。
+
+不知道从哪下手：文档站的[按你会的找入口](https://modavd.github.io/develop/#按你会的找入口)按会玩游戏、写文档、Go、Java、PowerShell / Python、C / C++、macOS / Linux 分了类，写了各要什么环境、从哪些 issue 开始；第一次来先看标了 [good first issue](https://github.com/ModAVD/ModAVD/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22) 的。
+
 下面是提 issue、PR 前最要紧的几条。
 
 ## 先说一声
