@@ -111,7 +111,7 @@ pwsh -File bridge\scripts\build-nbshim.ps1 [-OutDir <目录>]
 
 ## 装进实例
 
-- **0.36.0 起不用自己装**：用 ModAVD 管理器 `ModAVD.exe` 或命令行 `tools\modavd.exe start` 开机时，新建的和已有的实例都会自动带好桥：开机前放上开机标记，开机流程做完后桥还没装就装上，没生效就关机冷启动（不在客体里热重启），最多三轮。第一次开机要多 1–2 分钟。装好以后照常用 AUTO-MAS 开机，桥一直在。
+- **0.36.0 起不用自己装**：用 ModAVD 管理器 `ModAVD.exe` 或命令行 `tools\modavd.exe start` 开机时，新建的和已有的实例都会自动带好桥：开机前放上开机标记，开机流程做完后桥还没装就装上，没生效就关机冷启动（不在客体里热重启），最多三轮。第一次开机要多 1–2 分钟。装好以后照常开机就行（管理器、命令行或 AUTO-MAS 都可以），桥一直在。
 - 只用 AUTO-MAS 开机、从没用管理器开过的实例，这一版还不会自动装：用管理器把它开一次机就行。
 - 不想要桥：新建时用 `tools\modavd.exe create --no-bridge`，或者对已有实例运行 `tools\modavd.exe bridge <编号> uninstall`，之后开机都不再自动装（再 `install` 就恢复）；`start --no-bridge` 只管这一次。只读检查用 `bridge <编号> verify`（实例要开着）。
 - **退回 0.36.0 以前的版本之前，先在每一台实例上运行一次 `tools\modavd.exe bridge <编号> uninstall`**，看到结果是「没装」再换包。不先卸就退版，那台实例可能变成系统属性指着一个已经不存在的库，所有只有 arm64 版本的应用都跑不起来，界面上也看不出来。
