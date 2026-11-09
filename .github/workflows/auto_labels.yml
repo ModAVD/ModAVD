@@ -2,7 +2,7 @@ name: Auto labels
 
 # issue：bug / enhancement 由模板自己的 labels 字段打；这里再按「哪个组件 / Component」的选项打 area:*。
 # PR：正文里 `Refs ModAVD/ModAVD#N` 指到的 issue 带的类型、area:*、platform:* 标签抄到 PR 上。
-# P0–P3 由人判断，待发布由合并时打，这里都不碰。
+# P0–P3 由人判断，pending-release 由合并时打，这里都不碰。
 #
 # PR 用 pull_request_target，fork 来的 PR 才能拿到加标签的权限。这个 job 不检出、不运行 PR 里的任何代码，
 # issue 和 PR 的正文只从事件文件里当数据读，不拼进命令。

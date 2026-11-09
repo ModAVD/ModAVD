@@ -15,6 +15,7 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 > **Version note (current Release vs. `main`)**: this document describes the latest released package, `v0.39.0`. `main` may contain changes that have not been released yet. When you use a downloaded package, go by the notes of that Release and the version inside the package.
 
 - [What is ModAVD](#what-is-modavd)
+- [Tested games](#tested-games)
 - [Requirements](#requirements)
 - [Install](#install)
 - [Upgrade](#upgrade)
@@ -31,11 +32,26 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 - The emulator itself comes from Google's open-source [Android Emulator](https://android.googlesource.com/platform/external/qemu/). We changed parts of QEMU, gfxstream (graphics streaming) and Crashpad (crash handling), and the changes are published as patches (`patches/`).
 - adb and the Android system images belong to Google and are covered by the Android Software Development Kit License Agreement, so we cannot distribute them. They are not in the Release; **补全组件** (Fetch components) in the manager, or the CLI command `tools\modavd.exe components fetch`, downloads them from the official channels on your computer.
 
-Compared with the official emulator, the published 0.39.0 build no longer uploads usage statistics or crash reports to Google, and no longer checks Google for updates or downloads feature flags. Write-through lowers the risk of qcow2 metadata corruption when an instance is force-killed, but you should still run `sync` first. Memory that Android frees goes back to Windows. The data disk can be enlarged. A batch of graphics, networking and WHPX problems are fixed. From 0.36.0 the package includes the arm64 execution bridge. It has been tested on the official server of *Onmyoji* and, from 0.37.0, on the China server of *Ruyuan*; the other channel builds of *Onmyoji* are on the list because they use the same game and hardening, and any other arm64-only game still has to be verified one by one. For the item-by-item differences see [How ModAVD differs from the official emulator](https://modavd.github.io/en/guide/changes) on the docs site; for each patch see `patches/`.
+Compared with the official emulator, the published 0.39.0 build no longer uploads usage statistics or crash reports to Google, and no longer checks Google for updates or downloads feature flags. Write-through lowers the risk of qcow2 metadata corruption when an instance is force-killed, but you should still run `sync` first. Memory that Android frees goes back to Windows. The data disk can be enlarged. A batch of graphics, networking and WHPX problems are fixed. From 0.36.0 the package includes the arm64 execution bridge, which lets some games that ship only for arm64 run; any other arm64-only game still has to be verified one by one. For the games we have tested, see [Tested games](#tested-games). For the item-by-item differences see [How ModAVD differs from the official emulator](https://modavd.github.io/en/guide/changes) on the docs site; for each patch see `patches/`.
 
 Version numbers have been written as `0.<build number>.<repackage count>` since `0.32.1`: 0 means it is still in beta, and the build number is the mas-N. The current version is `0.39.0` (build number mas-39).
 
 This repository holds the emulator patches, the arm64 execution bridge ([bridge/](bridge/), in Chinese) and the bundled scripts ([package/](package/), in Chinese). The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), and the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME).
+
+## Tested games
+
+These are the games the maintainer has actually run in the pre-release regression, all on one Windows 11 computer with an AMD CPU and an NVIDIA discrete GPU. "Last tested" is the ModAVD version of the most recent test, with the game version in parentheses. A game that is not listed may well run; we just have not tested it. Reports are welcome, see [Testing on real games and compatibility reports](https://modavd.github.io/en/develop/testing).
+
+| Game | Last tested | What was tested | Notes |
+|---|---|---|---|
+| *Arknights* | 0.39.0 | Downloaded all 12.8 GB of resources from scratch; MAA started the game and ran stage 1-7; 59.8 fps on the main screen and in the base (the game caps at 60) | Resources download at only about 9 MB/s ([#35](https://github.com/ModAVD/ModAVD/issues/35)); now and then resource initialization fails at launch and the whole package is downloaded again ([#89](https://github.com/ModAVD/ModAVD/issues/89)) |
+| *Reverse: 1999* | 0.39.0 (4.0.0) | Cold start to the main screen; on 0.38.0, M9A ran a regular stage at 54.7–59.1 fps in battle | — |
+| *Honkai: Star Rail* | 0.39.0 (4.5.0) | Cold start; on 0.38.0, StarRailCopilot ran Simulated Universe for 15 minutes at a median of 42.8 fps | Use the normal (Vulkan) mode: the compatibility (GLES) mode the game picks on a first install crashes at the splash screen. A cold start takes about 3 minutes ([#42](https://github.com/ModAVD/ModAVD/issues/42)) |
+| *Arknights: Endfield* | 0.38.0 | MaaEnd visited friends and ran the base, at a median of 34.7 fps | A cold start to the title screen takes over a minute ([#42](https://github.com/ModAVD/ModAVD/issues/42)) |
+| *Onmyoji* (official server) | 0.38.0 | With the arm64 execution bridge; MaaYYs entered the courtyard and fought 3 Soul battles: 59.7 fps in the courtyard, about 58 fps in battle | A cold start now and then hangs at the audio list; close the game and open it again ([#36](https://github.com/ModAVD/ModAVD/issues/36)). The other channel builds are on the bridge's list but were not tested one by one |
+| *Ruyuan* (China server) | 0.37.0 | With the arm64 execution bridge; 20 cold starts in a row all worked, and MaaYuan's daily tasks run | Host memory grows when MaaYuan drives it ([#156](https://github.com/ModAVD/ModAVD/issues/156)) |
+| *Honkai Impact 3rd* | 0.39.0 (9.1.0) | Only a cold start to the "download resources" prompt; did not go in | — |
+| *World of Airports* | 0.39.0 (3.7.3) | With the arm64 execution bridge and the Google Play Store, and "report GLES 3.2" turned on; played 13 minutes at an airport at 30 fps (the game caps at 30) | For the setup steps see the [0.39.0 release notes](https://github.com/ModAVD/ModAVD/releases/tag/v0.39.0) ([#131](https://github.com/ModAVD/ModAVD/issues/131)) |
 
 ## Requirements
 

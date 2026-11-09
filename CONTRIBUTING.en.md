@@ -6,6 +6,10 @@
 
 The full contributor guide is on the docs site: **[Contributing](https://modavd.github.io/en/develop/)**. For the environment and hardware each area needs, how to verify a change, and which model to pick when you use an AI tool, see [Areas and common requirements](https://modavd.github.io/en/develop/overview). To get a game running, see [Adapting a new game](https://modavd.github.io/en/develop/adapt-game).
 
+Issues, PRs, comments and commit messages can be in English or Chinese.
+
+Not sure where to start? [Where to start, by what you know](https://modavd.github.io/en/develop/#where-to-start-by-what-you-know) on the docs site sorts the work by what you know (playing games, writing, Go, Java, PowerShell / Python, C / C++, macOS / Linux) and says what each needs and which issues to start from. If this is your first time, look at the issues labeled [good first issue](https://github.com/ModAVD/ModAVD/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22).
+
 What follows are the points that matter most before you open an issue or a PR.
 
 ## Before you start

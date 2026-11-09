@@ -15,6 +15,7 @@
 > **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.39.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
 
 - [这是什么](#这是什么)
+- [已实测的游戏](#已实测的游戏)
 - [适用环境](#适用环境)
 - [安装](#安装)
 - [升级](#升级)
@@ -31,11 +32,26 @@
 - 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
 - adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由管理器的「补全组件」（或命令行 `tools\modavd.exe components fetch`）在你的电脑上从官方渠道下载。
 
-和官方模拟器相比，已发布的 0.39.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，目前已在《阴阳师》官服和《如鸢》国服（0.37.0 起）上实测，《阴阳师》的其他渠道包因同一游戏和加固纳入名单，其他只有 arm64 的游戏仍需逐个验证。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+和官方模拟器相比，已发布的 0.39.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，让一部分只有 arm64 版本的游戏也能跑，其他只有 arm64 的游戏仍需逐个验证。实测过哪些游戏见[已实测的游戏](#已实测的游戏)。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
 版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.39.0`（构建号 mas-39）。
 
 这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)。
+
+## 已实测的游戏
+
+下面是维护者在发版回归里实际跑过的游戏，都在同一台 Windows 11、AMD CPU、NVIDIA 独显的电脑上测。「最近一次」是最近一次实测用的 ModAVD 版本，括号里是游戏版本。没列出的游戏不代表不能跑，只是还没测过；欢迎按[游戏实测和兼容性报告](https://modavd.github.io/develop/testing)报给我们。
+
+| 游戏 | 最近一次 | 测了什么 | 要注意的 |
+|---|---|---|---|
+| 《明日方舟》 | 0.39.0 | 从零下完 12.8 GB 资源；MAA 启动游戏、打 1-7；主界面和基建 59.8 fps（游戏锁 60） | 下资源只有约 9 MB/s（[#35](https://github.com/ModAVD/ModAVD/issues/35)）；偶尔启动时资源初始化失败、整包重下（[#89](https://github.com/ModAVD/ModAVD/issues/89)） |
+| 《重返未来：1999》 | 0.39.0（4.0.0） | 冷启动进主界面；0.38.0 时 M9A 打常规作战，战斗中 54.7–59.1 fps | — |
+| 《崩坏：星穹铁道》 | 0.39.0（4.5.0） | 冷启动；0.38.0 时 StarRailCopilot 跑模拟宇宙 15 分钟，帧率中位数 42.8 fps | 要用普通模式（Vulkan）：首次安装时默认的兼容模式（GLES）会在启动画面闪退；冷启动约 3 分钟（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
+| 《明日方舟：终末地》 | 0.38.0 | MaaEnd 拜访好友、基建，帧率中位数 34.7 fps | 冷启动到标题要 1 分钟以上（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
+| 《阴阳师》官服 | 0.38.0 | 装 arm64 执行桥；MaaYYs 进庭院、打 3 场御魂，庭院 59.7 fps、战斗约 58 fps | 冷启动偶尔卡在「正在获取音频列表...」，关掉重开即可（[#36](https://github.com/ModAVD/ModAVD/issues/36)）；其他渠道包在执行桥的名单里，没逐个测 |
+| 《如鸢》国服 | 0.37.0 | 装 arm64 执行桥；连续冷启动 20 次都正常，MaaYuan 日常能跑 | 配合 MaaYuan 跑时宿主内存会涨（[#156](https://github.com/ModAVD/ModAVD/issues/156)） |
+| 《崩坏3》 | 0.39.0（9.1.0） | 只测了冷启动到「下载资源」确认框，没进游戏 | — |
+| World of Airports | 0.39.0（3.7.3） | 装 arm64 执行桥和 Google Play 商店，开「报告 GLES 3.2」；在机场玩 13 分钟，30 fps（游戏锁 30） | 设置步骤见 [0.39.0 的发布说明](https://github.com/ModAVD/ModAVD/releases/tag/v0.39.0)（[#131](https://github.com/ModAVD/ModAVD/issues/131)） |
 
 ## 适用环境
 
