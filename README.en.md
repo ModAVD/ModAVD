@@ -61,7 +61,7 @@ These are the games the maintainer has actually run in the pre-release regressio
 | CPU | x86_64 (Intel / AMD) with virtualization enabled in the BIOS (Intel VT-x / AMD SVM) |
 | Windows feature | Windows Hypervisor Platform (WHPX) |
 | GPU | A discrete GPU, or a recent integrated GPU, with Vulkan support |
-| Memory | AUTO-MAS gives each instance 6 GB by default; the PC needs about 1.5 GB more free when an instance starts |
+| Memory | Each instance gets 6 GB by default (3–6 GB can be chosen); the PC needs about 1.5 GB more free when an instance starts |
 | Disk | An NTFS drive. Fetching the components needs about 6.5 GB free; the first start of each instance needs more than 10 GB free, and usage then grows with game data, usually tens of GB per game |
 | Path | A path with only ASCII letters and digits, for example `D:\ModAVD` |
 | AUTO-MAS | `v5.7.0` or newer is recommended. From v5.7.0-beta.5 the MAA and MFW scripts (MaaFramework projects such as M9A) work; other scripts are not supported yet. See the Release notes for what each version supports |
