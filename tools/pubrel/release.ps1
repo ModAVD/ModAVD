@@ -18,11 +18,15 @@ param(
     # ModAVD release checkout: the bundled scripts (package/) and the bridge source (bridge/) are taken from its HEAD,
     # and the patches, manifests and release notes are written into it. Default: the checkout these tools are in.
     [string]$Repository,
-    # ModAVDManager-<version>-win-x64.zip from the manager's GitHub Release: ModAVD.exe and tools\modavd.exe come from it
+    # ModAVDManager-<version>-win-x64.zip: ModAVD.exe and tools\modavd.exe come from it. From the manager's GitHub
+    # Release, or before that release exists built from its release branch (build.ps1 and mkzip there; same bytes).
     [Parameter(Mandatory)][string]$Manager,
-    # checkouts of the public repositories with their tags fetched: the manager ZIP and the IME APK are checked against
-    # the release checksums at their tags, and the source bundle archives those tags (ManagerRepo / ImeRepo; ExtrasRepo
-    # below)
+    # checkouts of the public repositories, fetched from upstream with tags: the manager ZIP and the IME APK are checked
+    # against the release checksums at their tags, and the source bundle archives those commits (ManagerRepo / ImeRepo;
+    # ExtrasRepo below). A manager or extras version that has no tag yet is taken at the head of upstream's
+    # release/0.<N> (N from -Build), which already carries its release/<version>.SHA256SUMS.txt: the package can be
+    # built and tested before the components are tagged, and the serial release tags exactly those commits.
+    # -DraftRelease refuses a package with untagged components.
     [string]$ManagerRepo,
     [string]$ImeRepo,
     # merged incoming\<topic> held for a later release; every other merged topic must be in the new series
@@ -33,14 +37,11 @@ param(
     # in config\components.SHA256SUMS.txt: an unpinned one is refused, a pinned one that is missing fails the release.
     [string]$ImeApk = '',
     # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll; '' = not shipped. Pinned like
-    # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo,
-    # tags fetched) must list it in release/<version>.SHA256SUMS.txt; the source bundle archives that tag.
+    # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo;
+    # before the tag, the head of its release/0.<N>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
+    # archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
     [string]$ExtrasDll = '',
     [string]$ExtrasRepo,
-    # candidate package for the regression before that ModAVDExtras release exists: -ExtrasDll is a local build of the
-    # -ExtrasRepo HEAD (committed, at version EXTRAS_VERSION), not checked against the pin. Output <name>-check only, and
-    # no -DraftRelease.
-    [switch]$ExtrasCandidate,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
     [string]$Snapshot,
@@ -72,13 +73,6 @@ $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Obj
 $number = [int]$Build.Substring(3)
 $version = "0.$number.$Patch"
 $defaultName = if ($Patch) { "$Build-p$Patch" } else { $Build }
-# 候选包（-ExtrasCandidate：截图库是本机编的，还没发布）只进 <默认名>-check，也不建草稿
-if ($ExtrasCandidate) {
-    if (-not $ExtrasDll) { throw '-ExtrasCandidate 要和 -ExtrasDll 一起给' }
-    if ($DraftRelease) { throw '-ExtrasCandidate 打的是回归用的候选包，不能 -DraftRelease' }
-    if (-not $OutputName) { $OutputName = "$defaultName-check" }
-    if ($OutputName -ne "$defaultName-check") { throw "-ExtrasCandidate 的输出只能是 $defaultName-check" }
-}
 if (-not $OutputName) { $OutputName = $defaultName }
 if ($OutputName -notin @($defaultName, "$defaultName-check")) { throw "OutputName 只能是 $defaultName 或 $defaultName-check" }
 
@@ -130,21 +124,22 @@ function Run-Python([string[]]$Arguments) {
     & $Python -I $helper @Arguments
     if ($LASTEXITCODE -ne 0) { throw "release_tools.py 返回 $LASTEXITCODE" }
 }
-function Step([int]$Number, [string]$Title, [scriptblock]$Action) {
-    Write-Host "[$Number/8] $Title"
-    try { & $Action } catch { throw "步骤 $Number（$Title）失败：$($_.Exception.Message)" }
+function Step([int]$StepNumber, [string]$Title, [scriptblock]$Action) {
+    Write-Host "[$StepNumber/8] $Title"
+    try { & $Action } catch { throw "步骤 $StepNumber（$Title）失败：$($_.Exception.Message)" }
 }
 # preflight validates the SDK, version, release texts, immutable baseline assets, the license package (AGPL-3.0 full text),
 # disk budget and snapshot before any deletion.
 if (-not $Snapshot) { $Snapshot = Join-Path $Sdk 'build-info.json' }
 $texts = @('--patch', $Patch, '--changes', $Changes, '--changelog', $Changelog)
 $componentArgs = @(if ($ImeApk) { '--ime-apk', $ImeApk, '--ime-repo', $ImeRepo })
-if ($ExtrasDll) {
-    $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo)
-    if ($ExtrasCandidate) { $componentArgs += '--extras-candidate' }
-}
-$public = @('--repository', $Repository, '--manager', $Manager, '--manager-repo', $ManagerRepo) + $protectArgs
-Run-Python (@('preflight', '--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot, '--min-free-gb', $MinFreeGB,
+if ($ExtrasDll) { $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo) }
+# 还没打 tag 的管理器、截图库取各自仓库 upstream 的发版分支头（release_tools.py 的 component_ref）
+$public = @('--repository', $Repository, '--manager', $Manager, '--manager-repo', $ManagerRepo,
+    '--release-branch', "release/0.$number") + $protectArgs
+# 建草稿的那一轮只收已经打了 tag 的组件
+$tagArgs = @(if ($DraftRelease) { '--require-tags' })
+Run-Python (@('preflight') + $tagArgs + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot, '--min-free-gb', $MinFreeGB,
     '--baseline', $Baseline, '--package', $Package, '--apk', $Apk, '--output', $out) + $public + $componentArgs + $texts)
 if (Test-Path -LiteralPath $out) {
     if (-not $Force) { throw "输出已存在：$out（-Force 只清理本脚本创建并标记的同名输出目录）" }
@@ -156,7 +151,7 @@ New-Item -ItemType Directory -Path $out | Out-Null
 Run-Python @('own', '--output', $out, '--build', $Build)
 $common = @('--output', $out)
 Step 1 '组装 release 目录并写清单（管理器取它的 Release 包，随包脚本取 ModAVD 的 package/）' {
-    Run-Python (@('assemble') + $common + $texts + $public + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot,
+    Run-Python (@('assemble') + $tagArgs + $common + $texts + $public + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot,
         '--package', $Package, '--apk', $Apk) + $componentArgs)
 }
 # 主包带平台（以后可能有 linux-x64），源码包不带；和 release_tools.py 的 PLATFORM 一致
@@ -194,8 +189,7 @@ Step 8 '隐私扫描（含全部源码包成员，加上仓库外的私有规则
 if ($DraftRelease) {
     Write-Host '[9] 创建 GitHub 草稿（不会发布）'
     $upload = @($zip, $sourcesZip, (Join-Path $out 'SHA256SUMS.txt'))
-    & gh release create "v$version" --draft --repo ModAVD/ModAVD --title "ModAVD mas-$number（$version）" --notes-file (Join-Path $out 'release-notes.md') @upload
+    & gh release create "v$version" --draft --repo ModAVD/ModAVD --target "release/0.$number" --title "ModAVD mas-$number（$version）" --notes-file (Join-Path $out 'release-notes.md') @upload
     if ($LASTEXITCODE -ne 0) { throw "步骤 9（创建草稿）失败：gh 返回 $LASTEXITCODE；未自动重试，请检查草稿状态" }
 }
 Write-Host "完成：$out（v$version）"
-if ($ExtrasCandidate) { Write-Warning "候选包：extras\modavd_extras.dll 是本机编的 $ExtrasDll，只给回归用，不要发布" }

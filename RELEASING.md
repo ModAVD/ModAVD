@@ -9,6 +9,19 @@
 tag 是 `v0.<N>.<P>`，标题是 `ModAVD mas-<N>（0.<N>.<P>）`；Release 说明第一句写明基于的 Google AOSP Android Emulator 版本。
 mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.32.1` 是 mas32 原样重新打包成新格式。
 
+## 发版分支
+
+发版在单独的分支上做，和 main 上的开发分开（[#175](https://github.com/ModAVD/ModAVD/issues/175)）：
+
+- 冻结时，本仓库和 ModAVDManager、ModAVDExtras 各从 main 切出 `release/0.<N>`（和三个源码仓库的叫法一样）。ModAVDHostIME 很少变，有改动要发时才切。main 照常合 PR。
+- 要进这一版的修复先合进 main，再开 PR 挑到 `release/0.<N>`。
+- 组件的发版准备提交（版本号、`release/<版本>.md`、`release/<版本>.SHA256SUMS.txt`）落在组件自己的 `release/0.<N>` 上；组件各用各的版本号和 tag。
+- 本仓库的钉版本（`EXTRAS_VERSION`、`tools/pubrel/config/components.SHA256SUMS.txt`）、补丁系列、清单、`release/<版本>.*` 落在本仓库的 `release/0.<N>` 上，tag 打在这条分支的头上。
+- 打包和回归不用等组件发版：`release.ps1` 取组件发版分支头上的提交。回归通过的那个输出就是发出去的包。
+- 发布按顺序做，前一步没过就停：ModAVDExtras → ModAVDHostIME（有变才发）→ ModAVDManager → 三个源码仓库 → 本仓库。每个组件先把 tag 打在包里记的那个提交上，等它的 `release` workflow 出草稿、附件和校验表对上，再发布。没变的组件沿用旧 tag。
+- 补丁版 `0.<N>.<P>` 接着在 `release/0.<N>` 上做。
+- 发完以后，每个仓库开 PR 把 `release/0.<N>` 并回 main。
+
 ## 发版前
 
 - [ ] 确定构建号、已提交的待编译源码、对应 manifest、补丁基准及第三方组件来源。更新许可证声明。
@@ -29,7 +42,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
 
 `-ImeApk`、`-ExtrasDll` 在 `release.ps1` 的参数里是可选的，但宿主输入法 APK 和截图库的哈希都钉在 `tools/pubrel/config/components.SHA256SUMS.txt` 里，钉了没给就停，所以 0.39.0 起打包这两项都必须给。
 
-0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。截图库还没发布时，回归用的候选包加 `-ExtrasCandidate`、给本机编的 DLL，只进 `<默认名>-check`，不能建草稿（见 [tools/pubrel/README.md](tools/pubrel/README.md)）。
+0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。管理器、截图库还没打 tag 时，取它们发版分支头上的提交（见上面「发版分支」和 [tools/pubrel/README.md](tools/pubrel/README.md)「组件还没打 tag 时」）。
 
 1. **组包**：依据已审核的文件政策复制 SDK、桌面 APK、组件下载/问题收集脚本、说明与许可证，最后写 `modavd-manifest.json`（版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，以及其余每个文件的大小和 SHA-256）。SDK 文件集改变时先复核政策；不在原 SDK 上删除文件。
 2. **主包 ZIP**：`ModAVD-0.34.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录（Mirror 酱按路径比文件，外层文件夹带版本号会让增量等于全量）。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。
@@ -48,7 +61,9 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
 
 ## 草稿与发布
 
-核对完成后，显式添加 `-DraftRelease` 重新生成并创建草稿。已有本地输出时可以使用 `-Force`，它只重建有匹配所有权标记的本次输出目录；失败时保留现场。
+先按「发版分支」的顺序把这一版新发的组件发掉：tag 打在包里记的那个提交上（预检的输出里有，也记在输出目录 `snapshot.json` 的 `own` 里），它们的 Release 发布以后再建本仓库的草稿。
+
+然后显式添加 `-DraftRelease` 重新生成并创建草稿：它只收组件都打了 tag 的包，隐私扫描不读缓存、全部重扫，草稿的 tag 指向 `release/0.<N>`。已有本地输出时可以使用 `-Force`，它只重建有匹配所有权标记的本次输出目录；失败时保留现场。
 
 ```powershell
 pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Force -DraftRelease

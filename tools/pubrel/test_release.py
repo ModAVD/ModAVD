@@ -632,32 +632,31 @@ class ReleaseChecks(unittest.TestCase):
             release.pinned_components(with_ime, pins)
         with self.assertRaises(FileNotFoundError):
             release.pinned_components(SimpleNamespace(**{**vars(with_extras), "extras_dll": str(path / "gone.dll")}), pins)
-        # another build (a local one: another MSVC gives other bytes) is refused, and the message says what to do instead
+        # another build (a local one: another MSVC gives other bytes) is refused
         dll.write_bytes(b"local build")
-        with self.assertRaisesRegex(ValueError, "extras/modavd_extras.dll differs from its pinned SHA-256.*-ExtrasCandidate"):
+        with self.assertRaisesRegex(ValueError, "extras/modavd_extras.dll differs from its pinned SHA-256"):
             release.pinned_components(with_extras, pins)
-        # a candidate package takes it, and only it: an APK of another build is still refused
-        candidate = SimpleNamespace(**{**vars(with_extras), "extras_candidate": True})
-        self.assertIn(release.EXTRAS_DLL, release.pinned_components(candidate, pins))
-        ime.write_bytes(b"another build")
-        with self.assertRaisesRegex(ValueError, "components/modavd-ime.apk differs"):
-            release.pinned_components(candidate, pins)
-        ime.write_bytes(b"ime")
-        with self.assertRaisesRegex(ValueError, "needs --extras-dll"):
-            release.pinned_components(SimpleNamespace(**{**vars(with_ime), "extras_candidate": True}), pins)
         # no other path outside components/ can be pinned
         for other in ["extras/other.dll", "modavd_extras.dll", "extras/x/modavd_extras.dll", "EXTRAS/MODAVD_EXTRAS.DLL"]:
             bad.write_text(line(launcher, launcher.name) + release.sha(dll) + "  " + other + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "distinct components/<file name> or extras/modavd_extras.dll"):
                 release.pinned_components(with_extras, bad)
 
-    def test_candidate_package_only_in_check_output(self):
-        release.check_candidate_output(SimpleNamespace(output=str(WORK / "mas39-check"), extras_candidate=True))
-        release.check_candidate_output(SimpleNamespace(output=str(WORK / "mas39"), extras_candidate=False))
-        release.check_candidate_output(SimpleNamespace(output=str(WORK / "mas39")))
-        for name in ["mas39", "mas39-p1", "mas39-checked"]:
-            with self.assertRaisesRegex(ValueError, "only to the <name>-check output"):
-                release.check_candidate_output(SimpleNamespace(output=str(WORK / name), extras_candidate=True))
+    def test_draft_takes_tagged_components_only(self):
+        """-DraftRelease (--require-tags) refuses a package whose manager or extras library is not tagged yet."""
+        tagged = {"manager": {"version": "0.8.0", "tagged": True}, "ime": None, "extras": {"version": "0.1.2", "tagged": True},
+                  "modavd": {"commit": "0" * 40}}
+        pending = {**tagged, "manager": {"version": "0.8.0", "tagged": False}, "extras": {"version": "0.1.3", "tagged": False}}
+        draft = SimpleNamespace(require_tags=True)
+        release.check_tagged(draft, tagged)
+        # a snapshot written before the key existed was at its tags
+        release.check_tagged(draft, {**tagged, "manager": {"version": "0.8.0"}})
+        release.check_tagged(SimpleNamespace(require_tags=False), pending)
+        release.check_tagged(SimpleNamespace(), pending)
+        with self.assertRaisesRegex(ValueError, r"Not tagged yet: manager v0\.8\.0, extras v0\.1\.3"):
+            release.check_tagged(draft, pending)
+        with self.assertRaisesRegex(ValueError, r"Not tagged yet: extras v0\.1\.3;"):
+            release.check_tagged(draft, {**pending, "manager": tagged["manager"]})
 
     def test_texts_extended_and_every_package_file_named(self):
         tree = self.folder()
@@ -930,9 +929,80 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uncommitted changes under package/"):
             release.public_sources(args)
 
-    def test_extras_dll_checked_against_its_tag_or_candidate_checkout(self):
-        """The extras DLL of a release is the one tag v<EXTRAS_VERSION> of ModAVDExtras lists; a candidate package takes a
-        local build of the committed HEAD of the checkout at that version, without checking the DLL itself."""
+    def test_untagged_components_come_from_the_release_branch(self):
+        """Before a manager or extras version is tagged, it is taken at the head of upstream's release branch, checked
+        against the checksums committed there; a tag, once it exists, wins."""
+        root = self.folder()
+        args = self.public_repos(root)
+        mgr, extras, branch = root / "mgr", root / "extras", "release/0.40"
+        with_branch = SimpleNamespace(**{**vars(args), "release_branch": branch})
+        # everything tagged: the branch does not matter (it does not even exist)
+        own = release.public_sources(with_branch)
+        self.assertEqual((own["manager"]["tagged"], own["extras"]["tagged"]), (True, True))
+        self.assertEqual(own, release.public_sources(args))
+        # manager 0.4.0 prepared on the release branch, not tagged
+        zip4 = root / "next" / "ModAVDManager-0.4.0-win-x64.zip"
+        zip4.parent.mkdir()
+        with zipfile.ZipFile(zip4, "w") as z:
+            z.writestr("ModAVD.exe", b"gui4")
+            z.writestr("tools/modavd.exe", b"cli4")
+        sums = (self.sums_line(zip4.name, zip4.read_bytes()) + self.sums_line("ModAVD.exe", b"gui4") +
+                self.sums_line("tools/modavd.exe", b"cli4")).encode()
+        self.commit_files(mgr, {"release/0.4.0.SHA256SUMS.txt": sums, "internal/buildinfo/buildinfo.go": b'package buildinfo\n\nvar Version = "0.4.0"\n'})
+        head = release.git(mgr, "rev-parse", "HEAD")
+        next_args = SimpleNamespace(**{**vars(with_branch), "manager": str(zip4)})
+        # without the branch it is simply not released; with a branch that was not fetched, the message names both
+        with self.assertRaisesRegex(ValueError, "has no tag v0.4.0"):
+            release.public_sources(SimpleNamespace(**{**vars(args), "manager": str(zip4)}))
+        with self.assertRaisesRegex(ValueError, "neither tag v0.4.0 nor refs/remotes/upstream/release/0.40"):
+            release.public_sources(next_args)
+        release.git(mgr, "update-ref", "refs/remotes/upstream/" + branch, head)
+        got = release.public_sources(next_args)["manager"]
+        self.assertEqual({k: got[k] for k in ("version", "tag", "commit", "tagged", "go")},
+                         {"version": "0.4.0", "tag": "v0.4.0", "commit": head, "tagged": False, "go": "go1.26.5"})
+        # the run that makes the draft (--require-tags; preflight and assemble both go through checked_sources) refuses it
+        self.assertEqual(release.checked_sources(next_args)["manager"]["commit"], head)
+        with self.assertRaisesRegex(ValueError, r"Not tagged yet: manager v0\.4\.0;"):
+            release.checked_sources(SimpleNamespace(**{**vars(next_args), "require_tags": True}))
+        release.checked_sources(SimpleNamespace(**{**vars(with_branch), "require_tags": True}))
+        described = release.describe_sources(release.public_sources(next_args))
+        self.assertIn(f"ModAVDManager v0.4.0 (NOT TAGGED YET: release branch head {head[:12]})", described)
+        self.assertIn(f"ModAVDExtras v{release.EXTRAS_VERSION},", described)
+        # another build of it is refused as at a tag
+        other = root / "other4" / zip4.name
+        other.parent.mkdir()
+        with zipfile.ZipFile(other, "w") as z:
+            z.writestr("ModAVD.exe", b"gui4")
+            z.writestr("tools/modavd.exe", b"local")
+        with self.assertRaisesRegex(ValueError, "not the published one"):
+            release.public_sources(SimpleNamespace(**{**vars(next_args), "manager": str(other)}))
+        # the branch head must already be that version: checksums left from a tagged version do not make it one
+        self.commit_files(mgr, {"internal/buildinfo/buildinfo.go": b'package buildinfo\n\nvar Version = "0.5.0"\n'})
+        release.git(mgr, "update-ref", "refs/remotes/upstream/" + branch, release.git(mgr, "rev-parse", "HEAD"))
+        with self.assertRaisesRegex(ValueError, r"buildinfo\.go at release/0\.40 \([0-9a-f]{12}\) says \['0\.5\.0'\], not 0\.4\.0"):
+            release.public_sources(next_args)
+        # once tagged, the tag is what counts, wherever the branch went since
+        release.git(mgr, "tag", "v0.4.0", head)
+        got = release.public_sources(next_args)["manager"]
+        self.assertEqual((got["commit"], got["tagged"]), (head, True))
+        # the checksums are read at that commit: what a later commit (the checkout's HEAD) lists does not count
+        self.commit_files(mgr, {"release/0.4.0.SHA256SUMS.txt": self.sums_line(zip4.name, b"other").encode()})
+        self.assertEqual(release.public_sources(next_args)["manager"]["commit"], head)
+        # the extras library the same way: a branch head at EXTRAS_VERSION whose checksums list the DLL
+        release.git(extras, "tag", "-d", "v" + release.EXTRAS_VERSION)
+        with self.assertRaisesRegex(ValueError, "neither tag"):
+            release.public_sources(with_branch)
+        ehead = release.git(extras, "rev-parse", "HEAD")
+        release.git(extras, "update-ref", "refs/remotes/upstream/" + branch, ehead)
+        got = release.public_sources(with_branch)["extras"]
+        self.assertEqual((got["tag"], got["commit"], got["tagged"]), ("v" + release.EXTRAS_VERSION, ehead, False))
+        self.commit_files(extras, {"CMakeLists.txt": b"project(ModAVDExtras VERSION 9.9.9 LANGUAGES C)\n"})
+        release.git(extras, "update-ref", "refs/remotes/upstream/" + branch, release.git(extras, "rev-parse", "HEAD"))
+        with self.assertRaisesRegex(ValueError, r"CMakeLists\.txt at release/0\.40 .* says \['9\.9\.9'\], not"):
+            release.public_sources(with_branch)
+
+    def test_extras_dll_checked_against_its_tag(self):
+        """The extras DLL of a release is the one tag v<EXTRAS_VERSION> of ModAVDExtras lists."""
         root = self.folder()
         args = self.public_repos(root)
         version, tag, extras = release.EXTRAS_VERSION, "v" + release.EXTRAS_VERSION, root / "extras"
@@ -940,7 +1010,7 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual({k: own["extras"][k] for k in ("version", "tag", "sha256")},
                          {"version": version, "tag": tag, "sha256": hashlib.sha256(b"dll").hexdigest()})
         self.assertEqual(own["extras"]["commit"], release.git(extras, "rev-parse", tag))
-        self.assertNotIn("candidate", own["extras"])
+        self.assertTrue(own["extras"]["tagged"])
         self.assertIn(f"ModAVDExtras {tag},", release.describe_sources(own))
         self.assertIsNone(release.public_sources(SimpleNamespace(**{**vars(args), "extras_dll": None}))["extras"])
         # a local build is not the published DLL (another MSVC gives other bytes)
@@ -956,32 +1026,8 @@ class ReleaseChecks(unittest.TestCase):
                                 ({"extras_repo": str(nosums)}, f"no release/{re.escape(version)}.SHA256SUMS.txt at {re.escape(tag)}")]:
             with self.assertRaisesRegex(ValueError, message):
                 release.public_sources(SimpleNamespace(**{**vars(args), **change}))
-        # a candidate: the checkout's HEAD, whatever DLL was built from it
+        # the release takes the tag, not HEAD
         self.commit_files(extras, {"src/core.c": b"int y;\n"})
-        candidate = SimpleNamespace(**{**vars(args), "extras_dll": str(local), "extras_candidate": True})
-        got = release.public_sources(candidate)["extras"]
-        self.assertEqual({k: got[k] for k in ("version", "tag", "sha256", "candidate")},
-                         {"version": version, "tag": None, "sha256": release.sha(local), "candidate": True})
-        self.assertEqual(got["commit"], release.git(extras, "rev-parse", "HEAD"))
-        self.assertNotEqual(got["commit"], own["extras"]["commit"])
-        self.assertIn("CANDIDATE", release.describe_sources({**own, "extras": got}))
-        # an untracked build directory does not matter; a changed tracked file does
-        (extras / "out").mkdir()
-        (extras / "out/modavd_extras.dll").write_bytes(b"local build")
-        release.public_sources(candidate)
-        (extras / "src/core.c").write_bytes(b"int z;\n")
-        with self.assertRaisesRegex(ValueError, "uncommitted changes; a candidate package takes the ModAVDExtras source from HEAD"):
-            release.public_sources(candidate)
-        (extras / "src/core.c").write_bytes(b"int y;\n")
-        (extras / "out/modavd_extras.dll").unlink()
-        (extras / "out").rmdir()
-        # HEAD at another version, or not ModAVDExtras at all
-        self.commit_files(extras, {"CMakeLists.txt": b"project(ModAVDExtras VERSION 0.2.0 LANGUAGES C)\n"})
-        with self.assertRaisesRegex(ValueError, rf"is ModAVDExtras \['0.2.0'\], this release ships {re.escape(version)}"):
-            release.public_sources(candidate)
-        with self.assertRaisesRegex(ValueError, "no CMakeLists.txt at HEAD"):
-            release.public_sources(SimpleNamespace(**{**vars(candidate), "extras_repo": str(root / "ime")}))
-        # the release still takes the tag, not HEAD
         self.assertEqual(release.public_sources(args)["extras"]["commit"], own["extras"]["commit"])
 
     def test_own_sources_archive_has_license_notice_and_public_repos(self):
@@ -1029,10 +1075,9 @@ class ReleaseChecks(unittest.TestCase):
         self.assertNotIn("ModAVDExtras", release.own_sources_text({**own, "extras": None}))
         # an older snapshot without the key
         self.assertNotIn("ModAVDExtras", release.own_sources_text({k: v for k, v in own.items() if k != "extras"}))
-        # a candidate says so
-        candidate = {**own["extras"], "tag": None, "candidate": True}
-        self.assertIn("未发布的候选", release.own_sources_text({**own, "extras": candidate}))
-        self.assertNotIn("即它的 Release 附件 modavd_extras.dll", release.own_sources_text({**own, "extras": candidate}))
+        # tagged or not yet, the text is the same: the package does not change when the tag is made
+        pending = {**own, "manager": {**own["manager"], "tagged": False}, "extras": {**own["extras"], "tagged": False}}
+        self.assertEqual(release.own_sources_text(pending), text)
 
     def test_versions(self):
         self.assertEqual(release.release_version("mas33", 0), "0.33.0")
