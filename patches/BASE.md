@@ -4,7 +4,7 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 版本 | qemu | gfxstream | Crashpad |
 | --- | --- | --- | --- |
-| 0.39.0（`Pkg.BuildId=mas-39`） | qemu/mas39 | gfxstream/mas38 | crashpad/module-version22 |
+| 0.39.0（`Pkg.BuildId=mas-39`；0.39.1 相同） | qemu/mas39 | gfxstream/mas38 | crashpad/module-version22 |
 | 0.38.0（`Pkg.BuildId=mas-38`；0.38.1、0.38.2 相同） | qemu/mas38 | gfxstream/mas38 | crashpad/module-version22 |
 | 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同） | qemu/mas37 | gfxstream/mas37 | crashpad/module-version22 |
 | 0.36.0（`Pkg.BuildId=mas-36`） | qemu/mas36 | gfxstream/mas35 | crashpad/module-version22 |
