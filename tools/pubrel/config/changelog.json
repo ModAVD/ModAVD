@@ -1,5 +1,23 @@
 [
   {
+    "version": "v0.39.1",
+    "build": 39,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "管理器「设置」里的「更新」能用了：下载核对后正常关掉实例，交给命令行换包，换好自动重新打开管理器。更新到这一版本身还是照原来的办法。"
+      ],
+      "变更": [
+        "只重新打包：模拟器还是 mas-39；包里的管理器和命令行升到 0.7.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.7.0)。",
+        "Windows 上由管理器或命令行开机时多带两项设置，小块同步写盘快约 1.5 倍：明日方舟下资源约 7.5 → 11.5 MiB/s，下载时模拟器占的 CPU 从约 6 个核降到约 4 个。（[#35](https://github.com/ModAVD/ModAVD/issues/35)）",
+        "开机前不再按空闲内存拦着；模拟器真分不到内存时报内存不足。问题包多收管理器日志、adb 日志和 Windows 保留的端口。"
+      ],
+      "修复": [
+        "Windows 10.0.26300 上新建、开机要等满 300 秒才失败：管理器看不到已经在运行的私有 adb server。安卓开好而 adb 连不上时，现在 60 秒内就报出原因；补全组件挪目录被安全软件占着时先重试，再改用复制。（[#172](https://github.com/ModAVD/ModAVD/issues/172)）"
+      ]
+    }
+  },
+  {
     "version": "v0.39.0",
     "build": 39,
     "min_automas": "5.7.0",
