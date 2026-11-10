@@ -71,18 +71,24 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 
 管理器、输入法、截图库、执行桥源码和随包脚本都取公开仓库：管理器、输入法和截图库用各自已发布的 Release 附件，
 随包脚本和执行桥源码取发版克隆（`-Repository`，默认就是这份工具所在的克隆）当前提交的 `package/`、`bridge/`。
-发版前先把发版克隆更新到 ModAVD 的 main，`ManagerRepo`、`ImeRepo`、`ExtrasRepo` 三个克隆 `git fetch upstream --tags`。
+发版前先把发版克隆更新到 ModAVD 的发版分支 `release/0.<N>`（见 [RELEASING.md](../../RELEASING.md)「发版分支」），`ManagerRepo`、`ImeRepo`、`ExtrasRepo` 三个克隆 `git fetch upstream --tags`。
 
-截图库还没发布、要先打回归用的候选包时，加 `-ExtrasCandidate`，`-ExtrasDll` 给本机从 `-ExtrasRepo` 当前提交编出的
-`modavd_extras.dll`（例如 ModAVDExtras 的 `build.ps1 -Out <目录>`）：
+### 组件还没打 tag 时
 
-```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录> -Manager <…zip> -ImeApk <…apk> -ExtrasDll <本机编的 modavd_extras.dll> -ExtrasRepo <ModAVDExtras 检出> -ExtrasCandidate
-```
+管理器和截图库不用先发版。它们的发版准备提交（版本号、`release/<版本>.md`、`release/<版本>.SHA256SUMS.txt`）合进各自仓库的
+`release/0.<N>`（N 是 `-Build` 的构建号）以后就能打包：
 
-候选包不核对 DLL 的固定哈希（换一个 MSVC 编出的字节就不同），改查 `-ExtrasRepo` 的 HEAD：已跟踪的文件没有改动、`CMakeLists.txt` 的版本是 `EXTRAS_VERSION`，
-源码包里放的就是这个提交，`SOURCES.txt` 写明是未发布的候选。输出只能是 `<默认名>-check`（不给 `-OutputName` 就是它），不能带 `-DraftRelease`；预检和组包的输出里写着「CANDIDATE」，跑完再提醒一次。
-它只给回归用；正式发版用 Release 附件重新打一遍。
+- `v<版本>` 的 tag 在，就按 tag 核对，和以前一样。
+- tag 不在，取那个仓库 `upstream` 的 `release/0.<N>` 的头（先 `git fetch upstream`）：那个提交的版本号要是这一版
+  （管理器看 `internal/buildinfo/buildinfo.go`，截图库看 `CMakeLists.txt`），给进来的文件要和那个提交上的
+  `release/<版本>.SHA256SUMS.txt` 对上。预检和组包的输出里写着「NOT TAGGED YET」和取的提交。
+- `-Manager` 给本机从那个提交编的包（ModAVDManager 的 `build.ps1` 加 `mkzip`，同一份源码编出的字节相同）；
+  `-ExtrasDll` 给那个提交的 CI 产物（换一个 MSVC 编出的字节就不同，本机编的对不上）。
+- 包里记的是版本号和提交，`SOURCES.txt` 和 `modavd-src.tar.xz` 打没打 tag 都一样。回归用的就是这个输出；
+  发布时先把 tag 打在记下的提交上，不重新打包。
+- `-DraftRelease` 只收组件都打了 tag 的包。
+
+输入法不走这条路：它要本机正式签名，照它自己的流程先发好。
 
 | 参数 | 用途 |
 | --- | --- |
@@ -95,10 +101,9 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | `-Package` / `-Apk` | 已审核的说明/许可证目录（`LicensePackage`）、桌面 APK（`LauncherApk`） |
 | `-ImeApk` | 宿主输入法 APK，放成 `components\modavd-ime.apk`；默认空，即不带。包里每个 APK 都要在 `config/components.SHA256SUMS.txt` 固定 SHA-256：没固定的被拒，固定过的漏带或内容不同也被拒（漏带会让增量更新删掉用户机器上的文件）。预检还查 NOTICE.txt 里有它的条目。固定文件每行 `<小写 sha256>  components/<文件名>`（两个空格，不分大小写也不能重名；`Get-FileHash` 的输出要先转小写）。固定是全局的：IME 一旦写进去，重新打包 mas35 以前的构建要临时改回。另外要在 `-ImeRepo` 某个 tag 的 `release/<版本>.SHA256SUMS.txt` 里找得到这个 APK（列成 `modavd-ime.apk`），源码包放的就是那个 tag |
 | `-ExtrasDll` | ModAVDExtras 的截图库，放成 `extras\modavd_extras.dll`（0.39.0 起；MAA 这类工具从 ModAVD 根目录的 `extras\` 载入它，路径不变）；默认空，即不带。和 APK 一样固定在 `config/components.SHA256SUMS.txt`（那一行是 `<小写 sha256>  extras/modavd_extras.dll`，`components/` 以外只许这一个路径），对不上就停，固定了没给也停；版本固定在 `release_tools.py` 的 `EXTRAS_VERSION`：`-ExtrasRepo` 的 tag `v<EXTRAS_VERSION>` 下的 `release/<版本>.SHA256SUMS.txt` 要把这个 DLL 列成 `modavd_extras.dll`，源码包放的就是那个 tag。DLL 是 LGPL-3.0-or-later：NOTICE 条目在 `config/notice-additions.*`，预检还查许可证包里有 `LICENSES\LGPL-3.0.txt`、`LICENSES\GPL-3.0.txt`（换行统一成 LF 后的 SHA-256 是 `LGPL_TEXTS`）。换一版截图库就改 `EXTRAS_VERSION` 和固定的那一行 |
-| `-ExtrasRepo` | ModAVDExtras 的克隆（`ExtrasRepo`；不带截图库时可以不给）；只读 tag，tag 没取下来就停。`-ExtrasCandidate` 时取它的 HEAD |
-| `-ExtrasCandidate` | 截图库还没发布时打回归用的候选包，见上面；输出只能是 `<默认名>-check`，不能 `-DraftRelease` |
-| `-Manager` | 必填，ModAVDManager 的 Release 附件 `ModAVDManager-<版本>-win-x64.zip`。包和里面的 `ModAVD.exe`、`tools/modavd.exe` 都要和 `-ManagerRepo` 里 tag `v<版本>` 的 `release/<版本>.SHA256SUMS.txt` 一致，包里的两个 exe 就取自它；NOTICE 里的 Go 版本取那个 tag 的 go.mod |
-| `-ManagerRepo` / `-ImeRepo` | 两个公开仓库的克隆（`ManagerRepo`、`ImeRepo`；不带输入法时 `-ImeRepo` 可以不给）；只读 tag，tag 没取下来就停 |
+| `-ExtrasRepo` | ModAVDExtras 的克隆（`ExtrasRepo`；不带截图库时可以不给）；只读 tag 和 `upstream` 的发版分支，都没取下来就停 |
+| `-Manager` | 必填，`ModAVDManager-<版本>-win-x64.zip`：ModAVDManager 的 Release 附件，或者还没打 tag 时从发版分支编的。包和里面的 `ModAVD.exe`、`tools/modavd.exe` 都要和 `-ManagerRepo` 里 tag `v<版本>`（没有 tag 时是发版分支头）的 `release/<版本>.SHA256SUMS.txt` 一致，包里的两个 exe 就取自它；NOTICE 里的 Go 版本取那个提交的 go.mod |
+| `-ManagerRepo` / `-ImeRepo` | 两个公开仓库的克隆（`ManagerRepo`、`ImeRepo`；不带输入法时 `-ImeRepo` 可以不给）；管理器读 tag 和 `upstream` 的发版分支，输入法只读 tag，没取下来就停 |
 | `-Repository` | ModAVD 的发版克隆，默认是这份工具所在的克隆。随包脚本（`package/`）和执行桥源码（`bridge/`）取它当前提交，这两处有没提交的改动就停；清单、补丁、Release 说明同步进它 |
 | `-OutputRoot` / `-OutputName` | 默认 `<TempRoot>\pubrel`；名称只允许默认名或 `<默认名>-check`。输出根目录和发版克隆都不能在源码树、SDK、本机配置 `ProtectedRoots` 列的目录里，输出根目录也不能在发版克隆里 |
 | `-PrivateRules` | 仓库外的私有隐私规则（`PrivateRules`，或环境变量 `MODAVD_PRIVATE_RULES`）；开跑前就查，没有就停 |
@@ -106,7 +111,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | `-MinFreeGB` | 写之前要求的磁盘空闲，默认 120（`MinFreeGB`） |
 | `-Force` | 只重建同名、有匹配所有权标记、没有链接的本脚本输出目录；不会清理别的目录 |
 | `-Python` / `-SevenZip` | 指定可执行文件；Python 也可由 `MODAVD_PYTHON` 指定，再是本机配置 `Python`、PATH 里的 `python.exe`；7-Zip 再是本机配置 `SevenZip`、PATH 里的 `7z.exe`、`Program Files\7-Zip` |
-| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿；上传主包、源码总包、外层校验表这三个附件 |
+| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
 
 产物（以 `0.33.0` 为例）：
 
@@ -138,7 +143,7 @@ P3 审核过的 NOTICE 和 `说明.txt` 之后新发的、不再发的东西，�
 NOTICE.txt 里每个 `(package root)` 文件都要在包里。以后往包里加文件不补条目，或拿掉文件不改条目，打包都会停。
 
 源码总包多一个 `modavd-src.tar.xz`（0.36.0 时叫 `modavd-src-<提交>.tar.xz`）：各公开仓库的原样 `git archive`，
-`ModAVDManager/` 是 `-Manager` 那个 tag，`ModAVDHostIME/` 是 `-ImeApk` 对上的 tag，`ModAVDExtras/` 是 `-ExtrasDll` 对上的 tag `v<EXTRAS_VERSION>`（候选包是 `-ExtrasRepo` 的 HEAD），`ModAVD/bridge/` 是发版克隆当前提交的 `bridge/`。
+`ModAVDManager/` 是 `-Manager` 那个 tag，`ModAVDHostIME/` 是 `-ImeApk` 对上的 tag，`ModAVDExtras/` 是 `-ExtrasDll` 对上的 tag `v<EXTRAS_VERSION>`（管理器、截图库还没打 tag 时是发版分支头上的那个提交），`ModAVD/bridge/` 是发版克隆当前提交的 `bridge/`。
 归档根目录另有本仓库 HEAD 的 `LICENSE`（`package/LICENSE`，AGPL-3.0 全文，核对 `AGPL_SHA256`）和 `NOTICE`（`config/own-sources-NOTICE.txt`：哪些是自研的、例外和第三方部分、各部分的公开位置）（`OWN_SOURCES_ROOT`）；
 时间戳、属主沿用 `git archive`，根目录两个文件取三个提交里最新的提交时间，可复现。`SOURCES.txt` 第 6 节写明各部分的 tag 和提交。
 `LICENSE`、`NOTICE` 有没提交的改动时预检就停。随包脚本本身就是源码，随主包原样发出，不进这个归档。
@@ -183,4 +188,4 @@ python -I tools/pubrel/test_release.py --work <全新临时目录>
 ```
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
-覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外只许 `extras/modavd_extras.dll`）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库和 tag `v<EXTRAS_VERSION>` 的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、截图库候选包（只进 `-check` 输出、只放过截图库的哈希、ModAVDExtras 的 HEAD 有改动或版本不对就停）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
+覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外只许 `extras/modavd_extras.dll`）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库和 tag `v<EXTRAS_VERSION>` 的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。

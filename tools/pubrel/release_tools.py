@@ -143,7 +143,7 @@ OWN_SOURCES_IME_TEXT = """\
                             https://github.com/ModAVD/ModAVDHostIME
 """
 OWN_SOURCES_EXTRAS_TEXT = """\
-     ModAVDExtras/          extras\\modavd_extras.dll（截图库）：ModAVDExtras {extras_tag}（提交 {extras_commit}）{extras_note}。
+     ModAVDExtras/          extras\\modavd_extras.dll（截图库）：ModAVDExtras {extras_tag}（提交 {extras_commit}），即它的 Release 附件 modavd_extras.dll 的源码。
                             按 LGPL-3.0-or-later 发布（不是 AGPL），全文是其中的 LICENSE（LGPL-3.0）和 COPYING（GPL-3.0），
                             另见其中的 NOTICE。用 CMake 和 MSVC 编（cmake -A x64，--config Release，/Brepro）。
                             https://github.com/ModAVD/ModAVDExtras
@@ -381,8 +381,6 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
     Every such file the package carries is pinned there, and every pinned file must come with exactly that content:
     once a file has shipped, a release without it would make the incremental update delete it on users' machines. A
     file that is not pinned is refused, so shipping a new one (or a new build of one) is a reviewed change to that file.
-    The one exception is a candidate package (--extras-candidate): its EXTRAS_DLL is a local build of an unreleased
-    ModAVDExtras, checked against its checkout instead (extras_release), and the package is not for publishing.
     """
     pinned = read_sums(pinned_path)
     # NTFS ignores case: two names that differ only in case would be one file in the package
@@ -398,30 +396,28 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
         raise ValueError("desktop APK name collides with the IME APK")
     if extras:
         given[EXTRAS_DLL] = Path(extras)
-    candidate = bool(getattr(args, "extras_candidate", False))
-    if candidate and not extras:
-        raise ValueError("--extras-candidate needs --extras-dll (release.ps1 -ExtrasDll)")
     for rel, src in given.items():
         if not src.is_file():
             raise FileNotFoundError(src)
         if rel not in pinned:
             raise ValueError(f"{rel} is not pinned in {Path(pinned_path).name}")
-        if sha(src) != pinned[rel] and not (candidate and rel == EXTRAS_DLL):
-            hint = (f"; a local build of ModAVDExtras {EXTRAS_VERSION} for the regression goes in a candidate package "
-                    "(-ExtrasCandidate)") if rel == EXTRAS_DLL else ""
-            raise ValueError(f"{rel} differs from its pinned SHA-256 ({src}){hint}")
+        if sha(src) != pinned[rel]:
+            raise ValueError(f"{rel} differs from its pinned SHA-256 ({src})")
     missing = sorted(set(pinned) - set(given))
     if missing:
         raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll): {missing}")
     return given
 
 
-def check_candidate_output(args):
-    """A candidate package (--extras-candidate, an unreleased local build of the extras DLL) goes only to the
-    <name>-check output (release.ps1 picks it): it is for the regression, not for publishing."""
-    if getattr(args, "extras_candidate", False) and not Path(args.output).name.endswith("-check"):
-        raise ValueError(f"A candidate package (--extras-candidate) goes only to the <name>-check output, not {Path(args.output).name}; "
-                         "it is not for publishing")
+def check_tagged(args, own):
+    """--require-tags (release.ps1 -DraftRelease): every component is at its tag. A package built before the tags
+    exist (component_ref) is published by the serial release, which tags the recorded commits first."""
+    if not getattr(args, "require_tags", False):
+        return
+    pending = [f"{name} v{part['version']}" for name, part in own.items() if part and part.get("tagged") is False]
+    if pending:
+        raise ValueError("Not tagged yet: " + ", ".join(pending) + "; -DraftRelease takes released components only "
+                         "(tag them first, or leave the draft to the serial release)")
 
 
 def preflight(args):
@@ -461,7 +457,6 @@ def preflight(args):
     notice = (Path(args.package) / "LICENSES/NOTICE.txt").read_text(encoding="utf-8-sig")
     check_agpl(args.package)
     components = pinned_components(args)
-    check_candidate_output(args)
     if EXTRAS_DLL in components:
         check_lgpl(args.package)
     additions = NOTICE_ADDITIONS.read_text(encoding="utf-8")
@@ -473,6 +468,7 @@ def preflight(args):
     if changed(REPO, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = public_sources(args)
+    check_tagged(args, own)
     print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
           f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if EXTRAS_DLL in components else ''}, "
           f"pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
@@ -495,17 +491,48 @@ def go_toolchain(gomod):
     return m[1]
 
 
-def manager_release(zip_path, repo):
-    """The ModAVDManager release ZIP (ModAVDManager-<version>-win-x64.zip from its GitHub Release): the ZIP and the
-    programs in it are the ones release/<version>.SHA256SUMS.txt lists at tag v<version> of the checkout `repo`."""
+def component_ref(repo, version, branch=None, version_file=None, version_pattern=None):
+    """(commit, where, tagged) of release `version` of a component in the checkout `repo`.
+
+    Released: tag v<version>. Not tagged yet, and `branch` given (release/0.<N>, release.ps1 -Build): the head of the
+    remote-tracking refs/remotes/upstream/<branch>, which must already be that version (`version_pattern` finds it in
+    `version_file`, as the component's release workflow checks at the tag). release/<version>.SHA256SUMS.txt is
+    committed before the tag in both cases, so the files are checked the same way; the package records the commit, and
+    the serial release puts the tag on exactly that commit before it publishes."""
+    tag = "v" + version
+    try:
+        return git(repo, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"), tag, True
+    except RuntimeError:
+        pass
+    if not branch:
+        return tagged(repo, tag), tag, True
+    ref = f"refs/remotes/upstream/{branch}"
+    try:
+        commit = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    except RuntimeError:
+        raise ValueError(f"{repo} has neither tag {tag} nor {ref}; fetch first (git -C {repo} fetch upstream --tags)") from None
+    try:
+        found = re.findall(version_pattern, git(repo, "show", f"{commit}:{version_file}"))
+    except RuntimeError:
+        found = []
+    if found != [version]:
+        raise ValueError(f"{repo}: {version_file} at {branch} ({commit[:12]}) says {found or 'no version'}, not {version}")
+    return commit, commit, False
+
+
+def manager_release(zip_path, repo, branch=None):
+    """The ModAVDManager release ZIP (ModAVDManager-<version>-win-x64.zip, from its GitHub Release or built from the
+    release branch): the ZIP and the programs in it are the ones release/<version>.SHA256SUMS.txt lists at tag
+    v<version> of the checkout `repo`, or before that tag exists at the head of `branch` (component_ref)."""
     path = Path(zip_path or "")
     m = MANAGER_ZIP.fullmatch(path.name)
     if not m:
         raise ValueError(f"--manager must be ModAVDManager-<version>-win-x64.zip from its GitHub Release, got {zip_path!r}")
     if not path.is_file():
         raise FileNotFoundError(path)
-    version, tag = m[1], "v" + m[1]
-    commit = tagged(repo, tag)
+    version = m[1]
+    commit, tag, is_tagged = component_ref(repo, version, branch, "internal/buildinfo/buildinfo.go",
+                                           r'(?m)^(?:var|const)\s+Version\s*=\s*"([^"]+)"')
     try:
         listed = parse_sums(git(repo, "show", f"{tag}:release/{version}.SHA256SUMS.txt"), f"{tag}:release/{version}.SHA256SUMS.txt")
     except RuntimeError:
@@ -521,8 +548,8 @@ def manager_release(zip_path, repo):
         if listed.get(name) != digest:
             raise ValueError(f"{name} in {path} is not the published one: SHA-256 {digest}, "
                              f"release/{version}.SHA256SUMS.txt at {tag} lists {listed.get(name)}")
-    return {"repo": str(Path(repo).resolve()), "version": version, "tag": tag, "commit": commit,
-            "go": go_toolchain(git(repo, "show", f"{tag}:go.mod"))}
+    return {"repo": str(Path(repo).resolve()), "version": version, "tag": "v" + version, "commit": commit, "tagged": is_tagged,
+            "go": go_toolchain(git(repo, "show", f"{commit}:go.mod"))}
 
 
 def ime_release(apk, repo):
@@ -540,32 +567,16 @@ def ime_release(apk, repo):
                      f"use the APK of a published release and fetch the tags (git -C {repo} fetch upstream --tags)")
 
 
-def extras_release(dll, repo, candidate=False):
-    """The ModAVDExtras source of the shipped EXTRAS_DLL in the checkout `repo`.
-
-    A release: tag v<EXTRAS_VERSION>, whose release/<version>.SHA256SUMS.txt lists this DLL as modavd_extras.dll (the
-    release workflow there builds the DLL and checks it against that list before uploading it).
-    A candidate (`candidate`, release.ps1 -ExtrasCandidate: a local build for the regression, before that tag exists):
-    the checkout's HEAD, with no uncommitted changes to tracked files and at version EXTRAS_VERSION in CMakeLists.txt.
-    The DLL is taken as built from it; it cannot be checked, since another MSVC gives other bytes."""
+def extras_release(dll, repo, branch=None):
+    """The ModAVDExtras source of the shipped EXTRAS_DLL in the checkout `repo`: tag v<EXTRAS_VERSION>, or before that
+    tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt there lists this DLL as
+    modavd_extras.dll: the workflows there build the DLL and check it against that list (another MSVC gives other
+    bytes, so the DLL is the one CI built, not a local build)."""
     if not repo:
         raise ValueError("--extras-dll needs the ModAVDExtras checkout (release.ps1 -ExtrasRepo, local configuration ExtrasRepo)")
-    digest, name, tag = sha(dll), Path(EXTRAS_DLL).name, "v" + EXTRAS_VERSION
-    if candidate:
-        if changed(repo, untracked="no"):
-            raise ValueError(f"{repo}: uncommitted changes; a candidate package takes the ModAVDExtras source from HEAD")
-        commit = git(repo, "rev-parse", "HEAD")
-        try:
-            cmake = git(repo, "show", f"{commit}:CMakeLists.txt")
-        except RuntimeError:
-            raise ValueError(f"{repo}: no CMakeLists.txt at HEAD {commit[:12]}; is it a ModAVDExtras checkout?") from None
-        found = re.findall(r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)", cmake)
-        if found != [EXTRAS_VERSION]:
-            raise ValueError(f"{repo}: HEAD {commit[:12]} is ModAVDExtras {found or 'unknown'}, this release ships {EXTRAS_VERSION} "
-                             "(EXTRAS_VERSION)")
-        return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": None, "commit": commit, "sha256": digest,
-                "candidate": True}
-    commit = tagged(repo, tag)
+    digest, name = sha(dll), Path(EXTRAS_DLL).name
+    commit, tag, is_tagged = component_ref(repo, EXTRAS_VERSION, branch, "CMakeLists.txt",
+                                           r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)")
     where = f"{tag}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"
     try:
         listed = parse_sums(git(repo, "show", where), where)
@@ -573,20 +584,21 @@ def extras_release(dll, repo, candidate=False):
         raise ValueError(f"{repo}: no release/{EXTRAS_VERSION}.SHA256SUMS.txt at {tag}") from None
     if listed.get(name) != digest:
         raise ValueError(f"{dll} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
-    return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": tag, "commit": commit, "sha256": digest}
+    return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": "v" + EXTRAS_VERSION, "commit": commit,
+            "tagged": is_tagged, "sha256": digest}
 
 
 def public_sources(args):
     """What the package takes from the public repositories, checked: the manager ZIP against the checksums at its
-    tag, the IME APK against the tag that lists it, the extras DLL against the checksums at tag v<EXTRAS_VERSION>
-    (or, in a candidate package, the HEAD of the ModAVDExtras checkout), and package/ and bridge/ of the ModAVD release
-    checkout unchanged since its HEAD. assemble records the result in the snapshot, so every later step uses the same
-    revisions."""
+    tag, the IME APK against the tag that lists it, the extras DLL against the checksums at tag v<EXTRAS_VERSION>,
+    and package/ and bridge/ of the ModAVD release checkout unchanged since its HEAD. With --release-branch the
+    manager and the extras library may also be at the head of that branch of their repository, before their tags
+    exist (component_ref). assemble records the result in the snapshot, so every later step uses the same revisions."""
     extras = getattr(args, "extras_dll", None)
-    own = {"manager": manager_release(args.manager, args.manager_repo),
+    branch = getattr(args, "release_branch", None)
+    own = {"manager": manager_release(args.manager, args.manager_repo, branch),
            "ime": ime_release(args.ime_apk, args.ime_repo) if getattr(args, "ime_apk", None) else None,
-           "extras": extras_release(extras, getattr(args, "extras_repo", None), getattr(args, "extras_candidate", False))
-           if extras else None}
+           "extras": extras_release(extras, getattr(args, "extras_repo", None), branch) if extras else None}
     repo = release_repository(args.repository, getattr(args, "protect", None))
     if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
@@ -601,12 +613,11 @@ def public_sources(args):
 
 
 def describe_sources(own):
+    def at(part):
+        return part["tag"] if part.get("tagged", True) else f"{part['tag']} (NOT TAGGED YET: release branch head {part['commit'][:12]})"
     ime = f", ModAVDHostIME {own['ime']['tag']}" if own["ime"] else ""
-    extras = own.get("extras")
-    if extras:
-        extras = (f", ModAVDExtras {extras['tag']}" if extras["tag"] else
-                  f", ModAVDExtras {extras['version']} CANDIDATE (HEAD {extras['commit'][:12]}, DLL SHA-256 {extras['sha256']}; not for publishing)")
-    return (f"ModAVDManager {own['manager']['tag']} (Go {own['manager']['go']}){ime}{extras or ''}, "
+    extras = f", ModAVDExtras {at(own['extras'])}" if own.get("extras") else ""
+    return (f"ModAVDManager {at(own['manager'])} (Go {own['manager']['go']}){ime}{extras}, "
             f"ModAVD package/ and bridge/ at {own['modavd']['commit'][:12]}")
 
 
@@ -651,7 +662,6 @@ def assemble(args):
     version = release_version(args.build, args.patch)
     number = build_number(args.build)
     current = read_changelog(args.changelog, version, number)[0]
-    check_candidate_output(args)
     own = public_sources(args)
     # Later steps take the public version and the public sources from the output copy of the snapshot.
     data.update(version=version, patch=int(args.patch or 0), upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
@@ -1328,8 +1338,7 @@ def own_sources_text(own):
         modavd_commit=own["modavd"]["commit"][:12],
         ime=OWN_SOURCES_IME_TEXT.format(ime_tag=ime["tag"], ime_commit=ime["commit"][:12]) if ime else "",
         extras=OWN_SOURCES_EXTRAS_TEXT.format(
-            extras_tag=extras["tag"] or extras["version"], extras_commit=extras["commit"][:12],
-            extras_note="，即它的 Release 附件 modavd_extras.dll 的源码" if extras["tag"] else "（未发布的候选，DLL 是本机编的，不发布）")
+            extras_tag=extras["tag"], extras_commit=extras["commit"][:12])
         if extras else "")
 
 
@@ -1701,8 +1710,10 @@ def main():
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
                  "extras-dll", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
-    # with --extras-dll: a local build of an unreleased ModAVDExtras, for a <name>-check package (release.ps1 -ExtrasCandidate)
-    parser.add_argument("--extras-candidate", action="store_true")
+    # release/0.<N>: the manager and the extras library may be at the head of this branch before their tags exist
+    parser.add_argument("--release-branch")
+    # preflight: every component must be tagged (release.ps1 -DraftRelease)
+    parser.add_argument("--require-tags", action="store_true")
     parser.add_argument("--keep-incoming", action="append", default=[])
     # privacy-release with --privacy-cache: scan everything and only write the cache (release.ps1 -DraftRelease)
     parser.add_argument("--privacy-cache-write-only", action="store_true")
