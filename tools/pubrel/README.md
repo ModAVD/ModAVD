@@ -69,7 +69,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 
 默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\mas34`。
 
-管理器、输入法、截图库、执行桥源码和随包脚本都取公开仓库：管理器、输入法和截图库用各自已发布的 Release 附件，
+管理器、输入法、截图库、执行桥源码和随包脚本都取公开仓库：管理器、输入法和截图库用各自 Release 的附件（管理器、截图库还没打 tag 时见下面一节），
 随包脚本和执行桥源码取发版克隆（`-Repository`，默认就是这份工具所在的克隆）当前提交的 `package/`、`bridge/`。
 发版前先把发版克隆更新到 ModAVD 的发版分支 `release/0.<N>`（见 [RELEASING.md](../../RELEASING.md)「发版分支」），`ManagerRepo`、`ImeRepo`、`ExtrasRepo` 三个克隆 `git fetch upstream --tags`。
 
@@ -111,7 +111,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | `-MinFreeGB` | 写之前要求的磁盘空闲，默认 120（`MinFreeGB`） |
 | `-Force` | 只重建同名、有匹配所有权标记、没有链接的本脚本输出目录；不会清理别的目录 |
 | `-Python` / `-SevenZip` | 指定可执行文件；Python 也可由 `MODAVD_PYTHON` 指定，再是本机配置 `Python`、PATH 里的 `python.exe`；7-Zip 再是本机配置 `SevenZip`、PATH 里的 `7z.exe`、`Program Files\7-Zip` |
-| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
+| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿（tag 指向 `release/0.<N>`）；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
 
 产物（以 `0.33.0` 为例）：
 

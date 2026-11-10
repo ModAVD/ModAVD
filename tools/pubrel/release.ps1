@@ -124,9 +124,9 @@ function Run-Python([string[]]$Arguments) {
     & $Python -I $helper @Arguments
     if ($LASTEXITCODE -ne 0) { throw "release_tools.py 返回 $LASTEXITCODE" }
 }
-function Step([int]$Number, [string]$Title, [scriptblock]$Action) {
-    Write-Host "[$Number/8] $Title"
-    try { & $Action } catch { throw "步骤 $Number（$Title）失败：$($_.Exception.Message)" }
+function Step([int]$StepNumber, [string]$Title, [scriptblock]$Action) {
+    Write-Host "[$StepNumber/8] $Title"
+    try { & $Action } catch { throw "步骤 $StepNumber（$Title）失败：$($_.Exception.Message)" }
 }
 # preflight validates the SDK, version, release texts, immutable baseline assets, the license package (AGPL-3.0 full text),
 # disk budget and snapshot before any deletion.
@@ -151,7 +151,7 @@ New-Item -ItemType Directory -Path $out | Out-Null
 Run-Python @('own', '--output', $out, '--build', $Build)
 $common = @('--output', $out)
 Step 1 '组装 release 目录并写清单（管理器取它的 Release 包，随包脚本取 ModAVD 的 package/）' {
-    Run-Python (@('assemble') + $common + $texts + $public + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot,
+    Run-Python (@('assemble') + $tagArgs + $common + $texts + $public + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot,
         '--package', $Package, '--apk', $Apk) + $componentArgs)
 }
 # 主包带平台（以后可能有 linux-x64），源码包不带；和 release_tools.py 的 PLATFORM 一致
@@ -189,7 +189,7 @@ Step 8 '隐私扫描（含全部源码包成员，加上仓库外的私有规则
 if ($DraftRelease) {
     Write-Host '[9] 创建 GitHub 草稿（不会发布）'
     $upload = @($zip, $sourcesZip, (Join-Path $out 'SHA256SUMS.txt'))
-    & gh release create "v$version" --draft --repo ModAVD/ModAVD --title "ModAVD mas-$number（$version）" --notes-file (Join-Path $out 'release-notes.md') @upload
+    & gh release create "v$version" --draft --repo ModAVD/ModAVD --target "release/0.$number" --title "ModAVD mas-$number（$version）" --notes-file (Join-Path $out 'release-notes.md') @upload
     if ($LASTEXITCODE -ne 0) { throw "步骤 9（创建草稿）失败：gh 返回 $LASTEXITCODE；未自动重试，请检查草稿状态" }
 }
 Write-Host "完成：$out（v$version）"

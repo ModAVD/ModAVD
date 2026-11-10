@@ -409,6 +409,14 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
     return given
 
 
+def checked_sources(args):
+    """public_sources, and with --require-tags every component at its tag (check_tagged): what preflight and assemble
+    both go by, so the snapshot cannot record an untagged component in a run that makes the draft."""
+    own = public_sources(args)
+    check_tagged(args, own)
+    return own
+
+
 def check_tagged(args, own):
     """--require-tags (release.ps1 -DraftRelease): every component is at its tag. A package built before the tags
     exist (component_ref) is published by the serial release, which tags the recorded commits first."""
@@ -467,8 +475,7 @@ def preflight(args):
     # modavd-src takes LICENSE and NOTICE from HEAD
     if changed(REPO, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
-    own = public_sources(args)
-    check_tagged(args, own)
+    own = checked_sources(args)
     print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
           f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if EXTRAS_DLL in components else ''}, "
           f"pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
@@ -505,7 +512,7 @@ def component_ref(repo, version, branch=None, version_file=None, version_pattern
     except RuntimeError:
         pass
     if not branch:
-        return tagged(repo, tag), tag, True
+        raise ValueError(f"{repo} has no tag {tag}; fetch the tags first (git -C {repo} fetch upstream --tags)")
     ref = f"refs/remotes/upstream/{branch}"
     try:
         commit = git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
@@ -527,14 +534,15 @@ def manager_release(zip_path, repo, branch=None):
     path = Path(zip_path or "")
     m = MANAGER_ZIP.fullmatch(path.name)
     if not m:
-        raise ValueError(f"--manager must be ModAVDManager-<version>-win-x64.zip from its GitHub Release, got {zip_path!r}")
+        raise ValueError(f"--manager must be ModAVDManager-<version>-win-x64.zip (its GitHub Release asset, or built from its release branch), got {zip_path!r}")
     if not path.is_file():
         raise FileNotFoundError(path)
     version = m[1]
     commit, tag, is_tagged = component_ref(repo, version, branch, "internal/buildinfo/buildinfo.go",
                                            r'(?m)^(?:var|const)\s+Version\s*=\s*"([^"]+)"')
     try:
-        listed = parse_sums(git(repo, "show", f"{tag}:release/{version}.SHA256SUMS.txt"), f"{tag}:release/{version}.SHA256SUMS.txt")
+        # read at the commit, not by name: the name is only for messages
+        listed = parse_sums(git(repo, "show", f"{commit}:release/{version}.SHA256SUMS.txt"), f"{tag}:release/{version}.SHA256SUMS.txt")
     except RuntimeError:
         raise ValueError(f"{repo}: no release/{version}.SHA256SUMS.txt at {tag}") from None
     got = {path.name: sha(path)}
@@ -579,7 +587,7 @@ def extras_release(dll, repo, branch=None):
                                            r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)")
     where = f"{tag}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"
     try:
-        listed = parse_sums(git(repo, "show", where), where)
+        listed = parse_sums(git(repo, "show", f"{commit}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"), where)
     except RuntimeError:
         raise ValueError(f"{repo}: no release/{EXTRAS_VERSION}.SHA256SUMS.txt at {tag}") from None
     if listed.get(name) != digest:
@@ -662,7 +670,7 @@ def assemble(args):
     version = release_version(args.build, args.patch)
     number = build_number(args.build)
     current = read_changelog(args.changelog, version, number)[0]
-    own = public_sources(args)
+    own = checked_sources(args)
     # Later steps take the public version and the public sources from the output copy of the snapshot.
     data.update(version=version, patch=int(args.patch or 0), upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
                 own=own)
@@ -688,7 +696,7 @@ def assemble(args):
     for rel, src in pinned_components(args).items():
         copy(src, dest / rel)
         # checked again after the copy: the source may have been rebuilt in between. The extras DLL against what
-        # public_sources recorded (the pinned SHA-256, or in a candidate package the local build it saw).
+        # public_sources recorded (the pinned SHA-256).
         want = own["extras"]["sha256"] if rel == EXTRAS_DLL else pinned[rel]
         if sha(dest / rel) != want:
             raise ValueError(f"{rel} in the package differs from its pinned SHA-256")

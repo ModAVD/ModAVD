@@ -960,6 +960,11 @@ class ReleaseChecks(unittest.TestCase):
         got = release.public_sources(next_args)["manager"]
         self.assertEqual({k: got[k] for k in ("version", "tag", "commit", "tagged", "go")},
                          {"version": "0.4.0", "tag": "v0.4.0", "commit": head, "tagged": False, "go": "go1.26.5"})
+        # the run that makes the draft (--require-tags; preflight and assemble both go through checked_sources) refuses it
+        self.assertEqual(release.checked_sources(next_args)["manager"]["commit"], head)
+        with self.assertRaisesRegex(ValueError, r"Not tagged yet: manager v0\.4\.0;"):
+            release.checked_sources(SimpleNamespace(**{**vars(next_args), "require_tags": True}))
+        release.checked_sources(SimpleNamespace(**{**vars(with_branch), "require_tags": True}))
         described = release.describe_sources(release.public_sources(next_args))
         self.assertIn(f"ModAVDManager v0.4.0 (NOT TAGGED YET: release branch head {head[:12]})", described)
         self.assertIn(f"ModAVDExtras v{release.EXTRAS_VERSION},", described)
@@ -980,6 +985,9 @@ class ReleaseChecks(unittest.TestCase):
         release.git(mgr, "tag", "v0.4.0", head)
         got = release.public_sources(next_args)["manager"]
         self.assertEqual((got["commit"], got["tagged"]), (head, True))
+        # the checksums are read at that commit: what a later commit (the checkout's HEAD) lists does not count
+        self.commit_files(mgr, {"release/0.4.0.SHA256SUMS.txt": self.sums_line(zip4.name, b"other").encode()})
+        self.assertEqual(release.public_sources(next_args)["manager"]["commit"], head)
         # the extras library the same way: a branch head at EXTRAS_VERSION whose checksums list the DLL
         release.git(extras, "tag", "-d", "v" + release.EXTRAS_VERSION)
         with self.assertRaisesRegex(ValueError, "neither tag"):

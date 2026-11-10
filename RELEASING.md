@@ -63,7 +63,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
 
 先按「发版分支」的顺序把这一版新发的组件发掉：tag 打在包里记的那个提交上（预检的输出里有，也记在输出目录 `snapshot.json` 的 `own` 里），它们的 Release 发布以后再建本仓库的草稿。
 
-回归通过的输出可以直接拿来建草稿（`gh release create v<版本> --draft`，附件是输出里的主包、源码总包和外层 `SHA256SUMS.txt`，说明用 `release-notes.md`），这样发出去的就是测过的字节。要重新生成的话，显式添加 `-DraftRelease`：它只收组件都打了 tag 的包。已有本地输出时可以使用 `-Force`，它只重建有匹配所有权标记的本次输出目录；失败时保留现场。
+然后显式添加 `-DraftRelease` 重新生成并创建草稿：它只收组件都打了 tag 的包，隐私扫描不读缓存、全部重扫，草稿的 tag 指向 `release/0.<N>`。已有本地输出时可以使用 `-Force`，它只重建有匹配所有权标记的本次输出目录；失败时保留现场。
 
 ```powershell
 pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Force -DraftRelease
