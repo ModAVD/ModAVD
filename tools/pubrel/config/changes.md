@@ -1,7 +1,7 @@
 ## 怎么更新
 
 - 这一版只重新打包：模拟器还是 mas-39，没有重编；包里的管理器和命令行升到 0.7.0（改动见 [它的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.7.0)）；截图库、执行桥、宿主输入法都和 0.39.0 一样。
-- 在 Windows 10.0.26300 上新建、开机要等满 300 秒才失败的，更新到这一版就好了。（[#172](https://github.com/ModAVD/ModAVD/issues/172)）
+- 在 Windows 10.0.26300 上新建、开机要等满 300 秒才失败的，更新到这一版应该就好了；这个问题我们这里复现不了，更新后还遇到的请附上问题包。（[#172](https://github.com/ModAVD/ModAVD/issues/172)）
 - 管理器「设置」里的「更新」从这一版起能用了；更新到这一版本身，还是照下面原来的办法。
 - 先关掉所有实例（在 AUTO-MAS 或管理器里关机）再更新；关掉后稍等半分钟再覆盖。手动更新时用新包整个覆盖解压，`avd` 文件夹不会被动到。不用在 AUTO-MAS 里重新添加。
 - 第一次装：主包里没有外层文件夹，请用右键「全部解压缩」或 7-Zip「解压到 <包名>\」。解压后双击 `ModAVD.exe`，点上方提示里的「补全组件」下载 adb 和系统镜像，再新建实例；要接入 AUTO-MAS 的，再到 AUTO-MAS 里添加，详见 `说明.txt`。
@@ -27,7 +27,7 @@
 |---|---|---|
 | 从 0.39.0 升级：0.39.0 自带的命令行（管理器 0.6.0）`update install` | 包根文件和新包相同；旧实例都在 | 通过：候选没发布，先用 0.6.0 自己的更新代码把本地包暂存进 `.update`（按清单核对 304 个文件，20 秒），再 `update install`，2.3 秒换好；包根 303 个文件逐个相同；旧实例都在 |
 | 从 0.39.0 手动覆盖升级：ModAVDE2E 的 upgrade 项 | 旧实例照常开机、数据都在；扩盘；装桥；输入法跟着包过来 | 通过：364 秒；数据在；旧版建的 64 GB 盘改大到 80 GB 扩满；升级后开机自动装上执行桥；客体里的输入法和包里的逐字节相同、是默认 |
-| 开关机主路径和写盘的两项开机设置（ModAVDManager#116） | 开机正常；qemu 带上 `virtio-blk-pci.ioeventfd=off` 和 `_CST` 表；客体 cpuidle 是 `acpi_idle`、不起忙等守护；正常关机 | 通过：无头开机 12.8 秒、合计 39.4 秒；两项都在 qemu 命令行里；客体是 `acpi_idle`，没有 `mas-idlepoll.sh`；执行桥 verify 全过，输入法是默认；正常关机 8.0 秒 |
+| 开关机主路径和写盘的两项开机设置（[ModAVD/ModAVDManager#116](https://github.com/ModAVD/ModAVDManager/pull/116)） | 开机正常；qemu 带上 `virtio-blk-pci.ioeventfd=off` 和 `_CST` 表；客体 cpuidle 是 `acpi_idle`、不起忙等守护；正常关机 | 通过：无头开机 12.8 秒、合计 39.4 秒；两项都在 qemu 命令行里；客体是 `acpi_idle`，没有 `mas-idlepoll.sh`；执行桥 verify 全过，输入法是默认；正常关机 8.0 秒 |
 | 新建默认装执行桥：ModAVDE2E 的 bridge-default | 新建默认装桥；卸 / 装全流程 | 通过：540 秒，各项核对全过 |
 | 新建数据盘与扩容：ModAVDE2E 的 datadisk | inode 1048576；16 → 32 GB 在线扩满 | 通过：154 秒；/data 31.3 GB |
 | 宿主输入法：ModAVDE2E 的 ime-pkg（包里的正式签名 APK） | 新建自动装好、设为默认；通道 20 项；开发签名换回正式签名 | 通过：329 秒；通道 PASS 20、FAIL 0 |

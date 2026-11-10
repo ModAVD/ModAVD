@@ -9,7 +9,7 @@
       ],
       "变更": [
         "只重新打包：模拟器还是 mas-39；包里的管理器和命令行升到 0.7.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.7.0)。",
-        "Windows 上由管理器或命令行开机时多带两项设置，小块同步写盘快约 1.5 倍：明日方舟下资源约 7.5 → 11.5 MiB/s，下载时不再把每个核占满。（[#35](https://github.com/ModAVD/ModAVD/issues/35)）",
+        "Windows 上由管理器或命令行开机时多带两项设置，小块同步写盘快约 1.5 倍：明日方舟下资源约 7.5 → 11.5 MiB/s，下载时模拟器占的 CPU 从约 6 个核降到约 4 个。（[#35](https://github.com/ModAVD/ModAVD/issues/35)）",
         "开机前不再按空闲内存拦着；模拟器真分不到内存时报内存不足。问题包多收管理器日志、adb 日志和 Windows 保留的端口。"
       ],
       "修复": [
