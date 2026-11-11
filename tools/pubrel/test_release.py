@@ -670,19 +670,22 @@ class ReleaseChecks(unittest.TestCase):
         gone = ["tools/fetch-components.ps1", "tools/collect-info.ps1", "补全组件.bat", "收集问题信息.bat"]
         icon_files, script_files = ["./emulator.exe"], [*(f"(package root) {n}" for n in gone), "(package root) 说明.txt",
                                                          "(package root) LICENSES/NOTICE.txt", "(package root) LICENSES/NOTICE.csv"]
+        # and its scripts entry speaks of batch files (SCRIPT_NOTICE_EDITS)
+        script_body = "".join(old for old, _ in release.SCRIPT_NOTICE_EDITS)
         notice = ("header: " + icon_ref + "\n\n" + entry(release.ICON_ENTRY_OLD, icon_files, icon_body) +
-                  entry("ModAVD scripts and documents", script_files) + "#" * 79 + "\n# PART 3. Full license texts\n")
+                  entry("ModAVD scripts and documents", script_files, script_body) + "#" * 79 + "\n# PART 3. Full license texts\n")
         (tree / "LICENSES").mkdir()
         (tree / "LICENSES/NOTICE.txt").write_text(notice, encoding="utf-8")
         rows = [["External Library Name", "Link to License", "License Name", "Binaries using the license", "URL", "ModAVD note"],
                 [release.ICON_ENTRY_OLD, "", "Not licensed (see text)", " ".join(icon_files), "", "a, quoted note"],
-                ["ModAVD scripts and documents", "", "AGPL-3.0-or-later (scripts and batch files) / Apache-2.0 (documents)",
+                ["ModAVD scripts and documents", "", release.SCRIPT_CSV_LICENSE[0],
                  " ".join(script_files), "", ""]]
         (tree / "LICENSES/NOTICE.csv").write_text(release.render_csv(rows), encoding="utf-8")
         (tree / "LICENSES/Apache-2.0.txt").write_text("license text", encoding="utf-8")
         # the reviewed 说明.txt has each passage README_EDITS rewrites
-        step, trouble, licence, icon = (old for old, _ in release.README_EDITS)
-        readme = ("安装\n\n1. 解压。\n\n" + step + "\n3. 新建实例。\n\n====================\n出问题怎么办\n====================\n\n" +
+        step, trouble, licence, icon, upgrade = (old for old, _ in release.README_EDITS)
+        readme = ("安装\n\n1. 解压。\n\n" + step + "\n3. 新建实例。\n\n- 升级：整个覆盖解压。\n" + upgrade +
+                  "\n====================\n出问题怎么办\n====================\n\n" +
                   trouble + "\n====================\n许可证\n====================\n\n" + licence + "AGPL-3.0-or-later 发布。\n" + icon)
         (tree / "说明.txt").write_text(readme, encoding="utf-8")
         shipped = [*release.MODAVD_FILES.values(), "tools/modavd-bridge.ps1", release.EXTRAS_DLL,
@@ -707,8 +710,10 @@ class ReleaseChecks(unittest.TestCase):
         self.assertIn("(package root) ModAVD.exe\nThe notices is included for the library: ModAVD program icon\n", text)
         self.assertIn('header: see "ModAVD program icon" in Part 2.\n', text)
         self.assertIn("as changed by\nModAVD) is ModAVD's own icon.\n\nNot licensed.", text)
-        for old in ["fan art", "Eyjafjalla", "Hypergryph"]:
+        for old in ["fan art", "Eyjafjalla", "Hypergryph", "batch files", ".bat files"]:
             self.assertNotIn(old, text)
+        for _, new in release.SCRIPT_NOTICE_EDITS:
+            self.assertEqual(text.count(new), 1)
         self.assertIn("Go go1.26.5 (runtime and standard library)", text)
         self.assertLess(text.index("ModAVD arm64 execution bridge"), text.index("# PART 3."))
         # the extras DLL: its own entry, LGPL-3.0-or-later with both texts it needs
@@ -719,6 +724,7 @@ class ReleaseChecks(unittest.TestCase):
         self.assertNotIn("{{", text)
         csv_rows = list(release.csv.reader(io.StringIO((tree / "LICENSES/NOTICE.csv").read_text(encoding="utf-8"))))
         self.assertEqual([csv_rows[1][0], csv_rows[1][5]], [release.ICON_ENTRY, release.ICON_CSV_NOTE])
+        self.assertEqual(csv_rows[2][2], release.SCRIPT_CSV_LICENSE[1])
         self.assertTrue(csv_rows[1][3].endswith("(package root) ModAVD.exe"))
         self.assertEqual(len(csv_rows), 7)
         self.assertEqual(csv_rows[6][2:4], ["LGPL-3.0-or-later", "(package root) extras/modavd_extras.dll"])

@@ -82,7 +82,24 @@ README_EDITS = [
      "ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按\n"),
     ("程序图标是同人创作（《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有），\n不随本包的任何许可证授权。\n",
      "程序图标是 ModAVD 自己的图标，不随本包的任何许可证授权。\n"),
+    # a manual upgrade over a 0.38.1 or older folder leaves the batch files and scripts behind (ModAVD/ModAVD#140)
+    ("  不要删 avd 文件夹，游戏和登录状态都在里面。\n",
+     "  不要删 avd 文件夹，游戏和登录状态都在里面。\n"
+     "  从 0.38.1 及更早的版本覆盖升级的，包根「补全组件」「收集问题信息」「复制配置信息」三个批处理\n"
+     "  和 tools 里的 fetch-components.ps1、collect-info.ps1、report-config.ps1 不再用到，可以自己删。\n"),
 ]
+# The scripts entry of the reviewed NOTICE still speaks of batch files; the package has one .ps1 left
+# (ModAVD/ModAVD#140). NOTICE.txt passages, each exactly once, and the entry's license name in NOTICE.csv.
+SCRIPT_NOTICE_EDITS = [
+    ("The scripts and batch files of ModAVD (the .ps1 and .bat files listed above):\n",
+     "The scripts of ModAVD (the .ps1 files listed above):\n"),
+    ("Source code: https://github.com/ModAVD/ModAVD/tree/main/package; the .ps1\nand .bat files listed above are "
+     "themselves the source code.\n",
+     "Source code: https://github.com/ModAVD/ModAVD/tree/main/package; the .ps1\nfiles listed above are themselves "
+     "the source code.\n"),
+]
+SCRIPT_CSV_LICENSE = ("AGPL-3.0-or-later (scripts and batch files) / Apache-2.0 (documents)",
+                      "AGPL-3.0-or-later (scripts) / Apache-2.0 (documents)")
 # The program icon is ModAVD's own; the reviewed NOTICE called it fan art. Its passages that said so and what they say
 # now, applied first in extend_texts, each old passage exactly once; in NOTICE.csv the entry gets ICON_ENTRY as its name
 # and ICON_CSV_NOTE as its note.
@@ -741,12 +758,12 @@ def render_csv(rows):
 
 def extend_texts(dest, go):
     """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: ICON_NOTICE_EDITS
-    (and the icon entry's name and note in NOTICE.csv), NOTICE_GONE_FILES out of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
+    (and the icon entry's name and note in NOTICE.csv), SCRIPT_NOTICE_EDITS (and SCRIPT_CSV_LICENSE), NOTICE_GONE_FILES out of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
     (`go`: the Go version the manager was built with), README_EDITS in 说明.txt and config/readme-tools.txt before its
     troubleshooting section. Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
-    for old, new in ICON_NOTICE_EDITS:
+    for old, new in ICON_NOTICE_EDITS + SCRIPT_NOTICE_EDITS:
         if text.count(old) != 1:
             raise ValueError(f"NOTICE.txt: the passage {old.strip().splitlines()[0]!r} not found exactly once")
         text = text.replace(old, new)
@@ -783,6 +800,11 @@ def extend_texts(dest, go):
     if len(hits) != 1:
         raise ValueError(f"NOTICE.csv: entry {ICON_ENTRY_OLD!r} not found exactly once")
     hits[0][name_col], hits[0][rows[0].index("ModAVD note")] = ICON_ENTRY, ICON_CSV_NOTE
+    license_col = rows[0].index("License Name")
+    hits = [r for r in rows[1:] if r[license_col] == SCRIPT_CSV_LICENSE[0]]
+    if len(hits) != 1:
+        raise ValueError(f"NOTICE.csv: license {SCRIPT_CSV_LICENSE[0]!r} not found exactly once")
+    hits[0][license_col] = SCRIPT_CSV_LICENSE[1]
     for lib, files in NOTICE_GONE_FILES.items():
         hits = [r for r in rows[1:] if r[name_col] == lib]
         if len(hits) != 1:
