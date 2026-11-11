@@ -1,0 +1,44 @@
+From 226b5b5567978287489cf23036cd71eac9cda99e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 11 Nov 2026 02:44:10 +0100
+Subject: [PATCH] MAS local: activate the lean window on a title bar click
+
+DefWindowProc answers WM_MOUSEACTIVATE with MA_NOACTIVATE for HTCAPTION;
+a normal window is activated and raised later, by DefWindowProc's own
+WM_NCLBUTTONDOWN(HTCAPTION). The lean frame takes that press itself to
+drag without the system move loop, so a click on the title bar of a
+covered window left it behind the other one. Answer MA_ACTIVATE for the
+caption, as DefWindowProc does for the picture and the borders.
+
+Refs ModAVD/ModAVD#160
+
+Change-Id: Iee0be1062c530ebcb96d0add2542e92e279b0500
+---
+ .../src/android/skin/qt/windows-lean-frame.cpp        | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+index ed0eb8a1f..c9de2fcc6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -213,6 +213,17 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             return true;
+         }
+ 
++        case WM_MOUSEACTIVATE:
++            // DefWindowProc answers MA_NOACTIVATE for the caption: a normal
++            // window is activated and raised later, by DefWindowProc's own
++            // WM_NCLBUTTONDOWN(HTCAPTION), which the press below never reaches.
++            // Activate here, as for a click on the picture or a border.
++            if (static_cast<short>(LOWORD(msg->lParam)) != HTCAPTION) {
++                return false;
++            }
++            *result = MA_ACTIVATE;
++            return true;
++
+         case WM_NCLBUTTONDOWN:
+         case WM_NCLBUTTONDBLCLK: {
+             // A double click on the title bar does not maximize; it is just
+-- 
+2.54.0.windows.1
+
