@@ -1,5 +1,9 @@
 # 随包脚本
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 Release 主包里自带的脚本，和包里发出的文件逐字节相同。比的是包里的字节，也就是维护者本地仓库工作区里的文件（那边 `core.autocrlf=true` 检出，`.ps1` 是 CRLF），不是那边 Git 里存的内容（LF）。现在只有一个 `modavd-bridge.ps1`，放在包的 `tools\` 里。
 
 | 文件 | 做什么 | 从哪一版起在包里 |

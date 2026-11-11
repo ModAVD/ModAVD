@@ -1,5 +1,9 @@
 # 发版和编译工具
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 维护者和平台负责人用的工具，不随包发出。入口都是 PowerShell 7（`pwsh`），辅助代码只用 Python 3.12 标准库。
 发版前回归（端到端测试）在单独的仓库 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)：它在装好的整包上测、跨好几个仓库，
 要测试机和游戏实例，不跟着这个仓库发版。

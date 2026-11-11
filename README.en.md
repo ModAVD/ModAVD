@@ -36,7 +36,7 @@ Compared with the official emulator, the published 0.39.0 build no longer upload
 
 Version numbers have been written as `0.<build number>.<repackage count>` since `0.32.1`: 0 means it is still in beta, and the build number is the mas-N. The current version is `0.39.0` (build number mas-39).
 
-This repository holds the emulator patches, the arm64 execution bridge ([bridge/](bridge/), in Chinese) and the bundled scripts ([package/](package/), in Chinese). The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), and the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME).
+This repository holds the emulator patches, the arm64 execution bridge ([bridge/](bridge/README.en.md)) and the bundled scripts ([package/](package/README.en.md)). The manager and the CLI are in [ModAVDManager](https://github.com/ModAVD/ModAVDManager), and the host IME is in [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME).
 
 ## Tested games
 
