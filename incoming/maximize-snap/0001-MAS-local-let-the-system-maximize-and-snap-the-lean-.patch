@@ -1,0 +1,1458 @@
+From c63fc4ae4b09698a8294108d98e9a45552e19274 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 11 Nov 2026 23:21:09 +0100
+Subject: [PATCH] MAS local: let the system maximize and snap the lean window
+
+The lean window moved and resized itself, without the caption's resizable
+frame and maximize box, so that Windows never snapped or maximized it: the
+guest screen has a fixed shape and would have been stretched. Now the guest
+screen is fitted into a window of another shape and centered, with black
+around it, so the window can be handled like any other.
+
+The frame: WS_THICKFRAME and WS_MAXIMIZEBOX are back, the client area still
+covers the whole window. A press on the title bar or a resize band goes on
+to DefWindowProc, whose move and size loops snap the window at the edges of
+the screen, maximize it at the top and maximize or restore it on a double
+click; SC_MAXIMIZE, SC_MOVE and SC_SIZE are no longer refused and the system
+menu has its usual items again. WM_SIZING keeps the guest screen's shape
+while an edge is dragged. A maximized window hangs over the work area by its
+frame, which is client area here: the title bar and the guest screen keep
+out of that part, and there are no resize bands. The title bar gets no
+maximize button.
+
+The contents: the container no longer undoes a maximize. The scroll area
+centers the guest screen, and the GPU subwindow follows through the content
+offset. When the window was given a size (maximized, snapped, restored,
+SetWindowPos) it keeps it and the guest screen is fitted into it, soon after
+the resize instead of half a second later; when the guest screen changes on
+its own (first show, rotation, the scale shortcuts) the window still takes
+its size, unless the system holds the window, and then the guest screen is
+fitted again. Clicks on the bars land on the scroll area's viewport, not on
+the guest screen, so they send no touch.
+
+DefWindowProc's WM_NCLBUTTONDOWN(HTCAPTION) activates and raises the window,
+so the WM_MOUSEACTIVATE answer for the caption (ModAVD#160) is not needed
+any more and goes.
+
+Refs ModAVD/ModAVD#161
+
+Change-Id: If1ac16118d72b803677073a6457f5a46e552d53d
+---
+ .../android/skin/qt/emulator-container.cpp    | 110 +++++++-
+ .../src/android/skin/qt/emulator-container.h  |  25 +-
+ .../android/skin/qt/emulator-qt-window.cpp    |  60 +++-
+ .../src/android/skin/qt/emulator-qt-window.h  |   7 +
+ .../src/android/skin/qt/tool-window.cpp       |   4 +-
+ .../android/skin/qt/windows-lean-frame.cpp    | 261 ++++++++----------
+ .../src/android/skin/qt/windows-lean-frame.h  |  67 +++--
+ .../include/android/lean-window-frame.h       |  69 ++---
+ .../src/android/lean-window-frame.cpp         | 103 ++-----
+ .../android/lean-window-frame_unittest.cpp    | 227 +++++++--------
+ 10 files changed, 483 insertions(+), 450 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 1730008d1..a1b682bab 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -131,7 +131,9 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+     const bool lean = ToolWindow::inWindowNav();
+     if (lean) {
+         setWindowFlags(kLeanWindowFlags);
+-        setStyleSheet(QStringLiteral("EmulatorContainer { background: #20212D; }"));
++        // Black around the guest screen where the window has another shape
++        // than it (ModAVD#161).
++        setStyleSheet(QStringLiteral("EmulatorContainer { background: black; }"));
+ #if QT_CONFIG(accessibility)
+         static const bool accessibleInstalled = [] {
+             QAccessible::installFactory(leanContainerAccessible);
+@@ -143,19 +145,17 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+         // their tool tips while the window is not the active one.
+         setAttribute(Qt::WA_AlwaysShowToolTips);
+ #ifdef _WIN32
++        // Maximized or snapped, the window has another shape than the guest
++        // screen, which then sits in the middle of it (ModAVD#161).
++        setAlignment(Qt::AlignCenter);
+         mLeanFrame = std::make_unique<WindowsLeanFrame>(
+                 [this] { return leanFrameGeometry(this, mEmulatorWindow); },
+-                [this](int width, int height) {
+-                    // The window was resized by hand: fit the guest screen to
+-                    // it, as after the system's resizing. From the native
+-                    // size: Qt may not have passed the last geometry change
+-                    // on to the widget yet, and size() would be older.
+-                    stopResizeTimer();
+-                    const double dpr = devicePixelRatioF();
+-                    const QSize window(static_cast<int>(std::lround(width / dpr)),
+-                                       static_cast<int>(std::lround(height / dpr)));
+-                    mEmulatorWindow->doResize(window -
+-                                              ToolWindow::windowChrome());
++                [this] {
++                    // The system's move or size loop is over, and the window
++                    // may have been resized, snapped or maximized: fit the
++                    // guest screen into it, once Qt has passed the last
++                    // geometry change on to the widget.
++                    mResizeTimer.start(0);
+                 });
+ #endif
+     } else {
+@@ -330,6 +330,7 @@ bool EmulatorContainer::event(QEvent* e) {
+ void EmulatorContainer::changeEvent(QEvent* event) {
+     switch (event->type()) {
+         case QEvent::WindowStateChange:
++            updateLeanMargins();
+             // Strictly preventing the maximizing (called "zooming" on OS X) of
+             // a window is hard - it changes by host, and even by window manager
+             // on Linux. Therefore, we counteract it by seeing if the window
+@@ -342,7 +343,11 @@ void EmulatorContainer::changeEvent(QEvent* event) {
+             // OS-level window has changed to a maximized state. We do not want
+             // to ignore this state change, we just want to counteract the
+             // effects it had.
+-            if (windowState() & Qt::WindowMaximized) {
++            //
++            // The lean window on Windows is the exception: it is maximized
++            // like any other window (ModAVD#161), and resizeEvent() has the
++            // guest screen fitted into it.
++            if ((windowState() & Qt::WindowMaximized) && !letterboxes()) {
+                 // BUG: 142088252 On macOS, if the emulator window
+                 // - coincides with the monitor dimensions
+                 // - the host's device pixel ratio is 1,
+@@ -505,6 +510,8 @@ void EmulatorContainer::moveEvent(QMoveEvent* event) {
+ }
+ 
+ void EmulatorContainer::resizeEvent(QResizeEvent* event) {
++    // Maximizing and restoring change what hangs over the screen.
++    updateLeanMargins();
+     QScrollArea::resizeEvent(event);
+     mEmulatorWindow->simulateZoomedWindowResized(this->viewportSize());
+     adjustModalOverlayGeometry();
+@@ -652,6 +659,70 @@ void EmulatorContainer::applyLeanFrame() {
+ #endif
+ }
+ 
++void EmulatorContainer::setLeanTitleBarHeight(int height) {
++    mLeanTitleBarHeight = height;
++    updateLeanMargins();
++}
++
++QRect EmulatorContainer::leanTitleBarGeometry() const {
++    return QRect(mLeanInset.left(), mLeanInset.top(),
++                 width() - mLeanInset.left() - mLeanInset.right(),
++                 mLeanTitleBarHeight);
++}
++
++void EmulatorContainer::updateLeanMargins() {
++    QMargins inset;
++#ifdef _WIN32
++    if (mLeanFrame && internalWinId()) {
++        // A maximized window hangs over the screen by its frame, which here
++        // is client area: nothing goes there.
++        const WindowsLeanFrame::Overhang over =
++                WindowsLeanFrame::maximizedOverhang(internalWinId());
++        const double dpr = devicePixelRatioF();
++        const auto logical = [dpr](int device) {
++            return static_cast<int>(std::ceil(device / dpr));
++        };
++        inset = QMargins(logical(over.left), logical(over.top),
++                         logical(over.right), logical(over.bottom));
++    }
++#endif
++    const bool changed = inset != mLeanInset;
++    mLeanInset = inset;
++    setViewportMargins(inset.left(), inset.top() + mLeanTitleBarHeight,
++                       inset.right(), inset.bottom());
++    if (changed) {
++        // The title bar moves with it, and the guest screen has another room
++        // to fit into.
++        if (mEmulatorWindow->toolWindow()) {
++            mEmulatorWindow->toolWindow()->dockMainWindow();
++        }
++        startResizeTimer();
++    }
++}
++
++QSize EmulatorContainer::guestAreaSize() const {
++    return size() - ToolWindow::windowChrome() -
++           QSize(mLeanInset.left() + mLeanInset.right(),
++                 mLeanInset.top() + mLeanInset.bottom());
++}
++
++bool EmulatorContainer::letterboxes() const {
++#ifdef _WIN32
++    return mLeanFrame != nullptr;
++#else
++    return false;
++#endif
++}
++
++bool EmulatorContainer::heldBySystem() const {
++#ifdef _WIN32
++    return mLeanFrame && internalWinId() &&
++           WindowsLeanFrame::heldBySystem(internalWinId());
++#else
++    return false;
++#endif
++}
++
+ bool EmulatorContainer::nativeEvent(const QByteArray& eventType,
+                                     void* message,
+                                     qintptr* result) {
+@@ -665,7 +736,7 @@ bool EmulatorContainer::nativeEvent(const QByteArray& eventType,
+ }
+ 
+ QSize EmulatorContainer::viewportSize() const {
+-    QSize output = this->size() - ToolWindow::windowChrome();
++    QSize output = guestAreaSize();
+ 
+     QScrollBar* vertical = this->verticalScrollBar();
+     output.setWidth(output.width() -
+@@ -797,6 +868,15 @@ void EmulatorContainer::startResizeTimer() {
+ #ifdef __linux__
+     mResizeTimer.start(1000);
+ #else
++#ifdef _WIN32
++    // The lean window is resized by the system: in its size loop, whose end
++    // fits the guest screen, or at once when it is maximized, snapped or
++    // restored. For the latter there is nothing to wait for.
++    if (mLeanFrame && !mLeanFrame->inSizeMove()) {
++        mResizeTimer.start(30);
++        return;
++    }
++#endif
+     mResizeTimer.start(500);
+ #endif
+ }
+@@ -838,7 +918,7 @@ void EmulatorContainer::adjustMessagesOverlayGeometry() {
+     // Below the lean title bar, at the top of the guest screen.
+     mMessages->move(mapToGlobal(QPoint()) +=
+                     {(width() - mMessages->width()) / 2,
+-                     ToolWindow::windowChrome().height()});
++                     mLeanInset.top() + ToolWindow::windowChrome().height()});
+ }
+ 
+ void EmulatorContainer::adjustGlassesStatusOverlayGeometry() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index d012dd232..a3bd6aac4 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -15,6 +15,8 @@
+ #include <qobjectdefs.h>                   // for Q_OBJECT, signals, slots
+ #include <QEvent>                          // for QEvent
+ #include <QList>                           // for QList
++#include <QMargins>                        // for QMargins
++#include <QRect>                           // for QRect
+ #include <QScrollArea>                     // for QScrollArea
+ #include <QSize>                           // for QSize
+ #include <QString>                         // for QString
+@@ -78,13 +80,25 @@ public:
+     QSize viewportSize() const;
+ 
+     // The lean title bar takes the top of the window, above the guest screen.
+-    void setLeanTitleBarHeight(int height) {
+-        setViewportMargins(0, height, 0, 0);
+-    }
++    void setLeanTitleBarHeight(int height);
++    // Where the lean title bar goes: along the top of the window, or of the
++    // part of it that is on the screen when it is maximized.
++    QRect leanTitleBarGeometry() const;
+     // Gives the native window the lean window's frame again; Qt resets the
+     // window style whenever it changes the window flags.
+     void applyLeanFrame();
+ 
++    // The room the window has for the guest screen: all of it but the lean
++    // title bar and, maximized, what hangs over the screen.
++    QSize guestAreaSize() const;
++    // Whether the window can have another shape than the guest screen, which
++    // is then centered in it between black bars (ModAVD#161): the lean window
++    // on Windows, which the system maximizes and snaps.
++    bool letterboxes() const;
++    // Whether the system holds the window at a size of its own choosing:
++    // maximized or snapped.
++    bool heldBySystem() const;
++
+ protected:
+     bool nativeEvent(const QByteArray& eventType,
+                      void* message,
+@@ -118,6 +132,7 @@ private slots:
+ 
+ private:
+     void startResizeTimer();
++    void updateLeanMargins();
+     void adjustModalOverlayGeometry();
+     void adjustVirtualSceneDialogGeometry();
+     void adjustMessagesOverlayGeometry();
+@@ -136,6 +151,10 @@ private:
+     QList<QEvent::Type> mEventBuffer;
+     QTimer mResizeTimer;
+     bool mRotating = false;
++    int mLeanTitleBarHeight = 0;
++    // What a maximized lean window leaves empty along its edges, the part of
++    // it that hangs over the screen. Logical pixels.
++    QMargins mLeanInset;
+ #ifdef _WIN32
+     std::unique_ptr<WindowsLeanFrame> mLeanFrame;
+     bool mLeanFrameThemeConnected = false;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 90e3932ae..71047b87c 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -2791,6 +2791,7 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+     }
+ 
+     showNormal();
++    const QSize guestBefore = size();
+     setFixedSize(rect.size());
+ 
+     const QSize chrome = ToolWindow::windowChrome();
+@@ -2819,12 +2820,14 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+         mContainer.stopResizeTimer();
+         recenterFocusPoint();
+     } else if (!mNextIsZoom) {
+-        mContainer.resize(rect.size() + chrome);
++        resizeContainerForGuest(rect.size(), guestBefore);
+     }
+     mNextIsZoom = false;
+ 
+     maskWindowFrame();
+     show();
++    // The guest screen may have moved inside the window.
++    mOverlay.move(mContainer.mapToGlobal(contentOffset()));
+ 
+     // Zooming forces the scroll bar to be visible for sizing purposes. They
+     // should never be shown when not in zoom mode, and should only show when
+@@ -2855,6 +2858,52 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
+     hostImeUpdateCursor();
+ }
+ 
++void EmulatorQtWindow::resizeContainerForGuest(const QSize& guest,
++                                               const QSize& guestBefore) {
++    const QSize chrome = ToolWindow::windowChrome();
++    const QSize area = mContainer.guestAreaSize();
++    const auto within = [](const QSize& a, const QSize& b, int pixels) {
++        return std::abs(a.width() - b.width()) <= pixels &&
++               std::abs(a.height() - b.height()) <= pixels;
++    };
++    // The window takes the size of the guest screen. The lean window on
++    // Windows is the exception (ModAVD#161): the system maximizes and snaps
++    // it, and a window manager may give it any size. Then the window leads,
++    // and the guest screen is fitted into it: it was not around the guest
++    // screen before this, or the system holds its size.
++    const bool windowLeads =
++            mContainer.letterboxes() && !mFirstShowWindowCall &&
++            (mContainer.heldBySystem() || !within(area, guestBefore, 1));
++    if (!windowLeads) {
++        mContainer.resize(guest + chrome);
++        return;
++    }
++    // The largest guest screen in the window touches two opposite edges.
++    const QSize bars = area - guest;
++    const bool fitted = bars.width() >= -1 && bars.height() >= -1 &&
++                        (bars.width() <= 1 || bars.height() <= 1);
++    if (!fitted) {
++        // The guest screen changed on its own, rotated for example: fit it
++        // into the window. Once for a window of this size; a guest screen
++        // that cannot be scaled to fit stays as it is.
++        if (mRefitGuestArea != area) {
++            mRefitGuestArea = area;
++            QTimer::singleShot(0, this, [this] {
++                if (!mInZoomMode) {
++                    doResize(guestAreaSize());
++                }
++            });
++        }
++        return;
++    }
++    mRefitGuestArea = QSize();
++    if (!mContainer.heldBySystem() && within(area, guest, 4)) {
++        // All but the guest screen's shape, after an edge was dragged: the
++        // window closes around it.
++        mContainer.resize(guest + chrome);
++    }
++}
++
+ void EmulatorQtWindow::onScreenChanged(QScreen* newScreen) {
+     if (newScreen != mCurrentScreen) {
+         D("%s: kEventScreenChanged", __FUNCTION__);
+@@ -4214,13 +4263,16 @@ EmulatorContainer* EmulatorQtWindow::containerWindow() {
+ }
+ 
+ QSize EmulatorQtWindow::guestAreaSize() const {
+-    return mContainer.size() - ToolWindow::windowChrome();
++    return mContainer.guestAreaSize();
+ }
+ 
+ QPoint EmulatorQtWindow::contentOffset() const {
+     // The scroll area's viewport: below the lean title bar, at (0, 0) without
+-    // one. Scrolling inside it is the skin's to add.
+-    return mContainer.viewport()->pos();
++    // one. And in it, where the scroll area centers the guest screen when the
++    // window has another shape (ModAVD#161). Scrolling inside the viewport,
++    // which puts this widget at negative coordinates, is the skin's to add.
++    return mContainer.viewport()->pos() +
++           QPoint(std::max(0, x()), std::max(0, y()));
+ }
+ 
+ void EmulatorQtWindow::showZoomIfNotUserHidden() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 8b9ced518..90a2d34ec 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -556,6 +556,10 @@ private:
+     QRect hostImeCursorRect() const;
+ 
+     void maskWindowFrame();
++    // Sizes the window for a guest screen that went from |guestBefore| to
++    // |guest|, or leaves the window as it is and has the guest screen fitted
++    // into it.
++    void resizeContainerForGuest(const QSize& guest, const QSize& guestBefore);
+     bool hasFrame() const;
+     bool hasSkin() const;
+ 
+@@ -721,6 +725,9 @@ private:
+     bool mShouldShowGpuWarning = false;
+     bool mFirstShowWindowCall = true;
+     bool mFirstShowEvent = true;
++    // The room the guest screen was last asked to fit into again; see
++    // resizeContainerForGuest().
++    QSize mRefitGuestArea;
+     // Some events may arrive after closing the main window (e.g. async screen
+     // redraw requests); we want to ignore those when exiting.
+     bool mClosed = false;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 44d202c54..2878a1a83 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -1014,8 +1014,8 @@ void ToolWindow::positionLeanTitleBar() {
+     if (!mLeanTitleBar || !inWindowNav()) {
+         return;
+     }
+-    auto* container = mEmulatorWindow->containerWindow();
+-    mLeanTitleBar->setGeometry(0, 0, container->width(), LeanTitleBar::kHeight);
++    mLeanTitleBar->setGeometry(
++            mEmulatorWindow->containerWindow()->leanTitleBarGeometry());
+     mLeanTitleBar->raise();
+ }
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+index c9de2fcc6..f04a76659 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -19,7 +19,6 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <utility>
+-#include <vector>
+ 
+ namespace lw = android::lean_window;
+ 
+@@ -32,24 +31,10 @@ constexpr int kBorder = 5;
+ constexpr int kTopBorder = 4;
+ constexpr int kCorner = 16;
+ 
+-HWND hwndOf(void* hwnd) {
+-    return static_cast<HWND>(hwnd);
+-}
+-
+ int devicePixels(double scale, int logical) {
+     return std::max(1, static_cast<int>(std::lround(logical * scale)));
+ }
+ 
+-// The window's DPI scale as Windows has it, which is what it scales the window
+-// by when it moves onto another screen.
+-double windowScale(HWND hwnd) {
+-    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+-    static const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+-            GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+-    const UINT dpi = getDpiForWindow ? getDpiForWindow(hwnd) : 0;
+-    return dpi ? dpi / 96.0 : 1.0;
+-}
+-
+ // The IDC_SIZE* cursors, by number: this code is built without UNICODE.
+ const wchar_t* resizeCursor(lw::Hit hit) {
+     switch (hit) {
+@@ -67,33 +52,30 @@ const wchar_t* resizeCursor(lw::Hit hit) {
+     }
+ }
+ 
+-void pruneSystemMenu(HWND hwnd) {
+-    HMENU menu = GetSystemMenu(hwnd, FALSE);
+-    if (!menu) {
+-        return;
+-    }
+-    const int count = GetMenuItemCount(menu);
+-    std::vector<unsigned> ids;
+-    for (int i = 0; i < count; ++i) {
+-        MENUITEMINFOW info = {};
+-        info.cbSize = sizeof(info);
+-        info.fMask = MIIM_FTYPE | MIIM_ID;
+-        if (!GetMenuItemInfoW(menu, i, TRUE, &info)) {
+-            ids.push_back(0xFFFFFFFFu);  // unknown: not kept
+-            continue;
+-        }
+-        ids.push_back((info.fType & MFT_SEPARATOR) ? 0u : info.wID);
++lw::Rect toRect(const RECT& r) {
++    return {r.left, r.top, r.right, r.bottom};
++}
++
++// The part of the window that is on the screen: all of it, but for a
++// maximized window, which hangs over the work area by its frame.
++lw::Rect visibleRect(HWND hwnd, const RECT& window) {
++    if (!IsZoomed(hwnd)) {
++        return toRect(window);
+     }
+-    for (int position : lw::systemMenuItemsToDelete(ids)) {
+-        DeleteMenu(menu, position, MF_BYPOSITION);
++    MONITORINFO info = {};
++    info.cbSize = sizeof(info);
++    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
++                         &info)) {
++        return toRect(window);
+     }
++    return lw::visiblePart(toRect(window), toRect(info.rcWork));
+ }
+ 
+ }  // namespace
+ 
+ WindowsLeanFrame::WindowsLeanFrame(std::function<Geometry()> geometry,
+-                                   std::function<void(int, int)> resizeDone)
+-    : mGeometry(std::move(geometry)), mResizeDone(std::move(resizeDone)) {}
++                                   std::function<void()> sizeMoveDone)
++    : mGeometry(std::move(geometry)), mSizeMoveDone(std::move(sizeMoveDone)) {}
+ 
+ // static
+ void WindowsLeanFrame::apply(WId wid) {
+@@ -101,9 +83,11 @@ void WindowsLeanFrame::apply(WId wid) {
+     if (!hwnd) {
+         return;
+     }
++    // The resizable frame and the maximize box are what let the system
++    // maximize and snap the window; neither is drawn.
+     const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+-    const LONG_PTR wanted = (style | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX) &
+-                            ~static_cast<LONG_PTR>(WS_THICKFRAME | WS_MAXIMIZEBOX);
++    const LONG_PTR wanted = style | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX |
++                            WS_THICKFRAME | WS_MAXIMIZEBOX;
+     if (wanted != style) {
+         SetWindowLongPtrW(hwnd, GWL_STYLE, wanted);
+         // Windows asks for the client area again (WM_NCCALCSIZE).
+@@ -140,7 +124,6 @@ void WindowsLeanFrame::apply(WId wid) {
+         }
+         FreeLibrary(dwm);
+     }
+-    pruneSystemMenu(hwnd);
+ }
+ 
+ // static
+@@ -149,13 +132,22 @@ void WindowsLeanFrame::showSystemMenu(WId wid, int x, int y) {
+     if (!hwnd) {
+         return;
+     }
+-    pruneSystemMenu(hwnd);
+     HMENU menu = GetSystemMenu(hwnd, FALSE);
+     if (!menu) {
+         return;
+     }
+-    EnableMenuItem(menu, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
+-    EnableMenuItem(menu, SC_CLOSE, MF_BYCOMMAND | MF_ENABLED);
++    // What DefWindowProc does for the menu it shows itself.
++    const bool maximized = IsZoomed(hwnd);
++    const auto enable = [menu](UINT command, bool enabled) {
++        EnableMenuItem(menu, command,
++                       MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED));
++    };
++    enable(SC_RESTORE, maximized);
++    enable(SC_MOVE, !maximized);
++    enable(SC_SIZE, !maximized);
++    enable(SC_MINIMIZE, true);
++    enable(SC_MAXIMIZE, !maximized);
++    enable(SC_CLOSE, true);
+     SetMenuDefaultItem(menu, SC_CLOSE, FALSE);
+     const UINT align = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN
+                                                                : TPM_LEFTALIGN;
+@@ -169,13 +161,45 @@ void WindowsLeanFrame::showSystemMenu(WId wid, int x, int y) {
+     }
+ }
+ 
++// static
++WindowsLeanFrame::Overhang WindowsLeanFrame::maximizedOverhang(WId wid) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    RECT window;
++    if (!hwnd || !IsZoomed(hwnd) || !GetWindowRect(hwnd, &window)) {
++        return {};
++    }
++    const lw::Rect visible = visibleRect(hwnd, window);
++    return {visible.left - window.left, visible.top - window.top,
++            window.right - visible.right, window.bottom - visible.bottom};
++}
++
++// static
++bool WindowsLeanFrame::heldBySystem(WId wid) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    if (!hwnd) {
++        return false;
++    }
++    if (IsZoomed(hwnd)) {
++        return true;
++    }
++    // Windows 10 1903 and later.
++    using IsWindowArrangedFn = BOOL(WINAPI*)(HWND);
++    static const auto isWindowArranged = reinterpret_cast<IsWindowArrangedFn>(
++            GetProcAddress(GetModuleHandleW(L"user32.dll"), "IsWindowArranged"));
++    return isWindowArranged && isWindowArranged(hwnd);
++}
++
+ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+     MSG* msg = static_cast<MSG*>(message);
+     HWND hwnd = msg->hwnd;
+     switch (msg->message) {
+         case WM_NCCALCSIZE:
+             // The client area is the whole window, for wParam TRUE (the first
+-            // rectangle stays as proposed) and FALSE alike.
++            // rectangle stays as proposed) and FALSE alike, maximized too:
++            // Qt takes the window's rectangle for the client area of a
++            // frameless window, so the two have to stay the same. The part
++            // of a maximized window that hangs over the screen is left empty
++            // instead, see maximizedOverhang().
+             *result = 0;
+             return true;
+ 
+@@ -188,16 +212,21 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+                 return false;
+             }
+             const Geometry g = mGeometry();
+-            const lw::Layout layout = {window.right - window.left,
+-                                       window.bottom - window.top,
+-                                       g.titleHeight,
+-                                       g.buttonsLeft,
+-                                       devicePixels(g.scale, kBorder),
+-                                       devicePixels(g.scale, kTopBorder),
+-                                       devicePixels(g.scale, kCorner)};
++            // A maximized window has no resize bands, and its title bar
++            // starts where the screen does.
++            const bool maximized = IsZoomed(hwnd);
++            const lw::Rect visible = visibleRect(hwnd, window);
++            const lw::Layout layout = {
++                    visible.width(),
++                    visible.height(),
++                    g.titleHeight,
++                    g.buttonsLeft,
++                    maximized ? 0 : devicePixels(g.scale, kBorder),
++                    maximized ? 0 : devicePixels(g.scale, kTopBorder),
++                    maximized ? 0 : devicePixels(g.scale, kCorner)};
+             const lw::Hit hit =
+-                    lw::hitTest(layout, GET_X_LPARAM(msg->lParam) - window.left,
+-                                GET_Y_LPARAM(msg->lParam) - window.top);
++                    lw::hitTest(layout, GET_X_LPARAM(msg->lParam) - visible.left,
++                                GET_Y_LPARAM(msg->lParam) - visible.top);
+             *result = static_cast<qintptr>(hit);
+             return true;
+         }
+@@ -213,30 +242,11 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             return true;
+         }
+ 
+-        case WM_MOUSEACTIVATE:
+-            // DefWindowProc answers MA_NOACTIVATE for the caption: a normal
+-            // window is activated and raised later, by DefWindowProc's own
+-            // WM_NCLBUTTONDOWN(HTCAPTION), which the press below never reaches.
+-            // Activate here, as for a click on the picture or a border.
+-            if (static_cast<short>(LOWORD(msg->lParam)) != HTCAPTION) {
+-                return false;
+-            }
+-            *result = MA_ACTIVATE;
+-            return true;
+-
+-        case WM_NCLBUTTONDOWN:
+-        case WM_NCLBUTTONDBLCLK: {
+-            // A double click on the title bar does not maximize; it is just
+-            // another press.
+-            const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
+-            if (hit != lw::Hit::Caption && !lw::isResize(hit)) {
+-                return false;
+-            }
+-            startTracking(hwnd, hit, GET_X_LPARAM(msg->lParam),
+-                          GET_Y_LPARAM(msg->lParam));
+-            *result = 0;
+-            return true;
+-        }
++        // WM_NCLBUTTONDOWN and WM_NCLBUTTONDBLCLK go on to DefWindowProc: on
++        // the title bar it activates the window, moves it in the system's
++        // move loop (which snaps it at the edges of the screen and maximizes
++        // it at the top) and maximizes or restores it on a double click; on a
++        // resize band it starts the system's size loop.
+ 
+         case WM_NCRBUTTONDOWN:
+             if (msg->wParam != HTCAPTION) {
+@@ -254,94 +264,39 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             *result = 0;
+             return true;
+ 
+-        case WM_MOUSEMOVE:
+-        case WM_LBUTTONUP: {
+-            if (mMode == Mode::None) {
++        case WM_SIZING: {
++            // An edge or a corner is dragged: the guest screen keeps its
++            // shape.
++            const lw::Hit edge =
++                    lw::sizingEdge(static_cast<unsigned>(msg->wParam));
++            const Geometry g = mGeometry();
++            RECT* proposed = reinterpret_cast<RECT*>(msg->lParam);
++            if (!proposed || !lw::isResize(edge) || g.guestAspect <= 0) {
+                 return false;
+             }
+-            if (msg->message == WM_MOUSEMOVE &&
+-                !lw::movesDrag(static_cast<unsigned>(msg->wParam))) {
+-                *result = 0;
+-                return true;
+-            }
+-            POINT cursor = {GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+-            ClientToScreen(hwnd, &cursor);
+-            track(hwnd, cursor.x, cursor.y);
+-            if (msg->message == WM_LBUTTONUP) {
+-                stopTracking(hwnd, true);
+-            }
+-            *result = 0;
++            const lw::Rect r = lw::sizingRect(toRect(*proposed), edge,
++                                              g.titleHeight, g.guestAspect,
++                                              g.minGuestWidth, g.minGuestHeight);
++            proposed->left = r.left;
++            proposed->top = r.top;
++            proposed->right = r.right;
++            proposed->bottom = r.bottom;
++            *result = TRUE;
+             return true;
+         }
+ 
+-        case WM_CAPTURECHANGED:
+-            if (mMode != Mode::None && reinterpret_cast<HWND>(msg->lParam) != hwnd) {
+-                stopTracking(hwnd, false);
+-            }
++        case WM_ENTERSIZEMOVE:
++            mInSizeMove = true;
+             return false;
+ 
+-        case WM_SYSCOMMAND:
+-            if (!lw::refusesSysCommand(static_cast<unsigned>(msg->wParam))) {
+-                return false;
++        case WM_EXITSIZEMOVE:
++            mInSizeMove = false;
++            if (mSizeMoveDone) {
++                mSizeMoveDone();
+             }
+-            *result = 0;
+-            return true;
++            return false;
+ 
+         default:
+             return false;
+     }
+ }
+-
+-void WindowsLeanFrame::startTracking(void* handle, lw::Hit hit, int x, int y) {
+-    HWND hwnd = hwndOf(handle);
+-    RECT window;
+-    if (!GetWindowRect(hwnd, &window)) {
+-        return;
+-    }
+-    mStartRect = {window.left, window.top, window.right, window.bottom};
+-    mGrab = {x, y};
+-    mHit = hit;
+-    mStartScale = windowScale(hwnd);
+-    mMode = hit == lw::Hit::Caption ? Mode::Move : Mode::Resize;
+-    SetCapture(hwnd);
+-}
+-
+-void WindowsLeanFrame::track(void* handle, int x, int y) {
+-    HWND hwnd = hwndOf(handle);
+-    constexpr UINT kFlags = SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE;
+-    if (mMode == Mode::Move) {
+-        const lw::Point topLeft =
+-                lw::dragTopLeft({mStartRect.left, mStartRect.top}, mGrab,
+-                                mStartScale, {x, y}, windowScale(hwnd));
+-        RECT window;
+-        if (GetWindowRect(hwnd, &window) && window.left == topLeft.x &&
+-            window.top == topLeft.y) {
+-            return;
+-        }
+-        SetWindowPos(hwnd, nullptr, topLeft.x, topLeft.y, 0, 0,
+-                     kFlags | SWP_NOSIZE);
+-    } else if (mMode == Mode::Resize) {
+-        const Geometry g = mGeometry();
+-        if (g.guestAspect <= 0) {
+-            return;
+-        }
+-        const lw::Rect r = lw::resizeRect(mStartRect, mHit, mGrab, {x, y},
+-                                          g.titleHeight, g.guestAspect,
+-                                          g.minGuestWidth, g.minGuestHeight);
+-        SetWindowPos(hwnd, nullptr, r.left, r.top, r.width(), r.height(),
+-                     kFlags);
+-    }
+-}
+-
+-void WindowsLeanFrame::stopTracking(void* handle, bool releaseCapture) {
+-    const bool resized = mMode == Mode::Resize;
+-    // Before ReleaseCapture(), which sends WM_CAPTURECHANGED.
+-    mMode = Mode::None;
+-    if (releaseCapture && GetCapture() == hwndOf(handle)) {
+-        ReleaseCapture();
+-    }
+-    RECT window;
+-    if (resized && mResizeDone && GetWindowRect(hwndOf(handle), &window)) {
+-        mResizeDone(window.right - window.left, window.bottom - window.top);
+-    }
+-}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+index b2d658f95..f089bae23 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+@@ -21,19 +21,22 @@
+ 
+ // The Win32 side of the lean window's frame (ModAVD#58, see
+ // android/lean-window-frame.h). Qt sees a frameless window. Windows sees a
+-// window with the system caption style, but its client area covers the whole
+-// window: the caption style brings back the DWM shadow and border, and the
+-// title bar the emulator draws (LeanTitleBar) sits at the top of the client
+-// area. There is no resizable frame and no maximize box, and the window is
+-// moved and resized here, never in the system's move and size loops, so
+-// Windows never snaps, docks or maximizes it.
++// window with the system's caption, resizable frame and maximize box, but its
++// client area covers the whole window: the styles bring the DWM shadow and
++// border, and let the system move, resize, maximize and snap the window
++// (ModAVD#161). The title bar the emulator draws (LeanTitleBar) sits at the
++// top of the client area; this says which part of the window is the title
++// bar and which the resize bands, and the system's move and size loops do the
++// rest. Dragging an edge keeps the guest screen's shape. Maximized or snapped
++// the window has another shape than the guest screen, which the container
++// then centers in it.
+ class WindowsLeanFrame {
+ public:
+     struct Geometry {
+         // Device pixels per logical pixel.
+         double scale = 1.0;
+         // The title bar's height and where its buttons start, in device
+-        // pixels from the window's top-left corner.
++        // pixels from the top-left corner of the window's visible part.
+         int titleHeight = 0;
+         int buttonsLeft = 0;
+         // The guest screen's width / height; 0 while it is not known.
+@@ -43,40 +46,48 @@ public:
+         int minGuestHeight = 1;
+     };
+ 
+-    // |resizeDone| gets the window's size in device pixels when a resize by
+-    // an edge or a corner ends.
++    // How far the window hangs over each edge of its screen's work area, in
++    // device pixels.
++    struct Overhang {
++        int left = 0;
++        int top = 0;
++        int right = 0;
++        int bottom = 0;
++    };
++
++    // |sizeMoveDone| is called when the system's move or size loop ends: the
++    // window may have been resized, maximized or snapped.
+     WindowsLeanFrame(std::function<Geometry()> geometry,
+-                     std::function<void(int width, int height)> resizeDone);
++                     std::function<void()> sizeMoveDone);
+ 
+-    // Gives the native window |wid| its frame: the caption style without the
+-    // resizable frame and the maximize box, the frame extended into the
+-    // client area for the shadow, rounded corners on Windows 11, the dark
+-    // border, and a system menu with only minimize and close. Safe to repeat,
+-    // and repeated whenever Qt may have reset the window style.
++    // Gives the native window |wid| its frame: the caption, resizable frame
++    // and maximize box styles, the frame extended into the client area for
++    // the shadow, rounded corners on Windows 11 and the dark border. Safe to
++    // repeat, and repeated whenever Qt may have reset the window style.
+     static void apply(WId wid);
+ 
+     // Shows the window's system menu at the screen point (x, y) and carries
+     // out the command picked.
+     static void showSystemMenu(WId wid, int x, int y);
+ 
++    // The part of the maximized window |wid| that is off the screen: a
++    // maximized window hangs over the work area by its frame, and here the
++    // frame is client area. All zero while the window is not maximized.
++    static Overhang maximizedOverhang(WId wid);
++
++    // Whether the system holds the window |wid| at a size of its choosing:
++    // maximized, or snapped to a part of the screen.
++    static bool heldBySystem(WId wid);
++
+     // Handles a message (MSG*) of the window. Returns true, with the window
+     // procedure's |result|, when it handled it.
+     bool handleMessage(void* message, qintptr* result);
+ 
+-    bool tracking() const { return mMode != Mode::None; }
++    // Whether the system's move or size loop is running.
++    bool inSizeMove() const { return mInSizeMove; }
+ 
+ private:
+-    enum class Mode { None, Move, Resize };
+-
+-    void startTracking(void* hwnd, android::lean_window::Hit hit, int x, int y);
+-    void track(void* hwnd, int x, int y);
+-    void stopTracking(void* hwnd, bool releaseCapture);
+-
+     std::function<Geometry()> mGeometry;
+-    std::function<void(int width, int height)> mResizeDone;
+-    Mode mMode = Mode::None;
+-    android::lean_window::Hit mHit = android::lean_window::Hit::Nowhere;
+-    android::lean_window::Rect mStartRect = {0, 0, 0, 0};
+-    android::lean_window::Point mGrab = {0, 0};
+-    double mStartScale = 1.0;
++    std::function<void()> mSizeMoveDone;
++    bool mInSizeMove = false;
+ };
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index 57400cc7b..46081aba6 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -13,13 +13,12 @@
+ // limitations under the License.
+ #pragma once
+ 
+-#include <vector>
+-
+ // The window frame of the lean window (ModAVD#58): the window has no system
+-// title bar and no resizable frame, the emulator draws the title bar and moves
+-// and resizes the window itself. This is the arithmetic of it, without any
+-// windowing system, so that it can be tested on its own. All lengths are in
+-// device pixels, all points in screen coordinates unless said otherwise.
++// title bar, the emulator draws the title bar and says which part of the
++// window is what; the system moves, resizes, maximizes and snaps it
++// (ModAVD#161). This is the arithmetic of it, without any windowing system, so
++// that it can be tested on its own. All lengths are in device pixels, all
++// points in screen coordinates unless said otherwise.
+ namespace android {
+ namespace lean_window {
+ 
+@@ -78,61 +77,27 @@ Hit hitTest(const Layout& layout, int x, int y);
+ // Whether |hit| resizes the window.
+ bool isResize(Hit hit);
+ 
+-// Where the window's top-left corner goes while the title bar is dragged: the
+-// point that was grabbed at |grab|, with the window at |startTopLeft| and the
+-// screen scale |startScale|, stays under the cursor at |cursor| when the
+-// window is at scale |scale| (it changes when the window moves onto a screen
+-// with another scale and Windows resizes it).
+-Point dragTopLeft(Point startTopLeft,
+-                  Point grab,
+-                  double startScale,
+-                  Point cursor,
+-                  double scale);
++// The edge or corner the system's size loop drags, from the wParam of
++// WM_SIZING (WMSZ_LEFT ... WMSZ_BOTTOMRIGHT); Hit::Nowhere for anything else.
++Hit sizingEdge(unsigned wparam);
+ 
+-// The window while the resize band |hit| is dragged from |grab| to |cursor|,
+-// starting from |start|. The guest screen, the window below the title bar of
++// The window the system's size loop gets instead of |proposed| while |edge| is
++// dragged (WM_SIZING). The guest screen, the window below the title bar of
+ // |titleHeight|, keeps the ratio |aspect| (width / height) and is at least
+ // |minGuestWidth| x |minGuestHeight|. The edges opposite the dragged ones stay
+ // where they are; a side edge grows the window downwards, the top and bottom
+-// edges grow it to the right.
+-Rect resizeRect(const Rect& start,
+-                Hit hit,
+-                Point grab,
+-                Point cursor,
++// edges grow it to the right, a corner follows the edge that asks for more.
++Rect sizingRect(const Rect& proposed,
++                Hit edge,
+                 int titleHeight,
+                 double aspect,
+                 int minGuestWidth,
+                 int minGuestHeight);
+ 
+-// Win32 system commands (WM_SYSCOMMAND, low four bits masked off).
+-enum SysCommand : unsigned {
+-    kScSize = 0xF000,
+-    kScMove = 0xF010,
+-    kScMinimize = 0xF020,
+-    kScMaximize = 0xF030,
+-    kScClose = 0xF060,
+-    kScRestore = 0xF120,
+-};
+-
+-// The system menu (Alt+Space, right click on the title bar) keeps only
+-// minimize and close.
+-bool keepsSystemMenuItem(unsigned id);
+-
+-// The positions to delete, last first, from a system menu whose items have
+-// the ids |ids| (0 for a separator): every item but the kept ones, and every
+-// separator that would not stand between two kept items.
+-std::vector<int> systemMenuItemsToDelete(const std::vector<unsigned>& ids);
+-
+-// Whether the window refuses the system command |wparam| (the WM_SYSCOMMAND
+-// wParam): maximize, and the keyboard move and size, which would start the
+-// system's move and size loops and with them Snap.
+-bool refusesSysCommand(unsigned wparam);
+-
+-// Whether a mouse move with the key state |keys| (the WM_MOUSEMOVE wParam)
+-// belongs to a drag of the title bar or an edge: only while the left button is
+-// down. Windows also sends moves at the real cursor when the window changes
+-// under it; with the button up they are not part of the drag.
+-bool movesDrag(unsigned keys);
++// The part of the maximized window |window| that is on the screen: Windows
++// lets a maximized window with a resizable frame hang over the work area
++// |work| of its screen by the width of that frame on every side.
++Rect visiblePart(const Rect& window, const Rect& work);
+ 
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index 3783114c6..8da9e6c62 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -65,52 +65,40 @@ bool isResize(Hit hit) {
+            static_cast<int>(hit) <= static_cast<int>(Hit::BottomRight);
+ }
+ 
+-Point dragTopLeft(Point startTopLeft,
+-                  Point grab,
+-                  double startScale,
+-                  Point cursor,
+-                  double scale) {
+-    const double ratio = startScale > 0 && scale > 0 ? scale / startScale : 1.0;
+-    const int offsetX = static_cast<int>(
+-            std::lround((grab.x - startTopLeft.x) * ratio));
+-    const int offsetY = static_cast<int>(
+-            std::lround((grab.y - startTopLeft.y) * ratio));
+-    return {cursor.x - offsetX, cursor.y - offsetY};
++Hit sizingEdge(unsigned wparam) {
++    // WMSZ_LEFT (1) ... WMSZ_BOTTOMRIGHT (8) are in the order of HTLEFT (10)
++    // ... HTBOTTOMRIGHT (17).
++    return wparam >= 1 && wparam <= 8 ? static_cast<Hit>(wparam + 9)
++                                      : Hit::Nowhere;
+ }
+ 
+-Rect resizeRect(const Rect& start,
+-                Hit hit,
+-                Point grab,
+-                Point cursor,
++Rect sizingRect(const Rect& proposed,
++                Hit edge,
+                 int titleHeight,
+                 double aspect,
+                 int minGuestWidth,
+                 int minGuestHeight) {
+-    if (!isResize(hit) || aspect <= 0) {
+-        return start;
++    if (!isResize(edge) || aspect <= 0) {
++        return proposed;
+     }
+-    const bool left = hit == Hit::Left || hit == Hit::TopLeft ||
+-                      hit == Hit::BottomLeft;
+-    const bool right = hit == Hit::Right || hit == Hit::TopRight ||
+-                       hit == Hit::BottomRight;
++    const bool left = edge == Hit::Left || edge == Hit::TopLeft ||
++                      edge == Hit::BottomLeft;
++    const bool right = edge == Hit::Right || edge == Hit::TopRight ||
++                       edge == Hit::BottomRight;
+     const bool top =
+-            hit == Hit::Top || hit == Hit::TopLeft || hit == Hit::TopRight;
+-    const bool bottom = hit == Hit::Bottom || hit == Hit::BottomLeft ||
+-                        hit == Hit::BottomRight;
+-    const int dx = cursor.x - grab.x;
+-    const int dy = cursor.y - grab.y;
+-    const double startWidth = start.width();
+-    const double startHeight = std::max(1, start.height() - titleHeight);
++            edge == Hit::Top || edge == Hit::TopLeft || edge == Hit::TopRight;
++    const bool bottom = edge == Hit::Bottom || edge == Hit::BottomLeft ||
++                        edge == Hit::BottomRight;
+ 
+     // The guest height each dragged edge asks for; the larger one wins, so a
+     // corner follows the cursor along whichever edge it moved further.
+     double height = 0;
+     if (left || right) {
+-        const double width = startWidth + (right ? dx : -dx);
+-        height = width / aspect;
++        height = proposed.width() / aspect;
+     }
+     if (top || bottom) {
+-        height = std::max(height, startHeight + (bottom ? dy : -dy));
++        height = std::max(height,
++                          static_cast<double>(proposed.height() - titleHeight));
+     }
+     height = std::max({height, static_cast<double>(minGuestHeight),
+                        minGuestWidth / aspect, 1.0});
+@@ -118,57 +106,26 @@ Rect resizeRect(const Rect& start,
+     const int guestWidth = std::max(
+             1, static_cast<int>(std::lround(guestHeight * aspect)));
+ 
+-    Rect r = start;
++    Rect r = proposed;
+     if (left) {
+-        r.left = start.right - guestWidth;
++        r.left = proposed.right - guestWidth;
+     } else {
+-        r.right = start.left + guestWidth;
++        r.right = proposed.left + guestWidth;
+     }
+     if (top) {
+-        r.top = start.bottom - guestHeight - titleHeight;
++        r.top = proposed.bottom - guestHeight - titleHeight;
+     } else {
+-        r.bottom = start.top + titleHeight + guestHeight;
++        r.bottom = proposed.top + titleHeight + guestHeight;
+     }
+     return r;
+ }
+ 
+-bool keepsSystemMenuItem(unsigned id) {
+-    return id == kScMinimize || id == kScClose;
+-}
+-
+-std::vector<int> systemMenuItemsToDelete(const std::vector<unsigned>& ids) {
+-    std::vector<int> remove;
+-    bool keptBefore = false;  // a kept item before the current position
+-    int pendingSeparator = -1;
+-    for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
+-        if (ids[i] == 0) {
+-            if (keptBefore && pendingSeparator < 0) {
+-                pendingSeparator = i;  // kept if another kept item follows
+-            } else {
+-                remove.push_back(i);
+-            }
+-        } else if (keepsSystemMenuItem(ids[i])) {
+-            keptBefore = true;
+-            pendingSeparator = -1;
+-        } else {
+-            remove.push_back(i);
+-        }
+-    }
+-    if (pendingSeparator >= 0) {
+-        remove.push_back(pendingSeparator);
+-    }
+-    std::sort(remove.rbegin(), remove.rend());
+-    return remove;
+-}
+-
+-bool refusesSysCommand(unsigned wparam) {
+-    const unsigned command = wparam & 0xFFF0;
+-    return command == kScMaximize || command == kScMove || command == kScSize;
+-}
+-
+-bool movesDrag(unsigned keys) {
+-    constexpr unsigned kLeftButton = 0x0001;  // MK_LBUTTON
+-    return (keys & kLeftButton) != 0;
++Rect visiblePart(const Rect& window, const Rect& work) {
++    const Rect r = {std::max(window.left, work.left),
++                    std::max(window.top, work.top),
++                    std::min(window.right, work.right),
++                    std::min(window.bottom, work.bottom)};
++    return r.width() > 0 && r.height() > 0 ? r : window;
+ }
+ 
+ }  // namespace lean_window
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index 9e3bb02dc..88a0ada44 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -15,8 +15,6 @@
+ 
+ #include <gtest/gtest.h>
+ 
+-#include <vector>
+-
+ namespace lw = android::lean_window;
+ using lw::Hit;
+ 
+@@ -115,36 +113,29 @@ TEST(LeanWindowFrame, IsResize) {
+     }
+ }
+ 
+-TEST(LeanWindowFrame, DragSameScale) {
+-    const lw::Point p = lw::dragTopLeft({100, 200}, {150, 210}, 1.0, {450, 610},
+-                                        1.0);
+-    EXPECT_EQ(p.x, 400);
+-    EXPECT_EQ(p.y, 600);
+-    // Off to the left and above the screen origin.
+-    const lw::Point q = lw::dragTopLeft({100, 200}, {150, 210}, 1.5, {-20, -5},
+-                                        1.5);
+-    EXPECT_EQ(q.x, -70);
+-    EXPECT_EQ(q.y, -15);
+-}
+-
+-TEST(LeanWindowFrame, DragOntoAnotherScale) {
+-    // Grabbed 300 px right of the window's left edge at 100%; on a 150% screen
+-    // the same point of the title bar is 450 px in, and stays under the cursor.
+-    const lw::Point p = lw::dragTopLeft({0, 0}, {300, 16}, 1.0, {3000, 500},
+-                                        1.5);
+-    EXPECT_EQ(p.x, 3000 - 450);
+-    EXPECT_EQ(p.y, 500 - 24);
+-    // And back.
+-    const lw::Point q = lw::dragTopLeft({2550, 476}, {3000, 500}, 1.5,
+-                                        {1000, 300}, 1.0);
+-    EXPECT_EQ(q.x, 1000 - 300);
+-    EXPECT_EQ(q.y, 300 - 16);
++TEST(LeanWindowFrame, HitTestMaximized) {
++    // Maximized there are no resize bands: the title bar reaches the top edge
++    // and the corners.
++    const lw::Layout l = {1920, 1032, 32, 1751, 0, 0, 0};
++    EXPECT_EQ(lw::hitTest(l, 0, 0), Hit::Caption);
++    EXPECT_EQ(lw::hitTest(l, 900, 0), Hit::Caption);
++    EXPECT_EQ(lw::hitTest(l, 1919, 0), Hit::Client);  // close button
++    EXPECT_EQ(lw::hitTest(l, 0, 500), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 1919, 1031), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 1920, 500), Hit::Nowhere);
+ }
+ 
+-TEST(LeanWindowFrame, DragBadScale) {
+-    const lw::Point p = lw::dragTopLeft({0, 0}, {30, 10}, 0, {100, 100}, 2.0);
+-    EXPECT_EQ(p.x, 70);
+-    EXPECT_EQ(p.y, 90);
++TEST(LeanWindowFrame, SizingEdge) {
++    EXPECT_EQ(lw::sizingEdge(1), Hit::Left);         // WMSZ_LEFT
++    EXPECT_EQ(lw::sizingEdge(2), Hit::Right);
++    EXPECT_EQ(lw::sizingEdge(3), Hit::Top);
++    EXPECT_EQ(lw::sizingEdge(4), Hit::TopLeft);
++    EXPECT_EQ(lw::sizingEdge(5), Hit::TopRight);
++    EXPECT_EQ(lw::sizingEdge(6), Hit::Bottom);
++    EXPECT_EQ(lw::sizingEdge(7), Hit::BottomLeft);
++    EXPECT_EQ(lw::sizingEdge(8), Hit::BottomRight);  // WMSZ_BOTTOMRIGHT
++    EXPECT_EQ(lw::sizingEdge(0), Hit::Nowhere);
++    EXPECT_EQ(lw::sizingEdge(9), Hit::Nowhere);
+ }
+ 
+ namespace {
+@@ -153,10 +144,25 @@ namespace {
+ const lw::Rect kStart = {100, 100, 460, 772};
+ constexpr double kAspect = 360.0 / 640.0;
+ 
+-lw::Rect resize(Hit hit, int dx, int dy, int minW = 1, int minH = 1) {
+-    const lw::Point grab = {300, 400};
+-    return lw::resizeRect(kStart, hit, grab, {grab.x + dx, grab.y + dy}, 32,
+-                          kAspect, minW, minH);
++// What the size loop proposes after |edge| was dragged by (dx, dy): only the
++// dragged edges have moved.
++lw::Rect sizing(Hit edge, int dx, int dy, int minW = 1, int minH = 1) {
++    lw::Rect proposed = kStart;
++    if (edge == Hit::Left || edge == Hit::TopLeft || edge == Hit::BottomLeft) {
++        proposed.left += dx;
++    }
++    if (edge == Hit::Right || edge == Hit::TopRight ||
++        edge == Hit::BottomRight) {
++        proposed.right += dx;
++    }
++    if (edge == Hit::Top || edge == Hit::TopLeft || edge == Hit::TopRight) {
++        proposed.top += dy;
++    }
++    if (edge == Hit::Bottom || edge == Hit::BottomLeft ||
++        edge == Hit::BottomRight) {
++        proposed.bottom += dy;
++    }
++    return lw::sizingRect(proposed, edge, 32, kAspect, minW, minH);
+ }
+ 
+ void expectGuest(const lw::Rect& r, int width, int height) {
+@@ -166,139 +172,120 @@ void expectGuest(const lw::Rect& r, int width, int height) {
+ 
+ }  // namespace
+ 
+-TEST(LeanWindowFrame, ResizeRightKeepsAspectAndTopLeft) {
+-    const lw::Rect r = resize(Hit::Right, 90, 0);
++TEST(LeanWindowFrame, SizingRightKeepsAspectAndTopLeft) {
++    const lw::Rect r = sizing(Hit::Right, 90, 0);
+     expectGuest(r, 450, 800);
+     EXPECT_EQ(r.left, 100);
+     EXPECT_EQ(r.top, 100);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeLeftKeepsRightEdge) {
+-    const lw::Rect r = resize(Hit::Left, -90, 0);
++TEST(LeanWindowFrame, SizingLeftKeepsRightEdge) {
++    const lw::Rect r = sizing(Hit::Left, -90, 0);
+     expectGuest(r, 450, 800);
+     EXPECT_EQ(r.right, 460);
+     EXPECT_EQ(r.top, 100);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeBottomGrowsToTheRight) {
+-    const lw::Rect r = resize(Hit::Bottom, 0, 160);
++TEST(LeanWindowFrame, SizingBottomGrowsToTheRight) {
++    const lw::Rect r = sizing(Hit::Bottom, 0, 160);
+     expectGuest(r, 450, 800);
+     EXPECT_EQ(r.left, 100);
+     EXPECT_EQ(r.top, 100);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeTopKeepsBottomEdge) {
+-    const lw::Rect r = resize(Hit::Top, 0, -160);
++TEST(LeanWindowFrame, SizingTopKeepsBottomEdge) {
++    const lw::Rect r = sizing(Hit::Top, 0, -160);
+     expectGuest(r, 450, 800);
+     EXPECT_EQ(r.bottom, 772);
+     EXPECT_EQ(r.left, 100);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeCornerFollowsTheLongerPull) {
++TEST(LeanWindowFrame, SizingCornerFollowsTheLongerPull) {
+     // Pulled further down than right: the height leads.
+-    expectGuest(resize(Hit::BottomRight, 10, 160), 450, 800);
++    expectGuest(sizing(Hit::BottomRight, 10, 160), 450, 800);
+     // Pulled further right: the width leads.
+-    expectGuest(resize(Hit::BottomRight, 90, 10), 450, 800);
+-    const lw::Rect r = resize(Hit::TopLeft, -90, -10);
++    expectGuest(sizing(Hit::BottomRight, 90, 10), 450, 800);
++    const lw::Rect r = sizing(Hit::TopLeft, -90, -10);
+     expectGuest(r, 450, 800);
+     EXPECT_EQ(r.right, 460);
+     EXPECT_EQ(r.bottom, 772);
+-    const lw::Rect s = resize(Hit::TopRight, 90, 0);
++    const lw::Rect s = sizing(Hit::TopRight, 90, 0);
+     EXPECT_EQ(s.left, 100);
+     EXPECT_EQ(s.bottom, 772);
+-    const lw::Rect t = resize(Hit::BottomLeft, -90, 0);
++    const lw::Rect t = sizing(Hit::BottomLeft, -90, 0);
+     EXPECT_EQ(t.right, 460);
+     EXPECT_EQ(t.top, 100);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeShrinks) {
+-    expectGuest(resize(Hit::Right, -180, 0), 180, 320);
+-    expectGuest(resize(Hit::Bottom, 0, -320), 180, 320);
++TEST(LeanWindowFrame, SizingShrinks) {
++    expectGuest(sizing(Hit::Right, -180, 0), 180, 320);
++    expectGuest(sizing(Hit::Bottom, 0, -320), 180, 320);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeStopsAtTheMinimum) {
++TEST(LeanWindowFrame, SizingFromAnotherShape) {
++    // A snapped window, half a 1920x1032 work area, with the guest screen
++    // letterboxed in it: dragging an edge brings it back to the guest's shape.
++    const lw::Rect snapped = {0, 0, 960, 1032};
++    lw::Rect proposed = snapped;
++    proposed.right -= 60;  // the right edge, 60 px to the left
++    const lw::Rect r =
++            lw::sizingRect(proposed, Hit::Right, 32, 1280.0 / 720.0, 1, 1);
++    EXPECT_EQ(r.left, 0);
++    EXPECT_EQ(r.top, 0);
++    EXPECT_EQ(r.width(), 900);
++    EXPECT_EQ(r.height() - 32, 506);
++}
++
++TEST(LeanWindowFrame, SizingStopsAtTheMinimum) {
+     // At least 200 wide and 168 high: 200 wide wins for a 9:16 screen.
+-    const lw::Rect r = resize(Hit::Right, -1000, 0, 200, 168);
++    const lw::Rect r = sizing(Hit::Right, -1000, 0, 200, 168);
+     expectGuest(r, 200, 356);
+-    const lw::Rect s = resize(Hit::Left, 1000, 0, 200, 168);
++    const lw::Rect s = sizing(Hit::Left, 1000, 0, 200, 168);
+     expectGuest(s, 200, 356);
+     EXPECT_EQ(s.right, 460);
+     // A landscape screen is held by its height.
+-    const lw::Rect wide = lw::resizeRect({0, 0, 640, 392}, Hit::Bottom,
+-                                         {0, 0}, {0, -1000}, 32, 640.0 / 360.0,
+-                                         200, 168);
++    const lw::Rect wide = lw::sizingRect({0, 0, 640, 40}, Hit::Bottom, 32,
++                                         640.0 / 360.0, 200, 168);
+     EXPECT_EQ(wide.height() - 32, 168);
+     EXPECT_EQ(wide.width(), 299);
+ }
+ 
+-TEST(LeanWindowFrame, ResizeIgnoresNonResizeHits) {
+-    for (Hit hit : {Hit::Caption, Hit::Client, Hit::Nowhere}) {
+-        const lw::Rect r = resize(hit, 50, 50);
++TEST(LeanWindowFrame, SizingIgnoresNonResizeEdges) {
++    for (Hit edge : {Hit::Caption, Hit::Client, Hit::Nowhere}) {
++        const lw::Rect r = sizing(edge, 50, 50);
+         EXPECT_EQ(r.left, kStart.left);
+         EXPECT_EQ(r.top, kStart.top);
+         EXPECT_EQ(r.right, kStart.right);
+         EXPECT_EQ(r.bottom, kStart.bottom);
+     }
+-    const lw::Rect r = lw::resizeRect(kStart, Hit::Right, {0, 0}, {50, 0}, 32,
+-                                      0.0, 1, 1);
+-    EXPECT_EQ(r.right, kStart.right);
+-}
+-
+-TEST(LeanWindowFrame, SystemMenuKeepsMinimizeAndClose) {
+-    EXPECT_TRUE(lw::keepsSystemMenuItem(lw::kScMinimize));
+-    EXPECT_TRUE(lw::keepsSystemMenuItem(lw::kScClose));
+-    for (unsigned id : std::vector<unsigned>{lw::kScRestore, lw::kScMove, lw::kScSize,
+-                        lw::kScMaximize, 0u, 0xF100u /*SC_KEYMENU*/}) {
+-        EXPECT_FALSE(lw::keepsSystemMenuItem(id)) << std::hex << id;
+-    }
+-}
+-
+-TEST(LeanWindowFrame, SystemMenuItemsToDelete) {
+-    // Windows' own menu: Restore, Move, Size, Minimize, Maximize, -, Close.
+-    const std::vector<unsigned> standard = {
+-            lw::kScRestore, lw::kScMove,    lw::kScSize, lw::kScMinimize,
+-            lw::kScMaximize, 0,             lw::kScClose};
+-    EXPECT_EQ(lw::systemMenuItemsToDelete(standard),
+-              (std::vector<int>{4, 2, 1, 0}));
+-    // What is left: Minimize, -, Close. Nothing more to delete.
+-    EXPECT_EQ(lw::systemMenuItemsToDelete(
+-                      {lw::kScMinimize, 0, lw::kScClose}),
+-              std::vector<int>{});
+-}
+-
+-TEST(LeanWindowFrame, SystemMenuSeparators) {
+-    // Leading, trailing, doubled separators go.
+-    EXPECT_EQ(lw::systemMenuItemsToDelete({0, lw::kScMinimize, 0, 0,
+-                                           lw::kScClose, 0}),
+-              (std::vector<int>{5, 3, 0}));
+-    // A separator between a kept and a dropped item goes with it.
+-    EXPECT_EQ(lw::systemMenuItemsToDelete(
+-                      {lw::kScMinimize, 0, lw::kScMaximize, 0, lw::kScClose}),
+-              (std::vector<int>{3, 2}));
+-    EXPECT_EQ(lw::systemMenuItemsToDelete({lw::kScClose, 0, lw::kScMaximize}),
+-              (std::vector<int>{2, 1}));
+-    EXPECT_EQ(lw::systemMenuItemsToDelete({}), std::vector<int>{});
+-}
+-
+-TEST(LeanWindowFrame, RefusedSysCommands) {
+-    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMaximize));
+-    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMaximize | 2));  // e.g. 0xF032
+-    EXPECT_TRUE(lw::refusesSysCommand(lw::kScMove));
+-    EXPECT_TRUE(lw::refusesSysCommand(0xF012));  // SC_DRAGMOVE
+-    EXPECT_TRUE(lw::refusesSysCommand(lw::kScSize));
+-    EXPECT_TRUE(lw::refusesSysCommand(lw::kScSize | 8));  // bottom right
+-    for (unsigned command : std::vector<unsigned>{lw::kScMinimize, lw::kScClose, lw::kScRestore,
+-                             0xF100u /*SC_KEYMENU*/, 0xF090u /*SC_MOUSEMENU*/,
+-                             0xF130u /*SC_TASKLIST*/}) {
+-        EXPECT_FALSE(lw::refusesSysCommand(command)) << std::hex << command;
+-    }
++    const lw::Rect proposed = {100, 100, 510, 772};
++    const lw::Rect r = lw::sizingRect(proposed, Hit::Right, 32, 0.0, 1, 1);
++    EXPECT_EQ(r.right, proposed.right);
++    EXPECT_EQ(r.bottom, proposed.bottom);
+ }
+ 
+-TEST(LeanWindowFrame, OnlyMovesWithTheLeftButtonDrag) {
+-    EXPECT_TRUE(lw::movesDrag(0x0001));           // MK_LBUTTON
+-    EXPECT_TRUE(lw::movesDrag(0x0001 | 0x0004));  // with MK_SHIFT
+-    EXPECT_TRUE(lw::movesDrag(0x0001 | 0x0002));  // with MK_RBUTTON
+-    EXPECT_FALSE(lw::movesDrag(0));
+-    EXPECT_FALSE(lw::movesDrag(0x0002));  // MK_RBUTTON alone
+-    EXPECT_FALSE(lw::movesDrag(0x0004 | 0x0008 | 0x0010));  // shift, control, middle
++TEST(LeanWindowFrame, VisiblePartOfAMaximizedWindow) {
++    // A 1920x1080 screen with a 48 px task bar at the bottom; the maximized
++    // window hangs over the work area by its 8 px frame.
++    const lw::Rect work = {0, 0, 1920, 1032};
++    const lw::Rect r = lw::visiblePart({-8, -8, 1928, 1040}, work);
++    EXPECT_EQ(r.left, 0);
++    EXPECT_EQ(r.top, 0);
++    EXPECT_EQ(r.right, 1920);
++    EXPECT_EQ(r.bottom, 1032);
++    // On a screen to the left, at 150%: a 12 px frame.
++    const lw::Rect s = lw::visiblePart({-2572, -12, 12, 1452},
++                                       {-2560, 0, 0, 1440});
++    EXPECT_EQ(s.left, -2560);
++    EXPECT_EQ(s.top, 0);
++    EXPECT_EQ(s.right, 0);
++    EXPECT_EQ(s.bottom, 1440);
++    // A window inside the work area is all there.
++    const lw::Rect t = lw::visiblePart({100, 100, 500, 400}, work);
++    EXPECT_EQ(t.left, 100);
++    EXPECT_EQ(t.bottom, 400);
++    // A window that is not on that screen at all stays as it is.
++    const lw::Rect u = lw::visiblePart({3000, 100, 3400, 400}, work);
++    EXPECT_EQ(u.left, 3000);
++    EXPECT_EQ(u.right, 3400);
+ }
+-- 
+2.54.0.windows.1
+
