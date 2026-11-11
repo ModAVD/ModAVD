@@ -16,7 +16,8 @@ param(
     # with another text in it (SHA-256 after CRLF -> LF, release_tools.py AGPL_SHA256)
     [string]$Package,
     # ModAVD release checkout: the bundled scripts (package/) and the bridge source (bridge/) are taken from its HEAD,
-    # and the patches, manifests and release notes are written into it. Default: the checkout these tools are in.
+    # its manifests/manifest-*.xml are synced and the incoming/<topic> folders this release takes in are removed
+    # (the patches and the release notes go to the output folder). Default: the checkout these tools are in.
     [string]$Repository,
     # ModAVDManager-<version>-win-x64.zip: ModAVD.exe and tools\modavd.exe come from it. From the manager's GitHub
     # Release, or before that release exists built from its release branch (build.ps1 and mkzip there; same bytes).

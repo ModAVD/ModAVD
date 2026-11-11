@@ -1,5 +1,5 @@
 {{MACHINE}}
-ModAVD {{VERSION}}，构建号 `{{BUILD_ID}}`，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。安装、升级和反馈见仓库 README 与 `docs/`。
+ModAVD {{VERSION}}，构建号 `{{BUILD_ID}}`，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。安装、升级和反馈见[文档站](https://modavd.github.io/)。
 
 ## 更新内容
 
