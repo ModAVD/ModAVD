@@ -1,0 +1,2068 @@
+From 9c6280919f24df98d527581d6a7ad4d95e3f0d4d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Wed, 11 Nov 2026 23:33:44 +0100
+Subject: [PATCH] MAS local: sync and shut Android down when Windows ends a
+ headless session
+
+The headless emulator has no window, so Windows does not tell it that the
+session is ending (logoff, restart, shutdown). The console control handler
+is not called for it either: the executable imports user32, and such a
+process gets no CTRL_LOGOFF_EVENT or CTRL_SHUTDOWN_EVENT. The process is
+just ended, and for the guest the power is cut. The lean window has been
+handling this since ModAVD#60; this is the other half.
+
+The safe shutdown moves out of EmulatorQtWindow into android::SafeShutdown,
+as it was: sync, Android's own shutdown (svc power shutdown, init if it
+refuses), a last sync and the quit when Android does not power off in time,
+and the extra sync and the wait for it as the session ends. It knows nothing
+of windows. What it needs comes through a Host (a way onto the owner's
+thread, a timer, the quit) and Actions (the kill guard, resuming a paused
+VM, registering with the adb server again), so it has unit tests now, with a
+fake adb. The window keeps what is the window's: hiding itself, the title,
+the shutdown block reason. Its log lines are unchanged.
+
+The headless emulator on Windows makes a hidden top-level window on a thread
+of its own and runs the same shutdown from there. WM_QUERYENDSESSION starts
+it (a paused VM is resumed, the guest synced, Android asked to shut down)
+and is answered with yes: a program without a visible window is not waited
+for. WM_ENDSESSION makes sure a sync is running and waits up to 3 s for it,
+so what was written is on disk even if Android does not get to power off.
+Like the lean window it asks to be told before the default shutdown level,
+so that the private adb server is still there. Not with
+ANDROID_EMU_FULL_TOOLBAR=1, which keeps the emulator as it comes.
+
+Refs ModAVD/ModAVD#64
+
+Change-Id: I3eb3318dbf46367902ecd7576c1c477640d38438
+---
+ .../modules/aemu-ui-headless/CMakeLists.txt   |   6 +-
+ .../include/android/emulator-safe-shutdown.h  |  41 ++
+ .../src/android/emulator-safe-shutdown.cpp    |  75 +++
+ .../src/android/headless-session-end.cpp      | 249 ++++++++++
+ .../src/android/skin/winsys-headless.cpp      |   7 +
+ .../modules/aemu-ui-qt/CMakeLists.txt         |   1 +
+ .../android/skin/qt/emulator-qt-window.cpp    | 411 ++--------------
+ .../src/android/skin/qt/emulator-qt-window.h  |  20 +-
+ .../modules/aemu-ui-window/CMakeLists.txt     |  30 ++
+ .../include/android/safe-shutdown.h           | 139 ++++++
+ .../src/android/safe-shutdown.cpp             | 362 ++++++++++++++
+ .../test/android/safe-shutdown_unittest.cpp   | 448 ++++++++++++++++++
+ 12 files changed, 1408 insertions(+), 381 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-headless/include/android/emulator-safe-shutdown.h
+ create mode 100644 android/android-ui/modules/aemu-ui-headless/src/android/emulator-safe-shutdown.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-headless/src/android/headless-session-end.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-window/include/android/safe-shutdown.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/src/android/safe-shutdown.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-window/test/android/safe-shutdown_unittest.cpp
+
+diff --git a/android/android-ui/modules/aemu-ui-headless/CMakeLists.txt b/android/android-ui/modules/aemu-ui-headless/CMakeLists.txt
+index 3a675ec62..a05c73c6f 100644
+--- a/android/android-ui/modules/aemu-ui-headless/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-headless/CMakeLists.txt
+@@ -2,13 +2,15 @@
+ android_qt_lib(
+   TARGET aemu-ui-headless
+   ALIAS ui::headless
+-  SRC android/skin/event-headless.cpp
++  SRC android/emulator-safe-shutdown.cpp
++      android/headless-session-end.cpp
++      android/skin/event-headless.cpp
+       android/skin/LibuiAgent.cpp
+       android/skin/qt/emulator-no-qt-no-window.cpp
+       android/skin/surface-headless.cpp
+       android/skin/winsys-headless.cpp
+       android/window-agent-headless-impl.cpp
+-  DEPS android-emu ui::common ui::window)
++  DEPS aemu-ui-safe-shutdown android-emu ui::common ui::window)
+ 
+ target_compile_definitions(aemu-ui-headless PRIVATE CONFIG_HEADLESS)
+ 
+diff --git a/android/android-ui/modules/aemu-ui-headless/include/android/emulator-safe-shutdown.h b/android/android-ui/modules/aemu-ui-headless/include/android/emulator-safe-shutdown.h
+new file mode 100644
+index 000000000..402f659d2
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-headless/include/android/emulator-safe-shutdown.h
+@@ -0,0 +1,41 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include "android/safe-shutdown.h"
++
++namespace android {
++
++// What the safe shutdown does to this emulator's process and VM, with or
++// without a window: the kill guard, resuming a paused VM on the QEMU main
++// loop, registering with the adb server again.
++SafeShutdown::Actions emulatorSafeShutdownActions();
++
++// The headless emulator on Windows (ModAVD#64). It has no window, so Windows
++// does not tell it that the session is ending (logoff, restart, shutdown) and
++// just ends the process: for the guest the power is cut. This makes a hidden
++// top-level window on a thread of its own, which gets WM_QUERYENDSESSION and
++// WM_ENDSESSION and runs the safe shutdown on them: resume a paused VM, sync,
++// have Android shut down. A program without a visible window cannot hold the
++// session's end up, so as it ends the thread only waits a few seconds for the
++// guest sync: Android may not get to power off, but what was written is on
++// disk.
++//
++// |adb| is asked for the interface when the session ends. Does nothing but on
++// Windows, and nothing with the full toolbar (ANDROID_EMU_FULL_TOOLBAR=1),
++// which keeps the emulator as it comes.
++void startHeadlessSessionEndWatch(
++        std::function<emulation::AdbInterface*()> adb);
++
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-headless/src/android/emulator-safe-shutdown.cpp b/android/android-ui/modules/aemu-ui-headless/src/android/emulator-safe-shutdown.cpp
+new file mode 100644
+index 000000000..3014beba9
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-headless/src/android/emulator-safe-shutdown.cpp
+@@ -0,0 +1,75 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/emulator-safe-shutdown.h"
++
++#include "aemu/base/async/ThreadLooper.h"
++#include "aemu/base/threads/Async.h"
++#include "android/base/system/System.h"
++#include "android/console.h"
++#include "android/emulation/AdbHostServer.h"
++#include "host-common/vm_operations.h"
++
++namespace android {
++
++using base::System;
++
++// A paused VM (console "avd pause", gRPC setVmState) runs no vCPU, so the
++// guest's adbd does not answer: the sync and shutdown commands would wait out
++// their limits and the emulator would quit without a sync. Resume it first, on
++// the QEMU main loop as gRPC does: the transition takes the I/O lock. Only a
++// plain pause is undone; a debugger stop, a snapshot save or load and an I/O
++// error are left as they are.
++static bool resumePausedVm() {
++    const auto* vm = getConsoleAgents()->vm;
++    if (!vm || vm->getRunState() != QEMU_RUN_STATE_PAUSED) {
++        return false;
++    }
++    base::ThreadLooper::runOnMainLooper([vm] { vm->vmResume(); });
++    return true;
++}
++
++// The private adb server may have been restarted since this instance
++// registered with it at boot (adb kill-server, a crash). With local transport
++// scanning off, as the manager and AUTO-MAS run it, the server then does not
++// know the instance until the guest's adbd reconnects, and the shutdown and
++// sync commands would fail with "device not found". Register again, the way
++// the instance does at boot. A server that is not running yet is started by
++// the first adb command, so keep trying for a few seconds.
++static void registerWithAdbServer() {
++    const int adbPort = getConsoleAgents()->settings->android_adb_port();
++    const int clientPort = emulation::AdbHostServer::getClientPort();
++    if (adbPort <= 0 || clientPort <= 0) {
++        return;
++    }
++    base::async([adbPort, clientPort] {
++        for (int attempt = 0; attempt < 5; ++attempt) {
++            if (emulation::AdbHostServer::notify(adbPort, clientPort)) {
++                return;
++            }
++            System::get()->sleepMs(1000);
++        }
++    });
++}
++
++SafeShutdown::Actions emulatorSafeShutdownActions() {
++    SafeShutdown::Actions actions;
++    actions.killSelfAfter = [](int seconds) {
++        System::get()->waitAndKillSelf(seconds);
++    };
++    actions.resumePausedVm = &resumePausedVm;
++    actions.registerWithAdbServer = &registerWithAdbServer;
++    return actions;
++}
++
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-headless/src/android/headless-session-end.cpp b/android/android-ui/modules/aemu-ui-headless/src/android/headless-session-end.cpp
+new file mode 100644
+index 000000000..708623bd7
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-headless/src/android/headless-session-end.cpp
+@@ -0,0 +1,249 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/emulator-safe-shutdown.h"
++
++#ifdef _WIN32
++
++#include <windows.h>
++
++#include <atomic>
++#include <chrono>
++#include <deque>
++#include <mutex>
++#include <thread>
++#include <utility>
++
++#include "android/avd/info.h"
++#include "android/base/system/System.h"
++#include "android/console.h"
++#include "android/skin/winsys.h"
++#include "android/utils/debug.h"
++
++namespace android {
++
++namespace {
++
++constexpr char kName[] = "Safe headless shutdown";
++constexpr wchar_t kWindowClass[] = L"ModAVDHeadlessSessionEnd";
++// Tasks are waiting in the queue (Host::post).
++constexpr UINT kTasksMessage = WM_APP + 1;
++constexpr UINT_PTR kPowerOffTimer = 1;
++
++// The hidden window, its thread, and the safe shutdown that runs on it. One
++// per process, never destroyed: the thread ends with the process.
++class SessionEndWatch final : public SafeShutdown::Host {
++public:
++    explicit SessionEndWatch(std::function<emulation::AdbInterface*()> adb)
++        : mShutdown(kName,
++                    this,
++                    std::move(adb),
++                    emulatorSafeShutdownActions()) {}
++
++    // The thread: makes the window and runs its messages.
++    void run() {
++        const HINSTANCE instance = GetModuleHandleW(nullptr);
++        WNDCLASSEXW windowClass = {};
++        windowClass.cbSize = sizeof(windowClass);
++        windowClass.lpfnWndProc = &SessionEndWatch::windowProc;
++        windowClass.hInstance = instance;
++        windowClass.lpszClassName = kWindowClass;
++        if (!RegisterClassExW(&windowClass)) {
++            dwarning("%s: no window class (%lu); Windows ending the session will cut the guest's power",
++                     kName, GetLastError());
++            return;
++        }
++        // A top-level window, never shown. Not a message-only window: those
++        // are not told about the session's end.
++        const HWND window = CreateWindowExW(0, kWindowClass, L"ModAVD",
++                                            WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
++                                            nullptr, instance, this);
++        if (!window) {
++            dwarning("%s: no window (%lu); Windows ending the session will cut the guest's power",
++                     kName, GetLastError());
++            return;
++        }
++        MSG message;
++        while (GetMessageW(&message, nullptr, 0, 0) > 0) {
++            DispatchMessageW(&message);
++        }
++    }
++
++    // SafeShutdown::Host
++    void post(std::function<void()> task) override {
++        {
++            std::lock_guard<std::mutex> lock(mTasksMutex);
++            mTasks.push_back(std::move(task));
++        }
++        PostMessageW(mWindow.load(), kTasksMessage, 0, 0);
++    }
++
++    void startPowerOffTimer(int ms) override {
++        SetTimer(mWindow.load(), kPowerOffTimer, static_cast<UINT>(ms), nullptr);
++    }
++
++    void stopPowerOffTimer() override {
++        KillTimer(mWindow.load(), kPowerOffTimer);
++    }
++
++    // The headless emulator's own way out. By now the guest is synced, or
++    // could not be.
++    void quit() override { skin_winsys_quit_request(); }
++
++private:
++    static LRESULT CALLBACK windowProc(HWND window,
++                                       UINT message,
++                                       WPARAM wParam,
++                                       LPARAM lParam) {
++        if (message == WM_NCCREATE) {
++            auto* self = static_cast<SessionEndWatch*>(
++                    reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
++            SetWindowLongPtrW(window, GWLP_USERDATA,
++                              reinterpret_cast<LONG_PTR>(self));
++            self->mWindow.store(window);
++            return DefWindowProcW(window, message, wParam, lParam);
++        }
++        auto* self = reinterpret_cast<SessionEndWatch*>(
++                GetWindowLongPtrW(window, GWLP_USERDATA));
++        if (!self) {
++            return DefWindowProcW(window, message, wParam, lParam);
++        }
++        switch (message) {
++            case WM_QUERYENDSESSION:
++                // Windows is logging off, restarting or shutting down. Start
++                // now, to give Android the time the other programs take; the
++                // answer is yes either way, a program without a visible
++                // window is not waited for.
++                dinfo("%s: Windows is ending the session%s", kName,
++                      (lParam & ENDSESSION_CRITICAL) ? " (critical)" : "");
++                self->begin();
++                return TRUE;
++
++            case WM_ENDSESSION:
++                self->endSession(wParam != FALSE);
++                return 0;
++
++            case WM_TIMER:
++                if (wParam == kPowerOffTimer) {
++                    KillTimer(window, kPowerOffTimer);  // one shot
++                    self->mShutdown.powerOffTimedOut();
++                }
++                return 0;
++
++            case WM_CLOSE:
++                // The window stays for as long as the process: nothing closes
++                // it (taskkill without /F would).
++                return 0;
++
++            default:
++                if (message == kTasksMessage) {
++                    self->runTasks();
++                    return 0;
++                }
++                return DefWindowProcW(window, message, wParam, lParam);
++        }
++    }
++
++    void begin() {
++        if (mShutdown.inProgress()) {
++            return;
++        }
++        // A quick-boot snapshot of a guest that is shutting down is of no
++        // use, so do not save one; the lean window does the same.
++        getConsoleAgents()->settings->avdParams()->flags |=
++                AVDINFO_NO_SNAPSHOT_SAVE_ON_EXIT;
++        mShutdown.start();
++    }
++
++    // WM_ENDSESSION. When the session ends, Windows ends the process soon
++    // after this returns: make sure the guest is syncing and give the sync a
++    // few seconds. When it goes on after all (the user cancelled, another
++    // program refused), Android is already powering off and cannot be called
++    // back; the emulator quits when it has.
++    void endSession(bool ending) {
++        if (!ending) {
++            if (mShutdown.inProgress()) {
++                dinfo("%s: Windows is not ending the session after all", kName);
++            }
++            return;
++        }
++        if (!mShutdown.inProgress()) {
++            dinfo("%s: Windows is ending the session without asking", kName);
++            begin();
++        } else {
++            mShutdown.syncForSessionEnd();
++        }
++        if (mShutdown.waitForSyncs(std::chrono::seconds(3))) {
++            dinfo("%s: Windows is ending the session; the guest is synced",
++                  kName);
++        } else {
++            dwarning("%s: the guest sync has not finished as Windows ends the session",
++                     kName);
++        }
++    }
++
++    void runTasks() {
++        for (;;) {
++            std::function<void()> task;
++            {
++                std::lock_guard<std::mutex> lock(mTasksMutex);
++                if (mTasks.empty()) {
++                    return;
++                }
++                task = std::move(mTasks.front());
++                mTasks.pop_front();
++            }
++            task();
++        }
++    }
++
++    std::atomic<HWND> mWindow{nullptr};
++    std::mutex mTasksMutex;
++    std::deque<std::function<void()>> mTasks;
++    SafeShutdown mShutdown;
++};
++
++}  // namespace
++
++void startHeadlessSessionEndWatch(
++        std::function<emulation::AdbInterface*()> adb) {
++    if (base::System::get()->getEnvironmentVariable(
++                "ANDROID_EMU_FULL_TOOLBAR") == "1") {
++        return;
++    }
++    static std::atomic<bool> started{false};
++    if (started.exchange(true)) {
++        return;
++    }
++    // Be told before programs at the default level (0x280): the private adb
++    // server the sync and the shutdown go through keeps running until then.
++    // The lean window does the same.
++    SetProcessShutdownParameters(0x300, 0);
++    auto* watch = new SessionEndWatch(std::move(adb));
++    std::thread([watch] { watch->run(); }).detach();
++}
++
++}  // namespace android
++
++#else  // !_WIN32
++
++namespace android {
++
++void startHeadlessSessionEndWatch(
++        std::function<emulation::AdbInterface*()> adb) {
++    (void)adb;
++}
++
++}  // namespace android
++
++#endif  // _WIN32
+diff --git a/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp b/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
+index bf9829f8e..e39fc4023 100644
+--- a/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
++++ b/android/android-ui/modules/aemu-ui-headless/src/android/skin/winsys-headless.cpp
+@@ -21,6 +21,8 @@
+ #include "host-common/hw-config.h"
+ #include "android/avd/info.h"
+ #include "android/console.h"                           // for android_hw
++#include "android/emulation/control/adb/AdbInterface.h"
++#include "android/emulator-safe-shutdown.h"
+ #include "android/skin/qt/emulator-no-qt-no-window.h"  // for EmulatorNoQtNo...
+ #include "android/skin/rect.h"                         // for SkinRect, SkinPos
+ #include "android/skin/winsys.h"                       // for WinsysPreferre...
+@@ -125,6 +127,11 @@ extern void skin_winsys_enter_main_loop(bool no_window) {
+     (void)no_window;
+ 
+ #ifdef _WIN32
++    // Without a window Windows would end the process with the session and
++    // never say so (ModAVD#64).
++    android::startHeadlessSessionEndWatch(
++            [] { return android::emulation::AdbInterface::getGlobal(); });
++
+     sWakeEvent = CreateEvent(NULL,   // Default security attributes
+                              TRUE,   // Manual reset
+                              FALSE,  // Initially nonsignaled
+diff --git a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+index 5a84d83f8..dcf1a72e1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+@@ -68,6 +68,7 @@ android_qt_lib(
+        aemu-ui-headless # Yes! The QT ui depends on the headless one..
+        aemu-ui-lean-window
+        aemu-ui-qt-base
++       aemu-ui-safe-shutdown
+        aemu::recording
+        android-emu
+        android-emu-base
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 90e3932ae..e3fa7df1d 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -33,6 +33,7 @@
+ #include "android/emulation/compatibility_check.h"
+ #include "android/emulation/control/globals_agent.h"
+ #include "android/emulation/control/user_event_agent.h"
++#include "android/emulator-safe-shutdown.h"
+ #include "android/emulator-window.h"
+ #include "android/hw-sensors.h"
+ #include "android/metrics/DependentMetrics.h"
+@@ -165,65 +166,28 @@ using android::emulation::AvdCompatibilityManager;
+ using android::emulation::FilePusher;
+ using android::emulation::ModavdImePipe;
+ 
+-// How long the lean toolbar's safe shutdown waits for Android to power off.
+-// Android's own shutdown may wait up to 10 s for the shutdown broadcast and
+-// 10 s for the activities to stop before init stops the services and
+-// unmounts; it usually takes 4-7 s in all. Then comes a last sync (up to 5 s)
+-// and the quit; the guard kills the process if even that does not finish.
+-static constexpr int kSafeShutdownPowerOffMs = 25000;
+-static constexpr int kSafeShutdownGuardSec = 35;
+-
+-// The adb callbacks of the lean toolbar's safe shutdown run on the
+-// AdbInterface looper and can complete after the window is gone (Qt tears it
+-// down once Android has powered off). They post to the window only while it
+-// is still alive; the destructor clears the pointer under the lock.
+-static Lock& safeShutdownLock() {
+-    static Lock lock;
+-    return lock;
+-}
+-static EmulatorQtWindow* sSafeShutdownWindow = nullptr;
+-
+-// The safe shutdown's guest sync commands that have not completed. When
+-// Windows ends the session, the UI thread waits a few seconds for them
+-// (EmulatorQtWindow::endSession); their callbacks run on the AdbInterface
+-// looper, so the wait does not hold them up.
+-struct SafeShutdownSyncs {
+-    std::mutex mutex;
+-    std::condition_variable done;
+-    int inFlight = 0;
+-};
+-
+-static SafeShutdownSyncs& safeShutdownSyncs() {
+-    // Never destroyed: an adb callback may still finish a sync while the
+-    // process exits.
+-    static auto* syncs = new SafeShutdownSyncs;
+-    return *syncs;
+-}
+-
+-static bool safeShutdownSyncInFlight() {
+-    std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
+-    return safeShutdownSyncs().inFlight > 0;
+-}
+-
+-static void safeShutdownSyncStarted() {
+-    std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
+-    ++safeShutdownSyncs().inFlight;
+-}
++// What the safe shutdown (android/safe-shutdown.h) needs from the window. The
++// shutdown runs on the UI thread; its adb commands complete on the
++// AdbInterface looper and come back through a queued call.
++class EmulatorQtWindow::SafeShutdownHost final
++    : public android::SafeShutdown::Host {
++public:
++    explicit SafeShutdownHost(EmulatorQtWindow* window) : mWindow(window) {}
+ 
+-static void safeShutdownSyncFinished() {
+-    {
+-        std::lock_guard<std::mutex> lock(safeShutdownSyncs().mutex);
+-        --safeShutdownSyncs().inFlight;
++    void post(std::function<void()> task) override {
++        QMetaObject::invokeMethod(mWindow, std::move(task),
++                                  Qt::QueuedConnection);
+     }
+-    safeShutdownSyncs().done.notify_all();
+-}
++    void startPowerOffTimer(int ms) override {
++        mWindow->mSafeShutdownTimeout.start(ms);
++    }
++    void stopPowerOffTimer() override { mWindow->mSafeShutdownTimeout.stop(); }
++    void stateChanged() override { mWindow->updateWindowTitle(); }
++    void quit() override { mWindow->queueQuitEvent(); }
+ 
+-// Returns whether no sync is left in flight.
+-static bool waitForSafeShutdownSyncs(std::chrono::milliseconds timeout) {
+-    std::unique_lock<std::mutex> lock(safeShutdownSyncs().mutex);
+-    return safeShutdownSyncs().done.wait_for(
+-            lock, timeout, [] { return safeShutdownSyncs().inFlight == 0; });
+-}
++private:
++    EmulatorQtWindow* const mWindow;
++};
+ 
+ namespace {
+ 
+@@ -860,14 +824,16 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+                      &EmulatorQtWindow::slot_releaseBitmap);
+     QObject::connect(this, &EmulatorQtWindow::requestClose, this,
+                      &EmulatorQtWindow::slot_requestClose);
++    mSafeShutdownHost = std::make_unique<SafeShutdownHost>(this);
++    mSafeShutdown = std::make_unique<android::SafeShutdown>(
++            "Safe toolbar shutdown", mSafeShutdownHost.get(),
++            [this]() -> android::emulation::AdbInterface* {
++                return *mAdbInterface;
++            },
++            android::emulatorSafeShutdownActions());
+     mSafeShutdownTimeout.setSingleShot(true);
+-    mSafeShutdownTimeout.setInterval(kSafeShutdownPowerOffMs);
+-    QObject::connect(&mSafeShutdownTimeout, &QTimer::timeout, this, [this] {
+-        if (mSafeShutdownState == SafeShutdownState::StoppingGuest) {
+-            dwarning("Safe toolbar shutdown timed out; syncing guest");
+-            startSafeShutdownSync();
+-        }
+-    });
++    QObject::connect(&mSafeShutdownTimeout, &QTimer::timeout, this,
++                     [this] { mSafeShutdown->powerOffTimedOut(); });
+     QObject::connect(this, &EmulatorQtWindow::requestUpdate, this,
+                      &EmulatorQtWindow::slot_requestUpdate);
+     QObject::connect(this, &EmulatorQtWindow::setDeviceGeometry, this,
+@@ -1103,12 +1069,9 @@ EmulatorQtWindow* EmulatorQtWindow::getInstance() {
+ }
+ 
+ EmulatorQtWindow::~EmulatorQtWindow() {
+-    {
+-        AutoLock lock(safeShutdownLock());
+-        if (sSafeShutdownWindow == this) {
+-            sSafeShutdownWindow = nullptr;
+-        }
+-    }
++    // adb commands of the safe shutdown may still complete; they no longer
++    // reach the window.
++    mSafeShutdown->detach();
+     ModavdImePipe::removeStateCallback(mHostImeCallbackId);
+     if (mApkInstallCommand) {
+         mApkInstallCommand->cancel();
+@@ -1284,16 +1247,14 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+     }
+ 
+     const bool safeShutdownEnded =
+-            !isMainThreadRunning() &&
+-            mSafeShutdownState != SafeShutdownState::Idle;
++            !isMainThreadRunning() && mSafeShutdown->inProgress();
+     if (safeShutdownEnded) {
+         if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+             modal->close();
+         }
+-        mSafeShutdownTimeout.stop();
+         // The kill guard started with the shutdown still bounds the teardown.
+         dinfo("Safe toolbar shutdown: the emulator has stopped; quitting");
+-        mSafeShutdownState = SafeShutdownState::Idle;
++        mSafeShutdown->stopped();
+     }
+ 
+     // make sure to use the close button on tool window
+@@ -1537,13 +1498,13 @@ void EmulatorQtWindow::updateWindowTitle() {
+         QString title = QString("[Mouse captured, press %1 to release] %2")
+             .arg(releaseMouseShortcutName())
+             .arg(mBaseWindowTitle);
+-        if (mSafeShutdownState != SafeShutdownState::Idle) {
++        if (mSafeShutdown->inProgress()) {
+             title += QString::fromUtf8("（正在关机…）");
+         }
+         mContainer.setWindowTitle(title);
+     } else {
+         mContainer.setWindowTitle(mBaseWindowTitle +
+-                                  (mSafeShutdownState != SafeShutdownState::Idle
++                                  (mSafeShutdown->inProgress()
+                                            ? QString::fromUtf8("（正在关机…）")
+                                            : QString()));
+     }
+@@ -4662,261 +4623,14 @@ void EmulatorQtWindow::slot_adbWarningMessageAccepted() {
+     }
+ }
+ 
++// The safe shutdown itself is android::SafeShutdown, which the headless
++// emulator runs too; here is what the window adds to it.
+ bool EmulatorQtWindow::safeShutdownInProgress() const {
+-    // Forced counts too: a close request in the seconds before QEMU quits
+-    // must not fall through to the upstream close path.
+-    return mSafeShutdownState != SafeShutdownState::Idle;
+-}
+-
+-// The private adb server may have been restarted since this instance
+-// registered with it at boot (adb kill-server, a crash). With local transport
+-// scanning off, as the manager and AUTO-MAS run it, the server then does not
+-// know the instance until the guest's adbd reconnects, and the shutdown and
+-// sync commands would fail with "device not found". Register again, the way
+-// the instance does at boot. A server that is not running yet is started by
+-// the first adb command, so keep trying for a few seconds.
+-static void registerWithAdbServer() {
+-    const int adbPort = getConsoleAgents()->settings->android_adb_port();
+-    const int clientPort = android::emulation::AdbHostServer::getClientPort();
+-    if (adbPort <= 0 || clientPort <= 0) {
+-        return;
+-    }
+-    android::base::async([adbPort, clientPort] {
+-        for (int attempt = 0; attempt < 5; ++attempt) {
+-            if (android::emulation::AdbHostServer::notify(adbPort,
+-                                                         clientPort)) {
+-                return;
+-            }
+-            System::get()->sleepMs(1000);
+-        }
+-    });
+-}
+-
+-// A paused VM (console "avd pause", gRPC setVmState) runs no vCPU, so the
+-// guest's adbd does not answer: the sync and shutdown commands would wait out
+-// their limits and the emulator would quit without a sync. Resume it first, on
+-// the QEMU main loop as gRPC does: the transition takes the I/O lock. Only a
+-// plain pause is undone; a debugger stop, a snapshot save or load and an I/O
+-// error are left as they are.
+-static void resumePausedVmForSafeShutdown() {
+-    const auto* vm = getConsoleAgents()->vm;
+-    if (!vm || vm->getRunState() != QEMU_RUN_STATE_PAUSED) {
+-        return;
+-    }
+-    dinfo("Safe toolbar shutdown: the VM is paused; resuming it first");
+-    android::base::ThreadLooper::runOnMainLooper([vm] { vm->vmResume(); });
++    return mSafeShutdown->inProgress();
+ }
+ 
+ void EmulatorQtWindow::startSafeShutdown() {
+-    if (mSafeShutdownState != SafeShutdownState::Idle) {
+-        return;
+-    }
+-
+-    mSafeShutdownState = SafeShutdownState::StoppingGuest;
+-    {
+-        AutoLock lock(safeShutdownLock());
+-        sSafeShutdownWindow = this;
+-    }
+-    dinfo("Safe toolbar shutdown: syncing the guest, then asking Android to power off");
+-    System::get()->waitAndKillSelf(kSafeShutdownGuardSec);
+-    updateWindowTitle();
+-    mSafeShutdownTimeout.start();
+-    resumePausedVmForSafeShutdown();
+-    auto* adb = *mAdbInterface;
+-    if (!adb) {
+-        dwarning("Safe toolbar shutdown has no ADB interface; syncing guest");
+-        startSafeShutdownSync();
+-        return;
+-    }
+-
+-    registerWithAdbServer();
+-    // Sync before Android starts shutting down: what was written before the
+-    // close is then on disk even if the process is killed while Android powers
+-    // off (Task Manager, Windows ending the session), and it no longer hangs
+-    // on the fallback sync after the timeout, when adbd may be gone.
+-    safeShutdownSyncStarted();
+-    auto command = adb->runAdbCommand(
+-            {"wait-for-device", "shell", "sync"},
+-            [this](const android::emulation::OptionalAdbCommandResult& result) {
+-                safeShutdownSyncFinished();
+-                const bool success = result && result->exit_code == 0;
+-                AutoLock lock(safeShutdownLock());
+-                if (sSafeShutdownWindow != this) {
+-                    return;
+-                }
+-                QMetaObject::invokeMethod(
+-                        this,
+-                        [this, success] {
+-                            if (mSafeShutdownState !=
+-                                SafeShutdownState::StoppingGuest) {
+-                                return;
+-                            }
+-                            if (success) {
+-                                dinfo("Safe toolbar shutdown: guest synced; asking Android to power off");
+-                            } else {
+-                                dwarning("Safe toolbar shutdown guest sync failed; asking Android to power off anyway");
+-                            }
+-                            requestGuestPowerOff();
+-                        },
+-                        Qt::QueuedConnection);
+-            },
+-            5000);
+-    if (!command) {
+-        safeShutdownSyncFinished();
+-        dwarning("Safe toolbar shutdown guest sync could not start; asking Android to power off anyway");
+-        requestGuestPowerOff();
+-    }
+-}
+-
+-// The first line of what an adb command printed, trimmed; empty if it printed
+-// nothing.
+-static std::string firstOutputLine(
+-        const android::emulation::OptionalAdbCommandResult& result) {
+-    if (!result || !result->output) {
+-        return {};
+-    }
+-    std::string line;
+-    while (std::getline(*result->output, line)) {
+-        const auto begin = line.find_first_not_of(" \t\r\n");
+-        if (begin != std::string::npos) {
+-            const auto end = line.find_last_not_of(" \t\r\n");
+-            return line.substr(begin, end - begin + 1);
+-        }
+-    }
+-    return {};
+-}
+-
+-// Android's own shutdown, as its power menu runs it: apps get the shutdown
+-// broadcast and the foreground activity is paused and stopped before init
+-// stops everything. Setting sys.powerctl would go to init directly, which
+-// kills the apps wherever they are, perhaps halfway through rewriting a file.
+-// It needs no root. The command does not return: adbd goes away as Android
+-// shuts down, and adb then fails without printing anything. When svc refuses,
+-// it prints why (and still exits with 0); then init does it.
+-void EmulatorQtWindow::requestGuestPowerOff() {
+-    auto* adb = *mAdbInterface;
+-    auto command = adb->runAdbCommand(
+-            {"wait-for-device", "shell", "svc", "power", "shutdown"},
+-            [this](const android::emulation::OptionalAdbCommandResult& result) {
+-                const bool timedOut = !result;
+-                const std::string output = firstOutputLine(result);
+-                AutoLock lock(safeShutdownLock());
+-                if (sSafeShutdownWindow != this) {
+-                    return;
+-                }
+-                QMetaObject::invokeMethod(
+-                        this,
+-                        [this, timedOut, output] {
+-                            if (mSafeShutdownState !=
+-                                SafeShutdownState::StoppingGuest) {
+-                                return;
+-                            }
+-                            if (timedOut) {
+-                                dinfo("Safe toolbar shutdown: Android is still shutting down");
+-                                return;
+-                            }
+-                            if (!output.empty()) {
+-                                dwarning("Safe toolbar shutdown: Android did not take the shutdown request ('%s'); asking init to power off",
+-                                         output.c_str());
+-                                requestInitPowerOff();
+-                                return;
+-                            }
+-                            dinfo("Guest shutdown command accepted; waiting for Android to power off");
+-                        },
+-                        Qt::QueuedConnection);
+-            },
+-            kSafeShutdownPowerOffMs);
+-    if (!command) {
+-        dwarning("Safe toolbar shutdown command could not start; syncing guest");
+-        startSafeShutdownSync();
+-    }
+-}
+-
+-// sys.powerctl is root-only; these userdebug images allow `su 0`.
+-void EmulatorQtWindow::requestInitPowerOff() {
+-    auto* adb = *mAdbInterface;
+-    auto command = adb->runAdbCommand(
+-            {"wait-for-device", "shell", "su", "0", "setprop", "sys.powerctl",
+-             "shutdown"},
+-            [this](const android::emulation::OptionalAdbCommandResult& result) {
+-                const bool success = result && result->exit_code == 0;
+-                AutoLock lock(safeShutdownLock());
+-                if (sSafeShutdownWindow != this) {
+-                    return;
+-                }
+-                QMetaObject::invokeMethod(
+-                        this,
+-                        [this, success] {
+-                            if (mSafeShutdownState !=
+-                                SafeShutdownState::StoppingGuest) {
+-                                return;
+-                            }
+-                            if (!success) {
+-                                dwarning("Guest shutdown command failed; syncing guest");
+-                                startSafeShutdownSync();
+-                                return;
+-                            }
+-
+-                            dinfo("Guest shutdown command accepted; waiting for Android to power off");
+-                        },
+-                        Qt::QueuedConnection);
+-            },
+-            15000);
+-    if (!command) {
+-        dwarning("Safe toolbar shutdown command could not start; syncing guest");
+-        startSafeShutdownSync();
+-    }
+-}
+-
+-void EmulatorQtWindow::startSafeShutdownSync() {
+-    if (mSafeShutdownState == SafeShutdownState::Syncing ||
+-        mSafeShutdownState == SafeShutdownState::Forced) {
+-        return;
+-    }
+-
+-    mSafeShutdownState = SafeShutdownState::Syncing;
+-    mSafeShutdownTimeout.stop();
+-    auto* adb = *mAdbInterface;
+-    if (!adb) {
+-        dwarning("Safe toolbar shutdown could not run guest sync");
+-        forceCloseNow();
+-        return;
+-    }
+-
+-    registerWithAdbServer();
+-    safeShutdownSyncStarted();
+-    auto command = adb->runAdbCommand(
+-            {"wait-for-device", "shell", "sync"},
+-            [this](const android::emulation::OptionalAdbCommandResult& result) {
+-                safeShutdownSyncFinished();
+-                const bool success = result && result->exit_code == 0;
+-                AutoLock lock(safeShutdownLock());
+-                if (sSafeShutdownWindow != this) {
+-                    return;
+-                }
+-                QMetaObject::invokeMethod(
+-                        this,
+-                        [this, success] {
+-                            if (mSafeShutdownState != SafeShutdownState::Syncing) {
+-                                return;
+-                            }
+-                            if (success) {
+-                                dinfo("Safe toolbar shutdown: guest synced; quitting");
+-                            } else {
+-                                dwarning("Safe toolbar shutdown guest sync failed; forcing exit");
+-                            }
+-                            forceCloseNow();
+-                        },
+-                        Qt::QueuedConnection);
+-            },
+-            // The window is gone and the guard is still far off: give a sync
+-            // with a lot of dirty data time to finish.
+-            5000);
+-    if (!command) {
+-        safeShutdownSyncFinished();
+-        dwarning("Safe toolbar shutdown guest sync could not start; forcing exit");
+-        forceCloseNow();
+-    }
++    mSafeShutdown->start();
+ }
+ 
+ void EmulatorQtWindow::hideForSafeShutdown() {
+@@ -4939,19 +4653,6 @@ void EmulatorQtWindow::hideForSafeShutdown() {
+     mOverlay.hide();
+ }
+ 
+-void EmulatorQtWindow::forceCloseNow() {
+-    if (mSafeShutdownState == SafeShutdownState::Forced) {
+-        return;
+-    }
+-    mSafeShutdownState = SafeShutdownState::Forced;
+-    dwarning("Safe toolbar shutdown: quitting without waiting for Android to power off");
+-    updateWindowTitle();
+-    mSafeShutdownTimeout.stop();
+-    queueQuitEvent();
+-    // Long enough for QEMU to stop the VM and close its disks after the quit.
+-    System::get()->waitAndKillSelf(10);
+-}
+-
+ // Windows logging off, restarting or shutting down sends WM_QUERYENDSESSION
+ // to every top-level window and ends the process after WM_ENDSESSION. Qt
+ // agrees at once and quits, which stops the guest as if the power were cut.
+@@ -5021,43 +4722,19 @@ void EmulatorQtWindow::endSession(bool ending) {
+         if (!safeShutdownInProgress()) {
+             dinfo("Safe toolbar shutdown: Windows is ending the session without asking");
+             mToolWindow->beginLeanSafeShutdown(false);
+-        } else if (mSafeShutdownState == SafeShutdownState::StoppingGuest &&
+-                   !safeShutdownSyncInFlight()) {
+-            // The first sync has finished, or failed, and Android may have
++        } else {
++            // If the first sync has finished, or failed, Android may have
+             // written more since: sync once more before the process goes.
+-            startSessionEndSync();
++            mSafeShutdown->syncForSessionEnd();
+         }
+     }
+-    if (waitForSafeShutdownSyncs(std::chrono::seconds(3))) {
++    if (mSafeShutdown->waitForSyncs(std::chrono::seconds(3))) {
+         dinfo("Safe toolbar shutdown: Windows is ending the session; quitting");
+     } else {
+         dwarning("Safe toolbar shutdown: the guest sync has not finished as Windows ends the session");
+     }
+ }
+ 
+-// Without wait-for-device: late in Android's shutdown adbd may be gone, and
+-// then this fails at once rather than use up the wait in endSession().
+-void EmulatorQtWindow::startSessionEndSync() {
+-    auto* adb = *mAdbInterface;
+-    if (!adb) {
+-        return;
+-    }
+-    dinfo("Safe toolbar shutdown: syncing the guest once more as Windows ends the session");
+-    safeShutdownSyncStarted();
+-    auto command = adb->runAdbCommand(
+-            {"shell", "sync"},
+-            [](const android::emulation::OptionalAdbCommandResult& result) {
+-                safeShutdownSyncFinished();
+-                if (!result || result->exit_code != 0) {
+-                    dwarning("Safe toolbar shutdown: the last guest sync failed");
+-                }
+-            },
+-            3000);
+-    if (!command) {
+-        safeShutdownSyncFinished();
+-    }
+-}
+-
+ void EmulatorQtWindow::runAdbShellPowerDownAndQuit() {
+     // we need to run it only once, so don't ever reset this
+     if (mStartedAdbStopProcess) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 8b9ced518..3f94b0c26 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -72,6 +72,9 @@ class CarClusterWindow;
+ class CarClusterConnector;
+ class MultiDisplayWidget;
+ class SharedMemoryRenderer;
++namespace android {
++class SafeShutdown;
++}  // namespace android
+ #include "android/skin/qt/SharedStreamEmulator.h"
+ 
+ 
+@@ -244,7 +247,6 @@ public:
+     android::emulation::AdbInterface* getAdbInterface() const;
+     void startSafeShutdown();
+     void hideForSafeShutdown();
+-    void forceCloseNow();
+     bool safeShutdownInProgress() const;
+     // Windows ending the session: WM_QUERYENDSESSION (returns whether to
+     // refuse it) and WM_ENDSESSION (|ending| is its wParam).
+@@ -570,10 +572,6 @@ private:
+                      android::emulation::FilePusher::Result result);
+ 
+     void runAdbShellPowerDownAndQuit();
+-    void requestGuestPowerOff();
+-    void requestInitPowerOff();
+-    void startSafeShutdownSync();
+-    void startSessionEndSync();
+     void setVisibleExtent(QBitmap bitMap);
+     Qt::CursorShape getCursorShape(bool mouseGrabbed);
+ 
+@@ -761,13 +759,11 @@ private:
+     std::unique_ptr<SwipeGesture> mSwipeGesture;
+     bool mStartedAdbStopProcess;
+ 
+-    enum class SafeShutdownState {
+-        Idle,
+-        StoppingGuest,
+-        Syncing,
+-        Forced,
+-    };
+-    SafeShutdownState mSafeShutdownState = SafeShutdownState::Idle;
++    // The safe shutdown (android/safe-shutdown.h) and what it needs from the
++    // window; the timer is for Android powering off.
++    class SafeShutdownHost;
++    std::unique_ptr<SafeShutdownHost> mSafeShutdownHost;
++    std::unique_ptr<android::SafeShutdown> mSafeShutdown;
+     QTimer mSafeShutdownTimeout;
+     bool mHiddenForSafeShutdown = false;
+ #ifdef _WIN32
+diff --git a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+index e9c6fe983..abe56c909 100644
+--- a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+@@ -14,6 +14,36 @@ android_add_test(
+       android/lean-window-frame_unittest.cpp
+   DEPS aemu-ui-lean-window gmock_main)
+ 
++# ModAVD#64: the safe shutdown, without a windowing system either: the lean
++# window and the headless emulator both run it.
++android_add_library(
++  TARGET aemu-ui-safe-shutdown
++  LICENSE Apache-2.0
++  SOURCE_DIR src
++  INCLUDES include
++  SRC android/safe-shutdown.cpp
++  DEPS android-emu-adb-interface android-emu-base android-emu-base-headers
++       android-emu-utils)
++
++android_add_test(
++  TARGET aemu-ui-safe-shutdown_unittests
++  SOURCE_DIR test
++  SRC android/safe-shutdown_unittest.cpp
++  DEPS aemu-ui-safe-shutdown
++       android-emu-adb-interface
++       android-emu-agents
++       android-emu-avd
++       android-emu-base
++       android-emu-base-headers
++       android-emu-cmdline
++       android-emu-files
++       android-emu-utils
++       android-hw-config
++       android-net
++       crypto
++       gmock_main
++       ssl)
++
+ android_qt_lib(
+   TARGET aemu-ui-window
+   # SHARED
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/safe-shutdown.h b/android/android-ui/modules/aemu-ui-window/include/android/safe-shutdown.h
+new file mode 100644
+index 000000000..6ec3bdfb8
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/include/android/safe-shutdown.h
+@@ -0,0 +1,139 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <chrono>
++#include <functional>
++#include <memory>
++#include <string>
++
++namespace android {
++
++namespace emulation {
++class AdbInterface;
++}  // namespace emulation
++
++// The safe shutdown: sync the guest, have Android shut itself down the way
++// its power menu does, and quit when it has powered off; if it does not in
++// time, sync once more and quit anyway. The lean window runs it when it is
++// closed and when Windows ends the session (ModAVD#32, ModAVD#60), a headless
++// instance when Windows ends the session (ModAVD#64).
++//
++// It knows nothing of windows: what it needs from the program around it comes
++// through Host and Actions. Everything here runs on one thread, the owner's
++// (the Qt UI thread, the headless message loop); the adb commands complete on
++// the AdbInterface's thread and are handed back through Host::post().
++class SafeShutdown {
++public:
++    // How long Android gets to power off. Its own shutdown may wait up to 10 s
++    // for the shutdown broadcast and 10 s for the activities to stop before
++    // init stops the services and unmounts; it usually takes 4-7 s in all.
++    // Then comes a last sync (up to 5 s) and the quit; the guard kills the
++    // process if even that does not finish.
++    static constexpr int kPowerOffMs = 25000;
++    static constexpr int kGuardSec = 35;
++
++    enum class State {
++        Idle,
++        // The first sync, then Android shutting down.
++        StoppingGuest,
++        // Android did not power off: the last sync before the quit.
++        Syncing,
++        // Quitting without waiting for Android any longer.
++        Forced,
++    };
++
++    class Host {
++    public:
++        virtual ~Host() = default;
++        // Runs |task| on the owner's thread, later. The only one called from
++        // other threads.
++        virtual void post(std::function<void()> task) = 0;
++        // Has powerOffTimedOut() called after |ms|, unless
++        // stopPowerOffTimer() comes first.
++        virtual void startPowerOffTimer(int ms) = 0;
++        virtual void stopPowerOffTimer() = 0;
++        // The shutdown has started, or is now forced: for what shows it.
++        virtual void stateChanged() {}
++        // Quits the emulator the usual way: QEMU stops the VM and closes its
++        // disks.
++        virtual void quit() = 0;
++    };
++
++    // What the shutdown does to the process and the VM.
++    struct Actions {
++        // Kills the process if it is still there after |seconds|.
++        std::function<void(int seconds)> killSelfAfter;
++        // Resumes a paused VM, which would not answer adb. Returns whether it
++        // was paused.
++        std::function<bool()> resumePausedVm;
++        // Makes the adb server know the instance again, in case the server
++        // was restarted since boot.
++        std::function<void()> registerWithAdbServer;
++    };
++
++    // |name| starts the log lines. |adb| is asked for the interface when the
++    // shutdown starts; it may return null.
++    SafeShutdown(std::string name,
++                 Host* host,
++                 std::function<emulation::AdbInterface*()> adb,
++                 Actions actions);
++    ~SafeShutdown();
++
++    // From here on adb commands that complete no longer reach this object or
++    // its host. For an owner whose destructor has more to do before this
++    // member goes.
++    void detach();
++
++    State state() const { return mState; }
++    // Forced counts too: a close request in the seconds before QEMU quits
++    // must not start anything else.
++    bool inProgress() const { return mState != State::Idle; }
++
++    void start();
++    // The host's timer: Android has not powered off in time.
++    void powerOffTimedOut();
++    // Quits without waiting for Android to power off.
++    void forceQuit();
++    // The emulator has stopped, as it does when Android has powered off:
++    // there is nothing left to wait for.
++    void stopped();
++
++    // Windows is ending the session with the shutdown under way, and ends the
++    // process soon. If the first sync has finished, or failed, Android may
++    // have written more since: sync once more.
++    void syncForSessionEnd();
++    // Waits for the guest syncs that have not completed. Returns whether none
++    // is left. Their callbacks run on the AdbInterface's thread, so waiting
++    // on the owner's thread does not hold them up.
++    bool waitForSyncs(std::chrono::milliseconds timeout);
++
++private:
++    struct Shared;
++
++    void requestGuestPowerOff();
++    void requestInitPowerOff();
++    void startSync();
++
++    const std::string mName;
++    Host* const mHost;
++    const std::function<emulation::AdbInterface*()> mAdb;
++    const Actions mActions;
++    State mState = State::Idle;
++    // What the adb callbacks hold on to: they may complete after this object
++    // is gone.
++    const std::shared_ptr<Shared> mShared;
++};
++
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/safe-shutdown.cpp b/android/android-ui/modules/aemu-ui-window/src/android/safe-shutdown.cpp
+new file mode 100644
+index 000000000..b0b8dbd81
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/src/android/safe-shutdown.cpp
+@@ -0,0 +1,362 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/safe-shutdown.h"
++
++#include <condition_variable>
++#include <istream>
++#include <mutex>
++#include <utility>
++
++#include "android/emulation/control/adb/AdbInterface.h"
++#include "android/utils/debug.h"
++
++namespace android {
++
++using emulation::OptionalAdbCommandResult;
++
++// The adb callbacks run on the AdbInterface's thread and can complete after
++// the shutdown's owner is gone (the window is torn down once Android has
++// powered off). They reach the shutdown only while |owner| is set, and count
++// the syncs here whatever became of it.
++struct SafeShutdown::Shared {
++    std::mutex mutex;
++    std::condition_variable syncsDone;
++    int syncsInFlight = 0;
++    SafeShutdown* owner = nullptr;
++
++    void syncStarted() {
++        std::lock_guard<std::mutex> lock(mutex);
++        ++syncsInFlight;
++    }
++
++    void syncFinished() {
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            --syncsInFlight;
++        }
++        syncsDone.notify_all();
++    }
++
++    // Runs |task| with the shutdown, on its owner's thread, if it is still
++    // there by then.
++    static void post(const std::shared_ptr<Shared>& shared,
++                     std::function<void(SafeShutdown&)> task) {
++        std::lock_guard<std::mutex> lock(shared->mutex);
++        if (!shared->owner) {
++            return;
++        }
++        shared->owner->mHost->post([shared, task = std::move(task)] {
++            SafeShutdown* owner;
++            {
++                std::lock_guard<std::mutex> lock(shared->mutex);
++                owner = shared->owner;
++            }
++            // detach() runs on this thread too, so the owner stays.
++            if (owner) {
++                task(*owner);
++            }
++        });
++    }
++};
++
++namespace {
++
++// The first line of what an adb command printed, trimmed; empty if it printed
++// nothing.
++std::string firstOutputLine(const OptionalAdbCommandResult& result) {
++    if (!result || !result->output) {
++        return {};
++    }
++    std::string line;
++    while (std::getline(*result->output, line)) {
++        const auto begin = line.find_first_not_of(" \t\r\n");
++        if (begin != std::string::npos) {
++            const auto end = line.find_last_not_of(" \t\r\n");
++            return line.substr(begin, end - begin + 1);
++        }
++    }
++    return {};
++}
++
++}  // namespace
++
++SafeShutdown::SafeShutdown(std::string name,
++                           Host* host,
++                           std::function<emulation::AdbInterface*()> adb,
++                           Actions actions)
++    : mName(std::move(name)),
++      mHost(host),
++      mAdb(std::move(adb)),
++      mActions(std::move(actions)),
++      mShared(std::make_shared<Shared>()) {
++    mShared->owner = this;
++}
++
++SafeShutdown::~SafeShutdown() {
++    detach();
++}
++
++void SafeShutdown::detach() {
++    std::lock_guard<std::mutex> lock(mShared->mutex);
++    mShared->owner = nullptr;
++}
++
++void SafeShutdown::start() {
++    if (mState != State::Idle) {
++        return;
++    }
++
++    mState = State::StoppingGuest;
++    dinfo("%s: syncing the guest, then asking Android to power off",
++          mName.c_str());
++    mActions.killSelfAfter(kGuardSec);
++    mHost->stateChanged();
++    mHost->startPowerOffTimer(kPowerOffMs);
++    if (mActions.resumePausedVm()) {
++        dinfo("%s: the VM is paused; resuming it first", mName.c_str());
++    }
++    auto* adb = mAdb();
++    if (!adb) {
++        dwarning("%s has no ADB interface; syncing guest", mName.c_str());
++        startSync();
++        return;
++    }
++
++    mActions.registerWithAdbServer();
++    // Sync before Android starts shutting down: what was written before the
++    // close is then on disk even if the process is killed while Android powers
++    // off (Task Manager, Windows ending the session), and it no longer hangs
++    // on the fallback sync after the timeout, when adbd may be gone.
++    const auto shared = mShared;
++    shared->syncStarted();
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "sync"},
++            [shared](const OptionalAdbCommandResult& result) {
++                shared->syncFinished();
++                const bool success = result && result->exit_code == 0;
++                Shared::post(shared, [success](SafeShutdown& self) {
++                    if (self.mState != State::StoppingGuest) {
++                        return;
++                    }
++                    if (success) {
++                        dinfo("%s: guest synced; asking Android to power off",
++                              self.mName.c_str());
++                    } else {
++                        dwarning("%s guest sync failed; asking Android to power off anyway",
++                                 self.mName.c_str());
++                    }
++                    self.requestGuestPowerOff();
++                });
++            },
++            5000);
++    if (!command) {
++        shared->syncFinished();
++        dwarning("%s guest sync could not start; asking Android to power off anyway",
++                 mName.c_str());
++        requestGuestPowerOff();
++    }
++}
++
++// Android's own shutdown, as its power menu runs it: apps get the shutdown
++// broadcast and the foreground activity is paused and stopped before init
++// stops everything. Setting sys.powerctl would go to init directly, which
++// kills the apps wherever they are, perhaps halfway through rewriting a file.
++// It needs no root. The command does not return: adbd goes away as Android
++// shuts down, and adb then fails without printing anything. When svc refuses,
++// it prints why (and still exits with 0); then init does it.
++void SafeShutdown::requestGuestPowerOff() {
++    auto* adb = mAdb();
++    if (!adb) {
++        dwarning("%s command could not start; syncing guest", mName.c_str());
++        startSync();
++        return;
++    }
++    const auto shared = mShared;
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "svc", "power", "shutdown"},
++            [shared](const OptionalAdbCommandResult& result) {
++                const bool timedOut = !result;
++                const std::string output = firstOutputLine(result);
++                Shared::post(shared, [timedOut, output](SafeShutdown& self) {
++                    if (self.mState != State::StoppingGuest) {
++                        return;
++                    }
++                    if (timedOut) {
++                        dinfo("%s: Android is still shutting down",
++                              self.mName.c_str());
++                        return;
++                    }
++                    if (!output.empty()) {
++                        dwarning("%s: Android did not take the shutdown request ('%s'); asking init to power off",
++                                 self.mName.c_str(), output.c_str());
++                        self.requestInitPowerOff();
++                        return;
++                    }
++                    dinfo("Guest shutdown command accepted; waiting for Android to power off");
++                });
++            },
++            kPowerOffMs);
++    if (!command) {
++        dwarning("%s command could not start; syncing guest", mName.c_str());
++        startSync();
++    }
++}
++
++// sys.powerctl is root-only; these userdebug images allow `su 0`.
++void SafeShutdown::requestInitPowerOff() {
++    auto* adb = mAdb();
++    if (!adb) {
++        dwarning("%s command could not start; syncing guest", mName.c_str());
++        startSync();
++        return;
++    }
++    const auto shared = mShared;
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "su", "0", "setprop", "sys.powerctl",
++             "shutdown"},
++            [shared](const OptionalAdbCommandResult& result) {
++                const bool success = result && result->exit_code == 0;
++                Shared::post(shared, [success](SafeShutdown& self) {
++                    if (self.mState != State::StoppingGuest) {
++                        return;
++                    }
++                    if (!success) {
++                        dwarning("Guest shutdown command failed; syncing guest");
++                        self.startSync();
++                        return;
++                    }
++
++                    dinfo("Guest shutdown command accepted; waiting for Android to power off");
++                });
++            },
++            15000);
++    if (!command) {
++        dwarning("%s command could not start; syncing guest", mName.c_str());
++        startSync();
++    }
++}
++
++void SafeShutdown::startSync() {
++    if (mState == State::Syncing || mState == State::Forced) {
++        return;
++    }
++
++    mState = State::Syncing;
++    mHost->stopPowerOffTimer();
++    auto* adb = mAdb();
++    if (!adb) {
++        dwarning("%s could not run guest sync", mName.c_str());
++        forceQuit();
++        return;
++    }
++
++    mActions.registerWithAdbServer();
++    const auto shared = mShared;
++    shared->syncStarted();
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "sync"},
++            [shared](const OptionalAdbCommandResult& result) {
++                shared->syncFinished();
++                const bool success = result && result->exit_code == 0;
++                Shared::post(shared, [success](SafeShutdown& self) {
++                    if (self.mState != State::Syncing) {
++                        return;
++                    }
++                    if (success) {
++                        dinfo("%s: guest synced; quitting", self.mName.c_str());
++                    } else {
++                        dwarning("%s guest sync failed; forcing exit",
++                                 self.mName.c_str());
++                    }
++                    self.forceQuit();
++                });
++            },
++            // The guard is still far off: give a sync with a lot of dirty
++            // data time to finish.
++            5000);
++    if (!command) {
++        shared->syncFinished();
++        dwarning("%s guest sync could not start; forcing exit", mName.c_str());
++        forceQuit();
++    }
++}
++
++void SafeShutdown::powerOffTimedOut() {
++    if (mState == State::StoppingGuest) {
++        dwarning("%s timed out; syncing guest", mName.c_str());
++        startSync();
++    }
++}
++
++void SafeShutdown::forceQuit() {
++    if (mState == State::Forced) {
++        return;
++    }
++    mState = State::Forced;
++    dwarning("%s: quitting without waiting for Android to power off",
++             mName.c_str());
++    mHost->stateChanged();
++    mHost->stopPowerOffTimer();
++    mHost->quit();
++    // Long enough for QEMU to stop the VM and close its disks after the quit.
++    mActions.killSelfAfter(10);
++}
++
++void SafeShutdown::stopped() {
++    mHost->stopPowerOffTimer();
++    mState = State::Idle;
++}
++
++// Without wait-for-device: late in Android's shutdown adbd may be gone, and
++// then this fails at once rather than use up the wait that follows.
++void SafeShutdown::syncForSessionEnd() {
++    if (mState != State::StoppingGuest) {
++        return;
++    }
++    {
++        std::lock_guard<std::mutex> lock(mShared->mutex);
++        if (mShared->syncsInFlight > 0) {
++            return;
++        }
++    }
++    auto* adb = mAdb();
++    if (!adb) {
++        return;
++    }
++    dinfo("%s: syncing the guest once more as Windows ends the session",
++          mName.c_str());
++    const auto shared = mShared;
++    const std::string name = mName;
++    shared->syncStarted();
++    auto command = adb->runAdbCommand(
++            {"shell", "sync"},
++            [shared, name](const OptionalAdbCommandResult& result) {
++                shared->syncFinished();
++                if (!result || result->exit_code != 0) {
++                    dwarning("%s: the last guest sync failed", name.c_str());
++                }
++            },
++            3000);
++    if (!command) {
++        shared->syncFinished();
++    }
++}
++
++bool SafeShutdown::waitForSyncs(std::chrono::milliseconds timeout) {
++    std::unique_lock<std::mutex> lock(mShared->mutex);
++    return mShared->syncsDone.wait_for(
++            lock, timeout, [this] { return mShared->syncsInFlight == 0; });
++}
++
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/safe-shutdown_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/safe-shutdown_unittest.cpp
+new file mode 100644
+index 000000000..aad29eb8c
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/test/android/safe-shutdown_unittest.cpp
+@@ -0,0 +1,448 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/safe-shutdown.h"
++
++#include <gtest/gtest.h>
++
++#include <chrono>
++#include <deque>
++#include <functional>
++#include <memory>
++#include <sstream>
++#include <string>
++#include <vector>
++
++#include "android/emulation/control/adb/AdbInterface.h"
++
++using android::SafeShutdown;
++using android::emulation::AdbCommand;
++using android::emulation::AdbCommandPtr;
++using android::emulation::AdbInterface;
++using android::emulation::OptionalAdbCommandResult;
++using State = android::SafeShutdown::State;
++
++namespace {
++
++class FakeCommand : public AdbCommand {
++public:
++    bool inFlight() const override { return true; }
++    void cancel() override {}
++    void start(int) override {}
++};
++
++// Records the commands; the test completes them when and how it likes.
++class FakeAdb : public AdbInterface {
++public:
++    struct Command {
++        std::vector<std::string> args;
++        ResultCallback callback;
++        android::base::System::Duration timeoutMs;
++    };
++
++    bool isAdbVersionCurrent() const override { return true; }
++    void setCustomAdbPath(const std::string&) override {}
++    const std::string& detectedAdbPath() const override { return mEmpty; }
++    const std::string& adbPath() override { return mEmpty; }
++    void setSerialNumberPort(int) override {}
++    const std::string& serialString() const override { return mEmpty; }
++    void enqueueCommand(const std::vector<std::string>&,
++                        ResultCallback) override {}
++
++    AdbCommandPtr runAdbCommand(const std::vector<std::string>& args,
++                                ResultCallback callback,
++                                android::base::System::Duration timeoutMs,
++                                bool) override {
++        if (failToStart > 0) {
++            --failToStart;
++            return nullptr;
++        }
++        commands.push_back({args, std::move(callback), timeoutMs});
++        return std::make_shared<FakeCommand>();
++    }
++
++    // The command ran: it exited with |exitCode| after printing |output|.
++    void complete(size_t index, int exitCode, const std::string& output = "") {
++        OptionalAdbCommandResult result;
++        result.emplace(exitCode, new std::istringstream(output));
++        commands.at(index).callback(result);
++    }
++
++    // The command did not finish in its time.
++    void timeOut(size_t index) {
++        commands.at(index).callback(OptionalAdbCommandResult());
++    }
++
++    std::string line(size_t index) const {
++        std::string joined;
++        for (const std::string& arg : commands.at(index).args) {
++            joined += (joined.empty() ? "" : " ") + arg;
++        }
++        return joined;
++    }
++
++    std::vector<Command> commands;
++    int failToStart = 0;
++
++private:
++    std::string mEmpty;
++};
++
++class FakeHost : public SafeShutdown::Host {
++public:
++    void post(std::function<void()> task) override {
++        tasks.push_back(std::move(task));
++    }
++    void startPowerOffTimer(int ms) override { timerMs = ms; }
++    void stopPowerOffTimer() override { timerMs = 0; }
++    void stateChanged() override { ++stateChanges; }
++    void quit() override { ++quits; }
++
++    // The owner's thread gets to its queue.
++    void runTasks() {
++        while (!tasks.empty()) {
++            auto task = std::move(tasks.front());
++            tasks.pop_front();
++            task();
++        }
++    }
++
++    std::deque<std::function<void()>> tasks;
++    int timerMs = 0;
++    int stateChanges = 0;
++    int quits = 0;
++};
++
++constexpr char kSync[] = "wait-for-device shell sync";
++constexpr char kPowerOff[] = "wait-for-device shell svc power shutdown";
++constexpr char kInitPowerOff[] =
++        "wait-for-device shell su 0 setprop sys.powerctl shutdown";
++const std::chrono::milliseconds kNoWait(0);
++
++class SafeShutdownTest : public ::testing::Test {
++protected:
++    std::unique_ptr<SafeShutdown> make(bool withAdb = true) {
++        SafeShutdown::Actions actions;
++        actions.killSelfAfter = [this](int seconds) {
++            guards.push_back(seconds);
++        };
++        actions.resumePausedVm = [this] {
++            ++resumes;
++            return vmPaused;
++        };
++        actions.registerWithAdbServer = [this] { ++registrations; };
++        return std::make_unique<SafeShutdown>(
++                "Test shutdown", &host,
++                [this, withAdb]() -> AdbInterface* {
++                    return withAdb ? &adb : nullptr;
++                },
++                std::move(actions));
++    }
++
++    FakeAdb adb;
++    FakeHost host;
++    std::vector<int> guards;
++    int resumes = 0;
++    int registrations = 0;
++    bool vmPaused = false;
++};
++
++}  // namespace
++
++TEST_F(SafeShutdownTest, SyncsThenAsksAndroidToPowerOff) {
++    auto shutdown = make();
++    EXPECT_FALSE(shutdown->inProgress());
++    shutdown->start();
++
++    EXPECT_EQ(shutdown->state(), State::StoppingGuest);
++    EXPECT_TRUE(shutdown->inProgress());
++    EXPECT_EQ(guards, std::vector<int>{SafeShutdown::kGuardSec});
++    EXPECT_EQ(host.timerMs, SafeShutdown::kPowerOffMs);
++    EXPECT_EQ(host.stateChanges, 1);
++    EXPECT_EQ(resumes, 1);
++    EXPECT_EQ(registrations, 1);
++    ASSERT_EQ(adb.commands.size(), 1u);
++    EXPECT_EQ(adb.line(0), kSync);
++    EXPECT_EQ(adb.commands[0].timeoutMs, 5000);
++
++    // Nothing is asked of Android before the sync is back, and then only on
++    // the owner's thread.
++    adb.complete(0, 0);
++    EXPECT_EQ(adb.commands.size(), 1u);
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 2u);
++    EXPECT_EQ(adb.line(1), kPowerOff);
++    EXPECT_EQ(adb.commands[1].timeoutMs, SafeShutdown::kPowerOffMs);
++
++    // Android took it: wait for it to power off, with the timer still on.
++    adb.complete(1, 0);
++    host.runTasks();
++    EXPECT_EQ(adb.commands.size(), 2u);
++    EXPECT_EQ(shutdown->state(), State::StoppingGuest);
++    EXPECT_EQ(host.timerMs, SafeShutdown::kPowerOffMs);
++    EXPECT_EQ(host.quits, 0);
++
++    // The emulator stops by itself once Android has powered off.
++    shutdown->stopped();
++    EXPECT_EQ(shutdown->state(), State::Idle);
++    EXPECT_EQ(host.timerMs, 0);
++    EXPECT_EQ(host.quits, 0);
++}
++
++TEST_F(SafeShutdownTest, StartIsOnce) {
++    auto shutdown = make();
++    shutdown->start();
++    shutdown->start();
++    EXPECT_EQ(adb.commands.size(), 1u);
++    EXPECT_EQ(guards.size(), 1u);
++}
++
++TEST_F(SafeShutdownTest, AsksAndroidEvenIfTheSyncFailed) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 1);
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 2u);
++    EXPECT_EQ(adb.line(1), kPowerOff);
++
++    // And if it timed out.
++    adb.commands.clear();
++    auto second = make();
++    second->start();
++    adb.timeOut(0);
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 2u);
++    EXPECT_EQ(adb.line(1), kPowerOff);
++}
++
++TEST_F(SafeShutdownTest, AsksAndroidWhenTheSyncCannotStart) {
++    auto shutdown = make();
++    adb.failToStart = 1;
++    shutdown->start();
++    ASSERT_EQ(adb.commands.size(), 1u);
++    EXPECT_EQ(adb.line(0), kPowerOff);
++    // The sync that never ran is not waited for.
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++}
++
++TEST_F(SafeShutdownTest, InitPowersOffWhenAndroidRefuses) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    // svc prints why and still exits with 0.
++    adb.complete(1, 0, "\n  Error: not allowed \r\n");
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 3u);
++    EXPECT_EQ(adb.line(2), kInitPowerOff);
++    EXPECT_EQ(adb.commands[2].timeoutMs, 15000);
++
++    adb.complete(2, 0);
++    host.runTasks();
++    EXPECT_EQ(adb.commands.size(), 3u);
++    EXPECT_EQ(shutdown->state(), State::StoppingGuest);
++    EXPECT_EQ(host.quits, 0);
++}
++
++TEST_F(SafeShutdownTest, SyncsAndQuitsWhenInitRefusesToo) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    adb.complete(1, 0, "Error");
++    host.runTasks();
++    adb.complete(2, 1);
++    host.runTasks();
++
++    EXPECT_EQ(shutdown->state(), State::Syncing);
++    EXPECT_EQ(host.timerMs, 0);
++    ASSERT_EQ(adb.commands.size(), 4u);
++    EXPECT_EQ(adb.line(3), kSync);
++    EXPECT_EQ(host.quits, 0);
++
++    adb.complete(3, 0);
++    EXPECT_EQ(host.quits, 0);
++    host.runTasks();
++    EXPECT_EQ(shutdown->state(), State::Forced);
++    EXPECT_EQ(host.quits, 1);
++    EXPECT_EQ(guards, (std::vector<int>{SafeShutdown::kGuardSec, 10}));
++    EXPECT_EQ(host.stateChanges, 2);
++    EXPECT_TRUE(shutdown->inProgress());
++}
++
++TEST_F(SafeShutdownTest, SyncsAndQuitsWhenAndroidDoesNotPowerOffInTime) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 2u);
++
++    shutdown->powerOffTimedOut();
++    EXPECT_EQ(shutdown->state(), State::Syncing);
++    ASSERT_EQ(adb.commands.size(), 3u);
++    EXPECT_EQ(adb.line(2), kSync);
++    EXPECT_EQ(registrations, 2);
++
++    // The shutdown command runs out of time at about the same moment: it has
++    // nothing more to say.
++    adb.timeOut(1);
++    host.runTasks();
++    EXPECT_EQ(adb.commands.size(), 3u);
++    EXPECT_EQ(shutdown->state(), State::Syncing);
++
++    // Quit even if this last sync failed; either way it is over.
++    EXPECT_FALSE(shutdown->waitForSyncs(kNoWait));
++    adb.complete(2, 1);
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++    host.runTasks();
++    EXPECT_EQ(shutdown->state(), State::Forced);
++    EXPECT_EQ(host.quits, 1);
++
++    // The timer has nothing to do any more.
++    shutdown->powerOffTimedOut();
++    EXPECT_EQ(adb.commands.size(), 3u);
++    EXPECT_EQ(host.quits, 1);
++}
++
++TEST_F(SafeShutdownTest, TimeoutOnlyCountsWhileAndroidIsShuttingDown) {
++    auto shutdown = make();
++    shutdown->powerOffTimedOut();
++    EXPECT_EQ(shutdown->state(), State::Idle);
++    EXPECT_TRUE(adb.commands.empty());
++}
++
++TEST_F(SafeShutdownTest, QuitsAtOnceWhenTheLastSyncCannotStart) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    adb.failToStart = 1;
++    shutdown->powerOffTimedOut();
++    EXPECT_EQ(shutdown->state(), State::Forced);
++    EXPECT_EQ(host.quits, 1);
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++}
++
++TEST_F(SafeShutdownTest, QuitsWithoutAdb) {
++    auto shutdown = make(/*withAdb=*/false);
++    shutdown->start();
++    EXPECT_EQ(shutdown->state(), State::Forced);
++    EXPECT_EQ(host.quits, 1);
++    EXPECT_EQ(host.timerMs, 0);
++    EXPECT_TRUE(adb.commands.empty());
++    EXPECT_EQ(guards, (std::vector<int>{SafeShutdown::kGuardSec, 10}));
++}
++
++TEST_F(SafeShutdownTest, ForceQuitIsOnce) {
++    auto shutdown = make();
++    shutdown->start();
++    shutdown->forceQuit();
++    shutdown->forceQuit();
++    EXPECT_EQ(host.quits, 1);
++    EXPECT_EQ(shutdown->state(), State::Forced);
++    EXPECT_EQ(host.timerMs, 0);
++
++    // What comes back from the guest afterwards changes nothing.
++    adb.complete(0, 0);
++    host.runTasks();
++    EXPECT_EQ(adb.commands.size(), 1u);
++    EXPECT_EQ(host.quits, 1);
++}
++
++TEST_F(SafeShutdownTest, ResumesAPausedVm) {
++    vmPaused = true;
++    auto shutdown = make();
++    shutdown->start();
++    EXPECT_EQ(resumes, 1);
++    EXPECT_EQ(adb.commands.size(), 1u);
++}
++
++TEST_F(SafeShutdownTest, WaitsForTheSyncInFlight) {
++    auto shutdown = make();
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++    shutdown->start();
++    EXPECT_FALSE(shutdown->waitForSyncs(std::chrono::milliseconds(1)));
++
++    // With the first sync still running there is no call for another.
++    shutdown->syncForSessionEnd();
++    EXPECT_EQ(adb.commands.size(), 1u);
++
++    // The wait is over as soon as the command is back, before the owner's
++    // thread, which is the one waiting, gets to anything.
++    adb.complete(0, 0);
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++}
++
++TEST_F(SafeShutdownTest, SyncsOnceMoreAsTheSessionEnds) {
++    auto shutdown = make();
++    // Not before the shutdown has started.
++    shutdown->syncForSessionEnd();
++    EXPECT_TRUE(adb.commands.empty());
++
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    ASSERT_EQ(adb.commands.size(), 2u);
++
++    shutdown->syncForSessionEnd();
++    ASSERT_EQ(adb.commands.size(), 3u);
++    // Without wait-for-device: adbd may be gone by now.
++    EXPECT_EQ(adb.line(2), "shell sync");
++    EXPECT_EQ(adb.commands[2].timeoutMs, 3000);
++    EXPECT_FALSE(shutdown->waitForSyncs(kNoWait));
++
++    adb.complete(2, 0);
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++    EXPECT_EQ(shutdown->state(), State::StoppingGuest);
++}
++
++TEST_F(SafeShutdownTest, NoExtraSessionEndSyncDuringTheLastSync) {
++    auto shutdown = make();
++    shutdown->start();
++    adb.complete(0, 0);
++    host.runTasks();
++    shutdown->powerOffTimedOut();
++    ASSERT_EQ(adb.commands.size(), 3u);
++    shutdown->syncForSessionEnd();
++    EXPECT_EQ(adb.commands.size(), 3u);
++    EXPECT_FALSE(shutdown->waitForSyncs(kNoWait));
++}
++
++TEST_F(SafeShutdownTest, CommandsMayCompleteAfterTheShutdownIsGone) {
++    auto shutdown = make();
++    shutdown->start();
++    shutdown->detach();
++    // Nothing reaches the host any more, and the sync is still counted.
++    EXPECT_FALSE(shutdown->waitForSyncs(kNoWait));
++    adb.complete(0, 0);
++    EXPECT_TRUE(host.tasks.empty());
++    EXPECT_TRUE(shutdown->waitForSyncs(kNoWait));
++
++    // A task already handed to the owner's thread finds the shutdown gone.
++    auto second = make();
++    adb.commands.clear();
++    second->start();
++    adb.complete(0, 0);
++    ASSERT_EQ(host.tasks.size(), 1u);
++    second.reset();
++    host.runTasks();
++    EXPECT_EQ(adb.commands.size(), 1u);
++
++    // And a command that completes later still.
++    auto third = make();
++    adb.commands.clear();
++    third->start();
++    third.reset();
++    adb.complete(0, 0);
++    EXPECT_TRUE(host.tasks.empty());
++}
+-- 
+2.54.0.windows.1
+
