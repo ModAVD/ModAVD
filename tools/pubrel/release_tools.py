@@ -43,7 +43,16 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # its version here: tag v<EXTRAS_VERSION> of the ModAVDExtras checkout (--extras-repo) must list that SHA-256 for
 # modavd_extras.dll in release/<version>.SHA256SUMS.txt, and the source bundle archives that tag (see extras_release).
 EXTRAS_DLL = "extras/modavd_extras.dll"
-EXTRAS_VERSION = "0.1.2"
+EXTRAS_VERSION = "0.1.3"
+# ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, from the same ModAVDExtras release as EXTRAS_DLL:
+# MAA loads shell\sdk\external_renderer_ipc.dll under the MuMu path it is given, so users who run MAA on its own set
+# that path to <ModAVD root>\mumu-shim (an interim measure until MAA / MaaFramework support ModAVD natively). It goes
+# in only with -MumuShim, and only together with -ExtrasDll: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same
+# ModAVDExtras commit has to list both. Pinned in COMPONENT_SUMS like EXTRAS_DLL; while EXTRAS_DLL is pinned, so must
+# it be (see pinned_components).
+MUMU_SHIM = "mumu-shim/shell/sdk/external_renderer_ipc.dll"
+# package path -> its name in ModAVDExtras' release/<version>.SHA256SUMS.txt
+EXTRAS_FILES = {EXTRAS_DLL: "modavd_extras.dll", MUMU_SHIM: "external_renderer_ipc.dll"}
 # The license texts the NOTICE entry of EXTRAS_DLL points to: SHA-256 with LF line endings of LICENSES/<name> in the
 # license package (the texts from gnu.org; ModAVDExtras' own LICENSE / COPYING are the same licenses).
 LGPL_TEXTS = {"LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
@@ -141,7 +150,7 @@ OWN_SOURCES_IME_TEXT = """\
                             https://github.com/ModAVD/ModAVDHostIME
 """
 OWN_SOURCES_EXTRAS_TEXT = """\
-     ModAVDExtras/          extras\\modavd_extras.dll（截图库）：ModAVDExtras {extras_tag}（提交 {extras_commit}），即它的 Release 附件 modavd_extras.dll 的源码。
+     ModAVDExtras/          extras\\modavd_extras.dll（截图库）{shim}：ModAVDExtras {extras_tag}（提交 {extras_commit}），即它的 Release 附件 modavd_extras.dll{shim_asset} 的源码。
                             按 LGPL-3.0-or-later 发布（不是 AGPL），全文是其中的 LICENSE（LGPL-3.0）和 COPYING（GPL-3.0），
                             另见其中的 NOTICE。用 CMake 和 MSVC 编（cmake -A x64，--config Release，/Brepro）。
                             https://github.com/ModAVD/ModAVDExtras
@@ -396,11 +405,18 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
     """
     pinned = read_sums(pinned_path)
     # NTFS ignores case: two names that differ only in case would be one file in the package
-    if (any(not (re.fullmatch(r"components/[^/]+", rel) or rel == EXTRAS_DLL) for rel in pinned)
+    if (any(not (re.fullmatch(r"components/[^/]+", rel) or rel in EXTRAS_FILES) for rel in pinned)
             or len({r.casefold() for r in pinned}) != len(pinned)):
-        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name> or {EXTRAS_DLL} "
-                         "(case-insensitive)")
+        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name>, {EXTRAS_DLL} "
+                         f"or {MUMU_SHIM} (case-insensitive)")
+    # the shell comes with the capture library, from the same ModAVDExtras release
+    if EXTRAS_DLL in pinned and MUMU_SHIM not in pinned:
+        raise ValueError(f"{MUMU_SHIM} is not pinned in {Path(pinned_path).name} next to {EXTRAS_DLL}: add the SHA-256 of "
+                         f"external_renderer_ipc.dll from release/<version>.SHA256SUMS.txt of the same ModAVDExtras release")
     ime, extras = getattr(args, "ime_apk", None), getattr(args, "extras_dll", None)
+    shim = getattr(args, "mumu_shim", None)
+    if shim and not extras:
+        raise ValueError("-MumuShim goes with -ExtrasDll: both come from the same ModAVDExtras release")
     given = {"components/" + Path(args.apk).name: Path(args.apk)}
     if ime:
         given["components/" + IME_APK] = Path(ime)
@@ -408,6 +424,8 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
         raise ValueError("desktop APK name collides with the IME APK")
     if extras:
         given[EXTRAS_DLL] = Path(extras)
+    if shim:
+        given[MUMU_SHIM] = Path(shim)
     for rel, src in given.items():
         if not src.is_file():
             raise FileNotFoundError(src)
@@ -417,7 +435,7 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
             raise ValueError(f"{rel} differs from its pinned SHA-256 ({src})")
     missing = sorted(set(pinned) - set(given))
     if missing:
-        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll): {missing}")
+        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll / -MumuShim): {missing}")
     return given
 
 
@@ -477,7 +495,8 @@ def preflight(args):
     notice = (Path(args.package) / "LICENSES/NOTICE.txt").read_text(encoding="utf-8-sig")
     check_agpl(args.package)
     components = pinned_components(args)
-    if EXTRAS_DLL in components:
+    lgpl = any(rel in EXTRAS_FILES for rel in components)
+    if lgpl:
         check_lgpl(args.package)
     additions = NOTICE_ADDITIONS.read_text(encoding="utf-8")
     for rel in components:
@@ -489,7 +508,7 @@ def preflight(args):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = checked_sources(args)
     print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
-          f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if EXTRAS_DLL in components else ''}, "
+          f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if lgpl else ''}, "
           f"pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
           f"{describe_sources(own)}")
 
@@ -587,14 +606,14 @@ def ime_release(apk, repo):
                      f"use the APK of a published release and fetch the tags (git -C {repo} fetch upstream --tags)")
 
 
-def extras_release(dll, repo, branch=None):
-    """The ModAVDExtras source of the shipped EXTRAS_DLL in the checkout `repo`: tag v<EXTRAS_VERSION>, or before that
-    tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt there lists this DLL as
-    modavd_extras.dll: the workflows there build the DLL and check it against that list (another MSVC gives other
-    bytes, so the DLL is the one CI built, not a local build)."""
+def extras_release(dll, repo, branch=None, shim=None):
+    """The ModAVDExtras source of the shipped EXTRAS_DLL (and MUMU_SHIM, `shim`) in the checkout `repo`: tag
+    v<EXTRAS_VERSION>, or before that tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt
+    at that one commit lists this DLL as modavd_extras.dll and the shell as external_renderer_ipc.dll, so both are of
+    the same ModAVDExtras version and commit: the workflows there build them and check them against that list (another
+    MSVC gives other bytes, so the files are the ones CI built, not a local build)."""
     if not repo:
         raise ValueError("--extras-dll needs the ModAVDExtras checkout (release.ps1 -ExtrasRepo, local configuration ExtrasRepo)")
-    digest, name = sha(dll), Path(EXTRAS_DLL).name
     commit, tag, is_tagged = component_ref(repo, EXTRAS_VERSION, branch, "CMakeLists.txt",
                                            r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)")
     where = f"{tag}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"
@@ -602,10 +621,16 @@ def extras_release(dll, repo, branch=None):
         listed = parse_sums(git(repo, "show", f"{commit}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"), where)
     except RuntimeError:
         raise ValueError(f"{repo}: no release/{EXTRAS_VERSION}.SHA256SUMS.txt at {tag}") from None
-    if listed.get(name) != digest:
-        raise ValueError(f"{dll} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
+    files = {}
+    for rel, path in [(EXTRAS_DLL, dll), (MUMU_SHIM, shim)]:
+        if not path:
+            continue
+        digest, name = sha(path), EXTRAS_FILES[rel]
+        if listed.get(name) != digest:
+            raise ValueError(f"{path} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
+        files[rel] = digest
     return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": "v" + EXTRAS_VERSION, "commit": commit,
-            "tagged": is_tagged, "sha256": digest}
+            "tagged": is_tagged, "sha256": files[EXTRAS_DLL], "files": files}
 
 
 def public_sources(args):
@@ -614,11 +639,13 @@ def public_sources(args):
     and package/ and bridge/ of the ModAVD release checkout unchanged since its HEAD. With --release-branch the
     manager and the extras library may also be at the head of that branch of their repository, before their tags
     exist (component_ref). assemble records the result in the snapshot, so every later step uses the same revisions."""
-    extras = getattr(args, "extras_dll", None)
+    extras, shim = getattr(args, "extras_dll", None), getattr(args, "mumu_shim", None)
+    if shim and not extras:
+        raise ValueError("-MumuShim goes with -ExtrasDll: both come from the same ModAVDExtras release")
     branch = getattr(args, "release_branch", None)
     own = {"manager": manager_release(args.manager, args.manager_repo, branch),
            "ime": ime_release(args.ime_apk, args.ime_repo) if getattr(args, "ime_apk", None) else None,
-           "extras": extras_release(extras, getattr(args, "extras_repo", None), branch) if extras else None}
+           "extras": extras_release(extras, getattr(args, "extras_repo", None), branch, shim) if extras else None}
     repo = release_repository(args.repository, getattr(args, "protect", None))
     if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
@@ -636,7 +663,8 @@ def describe_sources(own):
     def at(part):
         return part["tag"] if part.get("tagged", True) else f"{part['tag']} (NOT TAGGED YET: release branch head {part['commit'][:12]})"
     ime = f", ModAVDHostIME {own['ime']['tag']}" if own["ime"] else ""
-    extras = f", ModAVDExtras {at(own['extras'])}" if own.get("extras") else ""
+    extras = (f", ModAVDExtras {at(own['extras'])}{' (with the MuMu shell)' if MUMU_SHIM in own['extras'].get('files', {}) else ''}"
+              if own.get("extras") else "")
     return (f"ModAVDManager {at(own['manager'])} (Go {own['manager']['go']}){ime}{extras}, "
             f"ModAVD package/ and bridge/ at {own['modavd']['commit'][:12]}")
 
@@ -704,14 +732,7 @@ def assemble(args):
             copy(sdk / rel, dest / "sdk/emulator" / rel)
     (out / "removed-files.txt").write_text("\n".join(sorted(removed)) + "\n", encoding="utf-8")
     copy_public_files(own, args.manager, dest)
-    pinned = read_sums(COMPONENT_SUMS)
-    for rel, src in pinned_components(args).items():
-        copy(src, dest / rel)
-        # checked again after the copy: the source may have been rebuilt in between. The extras DLL against what
-        # public_sources recorded (the pinned SHA-256).
-        want = own["extras"]["sha256"] if rel == EXTRAS_DLL else pinned[rel]
-        if sha(dest / rel) != want:
-            raise ValueError(f"{rel} in the package differs from its pinned SHA-256")
+    copy_pinned_components(args, own, dest)
     for p in (Path(args.package) / "LICENSES").iterdir():
         if p.is_file():
             copy(p, dest / "LICENSES" / p.name)
@@ -728,6 +749,18 @@ def assemble(args):
     write_manifest(dest, data)
     print(f"Assembled {sum(p.is_file() for p in dest.rglob('*'))} files including {MANIFEST}; excluded {len(removed)}; "
           f"{describe_sources(own)}")
+
+
+def copy_pinned_components(args, own, dest, pinned_path=COMPONENT_SUMS):
+    """Into the package tree `dest`, at their package paths: the files pinned_components checks. Each is checked again
+    after the copy, as the source may have been rebuilt in between: the ModAVDExtras files against what public_sources
+    recorded for them (`own`), the APKs against their pinned SHA-256."""
+    pinned = read_sums(pinned_path)
+    for rel, src in pinned_components(args, pinned_path).items():
+        copy(src, dest / rel)
+        want = own["extras"]["files"][rel] if rel in EXTRAS_FILES else pinned[rel]
+        if sha(dest / rel) != want:
+            raise ValueError(f"{rel} in the package differs from its pinned SHA-256")
 
 
 def copy_public_files(own, manager, dest):
@@ -1348,12 +1381,15 @@ def sources(args):
 def own_sources_text(own):
     """Section 6 of SOURCES.txt: what modavd-src holds and which public version each part is."""
     m, ime, extras = own["manager"], own["ime"], own.get("extras")
+    shim = bool(extras) and MUMU_SHIM in extras.get("files", {})
     return OWN_SOURCES_TEXT.format(
         name=OWN_SOURCES_NAME, manager_tag=m["tag"], manager_commit=m["commit"][:12], manager_version=m["version"], go=m["go"],
         modavd_commit=own["modavd"]["commit"][:12],
         ime=OWN_SOURCES_IME_TEXT.format(ime_tag=ime["tag"], ime_commit=ime["commit"][:12]) if ime else "",
         extras=OWN_SOURCES_EXTRAS_TEXT.format(
-            extras_tag=extras["tag"], extras_commit=extras["commit"][:12])
+            extras_tag=extras["tag"], extras_commit=extras["commit"][:12],
+            shim="和 mumu-shim\\shell\\sdk\\external_renderer_ipc.dll（MuMu 兼容外壳）" if shim else "",
+            shim_asset="、external_renderer_ipc.dll" if shim else "")
         if extras else "")
 
 
@@ -1723,7 +1759,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "notes-budget", "privacy-release"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
-                 "extras-dll", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
+                 "extras-dll", "mumu-shim", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
     # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
     # before their tags exist

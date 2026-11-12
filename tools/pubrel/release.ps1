@@ -45,6 +45,11 @@ param(
     # before the tag, the head of its release/<X>.<Y>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
     # archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
     [string]$ExtrasDll = '',
+    # ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, shipped as mumu-shim\shell\sdk\external_renderer_ipc.dll
+    # (MAA's MuMu path set to <root>\mumu-shim finds it there); '' = not shipped. Only with -ExtrasDll, from the same
+    # ModAVDExtras release: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same commit must list both. Pinned like
+    # -ExtrasDll, and while that is pinned this one must be too.
+    [string]$MumuShim = '',
     [string]$ExtrasRepo,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
@@ -145,6 +150,7 @@ if (-not $Snapshot) { $Snapshot = Join-Path $Sdk 'build-info.json' }
 $texts = @('--patch', $Patch) + $versionArgs + @('--changes', $Changes, '--changelog', $Changelog)
 $componentArgs = @(if ($ImeApk) { '--ime-apk', $ImeApk, '--ime-repo', $ImeRepo })
 if ($ExtrasDll) { $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo) }
+if ($MumuShim) { $componentArgs += @('--mumu-shim', $MumuShim) }
 # 还没打 tag 的管理器、截图库取各自仓库 upstream 的发版分支头（release_tools.py 的 component_ref）
 $public = @('--repository', $Repository, '--manager', $Manager, '--manager-repo', $ManagerRepo,
     '--release-branch', $releaseBranch) + $protectArgs
