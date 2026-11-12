@@ -57,48 +57,24 @@ EXTRAS_FILES = {EXTRAS_DLL: "modavd_extras.dll", MUMU_SHIM: "external_renderer_i
 # license package (the texts from gnu.org; ModAVDExtras' own LICENSE / COPYING are the same licenses).
 LGPL_TEXTS = {"LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
               "GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"}
-# What shipped after the P3 review of the NOTICE and 说明.txt (see extend_texts): files added to entries already
-# there, the entries appended to Part 2 (NOTICE.txt / NOTICE.csv), and a section for 说明.txt.
+# What shipped after the P3 review of the NOTICE (see extend_texts): files added to entries already there, and the
+# entries appended to Part 2 (NOTICE.txt / NOTICE.csv).
 NOTICE_MORE_FILES = {
     "ModAVD program icon": ["(package root) ModAVD.exe"],  # named so by ICON_NOTICE_EDITS
     "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1"],
 }
 # Files the reviewed NOTICE still names but the package no longer ships: fetching the components, collecting a problem
 # report and copying the system info are in the manager and tools/modavd.exe, and the batch files and scripts that did
-# them are gone (ModAVD/ModAVD#45). Each is taken out of its entry, where it has to be exactly once.
+# them are gone (ModAVD/ModAVD#45). The readme 说明.txt is gone too: the manager and the docs site say how to use it
+# (the whole-root update deletes it from a root, as a file of the old manifest the new package lacks). Each is taken out
+# of its entry, where it has to be exactly once.
 NOTICE_GONE_FILES = {
     "ModAVD scripts and documents": ["(package root) tools/fetch-components.ps1", "(package root) tools/collect-info.ps1",
-                                     "(package root) 补全组件.bat", "(package root) 收集问题信息.bat"],
+                                     "(package root) 补全组件.bat", "(package root) 收集问题信息.bat",
+                                     "(package root) 说明.txt"],
 }
 NOTICE_ADDITIONS = HERE / "config/notice-additions.txt"
 NOTICE_ADDITIONS_CSV = HERE / "config/notice-additions.csv"
-README_TOOLS = HERE / "config/readme-tools.txt"
-# Passages of the reviewed 说明.txt that told the user to run the batch files, and what they say now (ModAVD/ModAVD#45).
-# Each old passage has to be there exactly once (see extend_texts).
-README_EDITS = [
-    ("2. 双击「补全组件.bat」。\n"
-     "   它会先显示 Google《Android 软件开发套件许可协议》，输入 y 回车表示同意，\n"
-     "   然后下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
-     "   中途断了，再运行一次会接着下。看到「完成」就好了。\n",
-     "2. 双击 ModAVD.exe（管理器），点上方提示里的「补全组件」\n"
-     "   （顶栏「电脑检查」的「组件」一项下面也有）。\n"
-     "   先选下载源（拿不准就选「自动」），看完 Google《Android 软件开发套件许可协议》后同意，\n"
-     "   它就下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
-     "   中途断了，再点一次会接着下。装好后「电脑检查」的「组件」一项会通过。\n"
-     "   也可以在这个文件夹里运行 tools\\modavd.exe components fetch，做的事一样。\n"),
-    ("先别关模拟器，双击「收集问题信息.bat」，桌面上会生成一个问题包 zip。\n",
-     "先别关模拟器，在管理器的「设置」→「组件与问题反馈」里点「收集问题信息」\n"
-     "（或者在这个文件夹里运行 tools\\modavd.exe collect-info），桌面上会生成一个问题包 zip。\n"),
-    ("ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥、宿主输入法、补全组件和问题收集脚本）按\n",
-     "ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按\n"),
-    ("程序图标是同人创作（《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有），\n不随本包的任何许可证授权。\n",
-     "程序图标是 ModAVD 自己的图标，不随本包的任何许可证授权。\n"),
-    # a manual upgrade over a 0.38.1 or older folder leaves the batch files and scripts behind (ModAVD/ModAVD#140)
-    ("  不要删 avd 文件夹，游戏和登录状态都在里面。\n",
-     "  不要删 avd 文件夹，游戏和登录状态都在里面。\n"
-     "  从 0.38.1 及更早的版本覆盖升级的，包根「补全组件」「收集问题信息」「复制配置信息」三个批处理\n"
-     "  和 tools 里的 fetch-components.ps1、collect-info.ps1、report-config.ps1 不再用到，可以自己删。\n"),
-]
 # The scripts entry of the reviewed NOTICE still speaks of batch files; the package has one .ps1 left
 # (ModAVD/ModAVD#140). NOTICE.txt passages, each exactly once, and the entry's license name in NOTICE.csv.
 SCRIPT_NOTICE_EDITS = [
@@ -108,6 +84,9 @@ SCRIPT_NOTICE_EDITS = [
      "themselves the source code.\n",
      "Source code: https://github.com/ModAVD/ModAVD/tree/main/package; the .ps1\nfiles listed above are themselves "
      "the source code.\n"),
+    # and its documents are only the NOTICE now (说明.txt is in NOTICE_GONE_FILES)
+    ("The documents of ModAVD (说明.txt, NOTICE.txt, NOTICE.csv):\n",
+     "The documents of ModAVD (NOTICE.txt, NOTICE.csv):\n"),
 ]
 SCRIPT_CSV_LICENSE = ("AGPL-3.0-or-later (scripts and batch files) / Apache-2.0 (documents)",
                       "AGPL-3.0-or-later (scripts) / Apache-2.0 (documents)")
@@ -510,7 +489,7 @@ def preflight(args):
         src = baseline / "source" / name
         if sha(src) != expected:
             raise ValueError(f"Baseline asset hash differs: {name}")
-    for name in ["说明.txt", "LICENSES/NOTICE.txt", "LICENSES/NOTICE.csv"]:
+    for name in ["LICENSES/NOTICE.txt", "LICENSES/NOTICE.csv"]:
         if not (Path(args.package) / name).is_file():
             raise FileNotFoundError(name)
     notice = (Path(args.package) / "LICENSES/NOTICE.txt").read_text(encoding="utf-8-sig")
@@ -757,10 +736,9 @@ def assemble(args):
     for p in (Path(args.package) / "LICENSES").iterdir():
         if p.is_file():
             copy(p, dest / "LICENSES" / p.name)
-    copy(Path(args.package) / "说明.txt", dest / "说明.txt")
     # The reviewed P3 texts say "37.2.10-mas30": the folder name becomes ModAVD-<version>-<platform>, the product
     # name the new version; the build ID and manifest names stay masN.
-    for text in [dest / "说明.txt", *list((dest / "LICENSES").glob("NOTICE.*"))]:
+    for text in (dest / "LICENSES").glob("NOTICE.*"):
         content = text.read_text(encoding="utf-8-sig").replace("ModAVD-37.2.10-mas30", name).replace("37.2.10-mas30", version)
         content = content.replace("mas-30", f"mas-{number}").replace("mas30", args.build)
         text.write_text(content, encoding="utf-8")
@@ -806,10 +784,9 @@ def render_csv(rows):
 
 
 def extend_texts(dest, go):
-    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: ICON_NOTICE_EDITS
+    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv up to what this package ships: ICON_NOTICE_EDITS
     (and the icon entry's name and note in NOTICE.csv), SCRIPT_NOTICE_EDITS (and SCRIPT_CSV_LICENSE), NOTICE_GONE_FILES out of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
-    (`go`: the Go version the manager was built with), README_EDITS in 说明.txt and config/readme-tools.txt before its
-    troubleshooting section. Every anchor has to be there exactly once."""
+    (`go`: the Go version the manager was built with). Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
     for old, new in ICON_NOTICE_EDITS + SCRIPT_NOTICE_EDITS:
@@ -874,17 +851,6 @@ def extend_texts(dest, go):
     if added[0] != rows[0]:
         raise ValueError("config/notice-additions.csv: header differs from NOTICE.csv")
     path.write_text(render_csv(rows + added[1:]), encoding="utf-8")
-
-    path = dest / "说明.txt"
-    text = path.read_text(encoding="utf-8-sig")
-    for old, new in README_EDITS:
-        if text.count(old) != 1:
-            raise ValueError(f"说明.txt: the passage {old.splitlines()[0]!r} not found exactly once")
-        text = text.replace(old, new)
-    anchor = "====================\n出问题怎么办\n"
-    if text.count(anchor) != 1:
-        raise ValueError("说明.txt: the troubleshooting heading not found exactly once")
-    path.write_text(text.replace(anchor, README_TOOLS.read_text(encoding="utf-8") + anchor), encoding="utf-8")
 
 
 def check_notice_coverage(dest):

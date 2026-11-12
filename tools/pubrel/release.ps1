@@ -15,7 +15,7 @@ param(
     [string]$OutputName,
     # source baseline: unchanged source archives are reused after checking their frozen hashes (Baseline)
     [string]$Baseline,
-    # reviewed 说明.txt and LICENSES\ (LicensePackage); preflight refuses a package without LICENSES\AGPL-3.0.txt or
+    # reviewed LICENSES\ (LicensePackage); preflight refuses a package without LICENSES\AGPL-3.0.txt or
     # with another text in it (SHA-256 after CRLF -> LF, release_tools.py AGPL_SHA256)
     [string]$Package,
     # ModAVD release checkout: the bundled scripts (package/) and the bridge source (bridge/) are taken from its HEAD,
