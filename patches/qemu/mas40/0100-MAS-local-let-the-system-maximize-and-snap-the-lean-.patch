@@ -1,7 +1,8 @@
 From c63fc4ae4b09698a8294108d98e9a45552e19274 Mon Sep 17 00:00:00 2001
 From: qiyinxi <qiyinxi@foxmail.com>
 Date: Wed, 11 Nov 2026 23:21:09 +0100
-Subject: [PATCH] MAS local: let the system maximize and snap the lean window
+Subject: [PATCH 100/101] MAS local: let the system maximize and snap the lean
+ window
 
 The lean window moved and resized itself, without the caption's resizable
 frame and maximize box, so that Windows never snapped or maximized it: the
@@ -1453,6 +1454,3 @@ index 9e3bb02dc..88a0ada44 100644
 +    EXPECT_EQ(u.left, 3000);
 +    EXPECT_EQ(u.right, 3400);
  }
--- 
-2.54.0.windows.1
-

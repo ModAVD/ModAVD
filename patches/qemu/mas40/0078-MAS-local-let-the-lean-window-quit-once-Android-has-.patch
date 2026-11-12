@@ -1,0 +1,65 @@
+From 5e3367bfccd782d5e21261dd27c9aaa70cecad3a Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Mon, 2 Nov 2026 18:59:42 +0100
+Subject: [PATCH 078/101] MAS local: let the lean window quit once Android has
+ powered off
+
+The safe shutdown hides the windows when it starts, so when the main
+loop ends and the container is closed, Qt does not see the last visible
+window close and never leaves its event loop. The process then ran until
+the 3 s kill guard ended it (exit code 1), skipping the normal teardown:
+saving the window position, netsim and gRPC shutdown.
+
+Quit explicitly once the hidden window has been closed, as the hidden
+window mode already does, and drop the extra 3 s guard there: the 25 s
+guard started with the shutdown still bounds the teardown. After a
+forced quit, give QEMU 10 s rather than 3 s to stop the VM and close its
+disks.
+
+Change-Id: Ibcfd8b68909f7a872249a6fde123629600763608
+---
+ .../src/android/skin/qt/emulator-qt-window.cpp  | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 4a51aa82a..55fecf568 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -1210,10 +1210,8 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+             modal->close();
+         }
+         mSafeShutdownTimeout.stop();
+-        if (mSafeShutdownState == SafeShutdownState::StoppingGuest ||
+-            mSafeShutdownState == SafeShutdownState::Syncing) {
+-            System::get()->waitAndKillSelf(3);
+-        }
++        // The kill guard started with the shutdown still bounds the teardown.
++        dinfo("Safe toolbar shutdown: the emulator has stopped; quitting");
+         mSafeShutdownState = SafeShutdownState::Idle;
+     }
+ 
+@@ -1292,6 +1290,14 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+         mOverlay.hide();
+         hide();
+         event->accept();
++        if (mHiddenForSafeShutdown) {
++            // The windows were hidden when the safe shutdown started, so this
++            // close is not the last visible window closing and Qt would not
++            // leave its event loop: the process would end only by the kill
++            // guard, without the normal teardown. Quit here, as the hidden
++            // window mode does in EmulatorContainer::closeEvent.
++            qApp->quit();
++        }
+     }
+ }
+ 
+@@ -4675,7 +4681,8 @@ void EmulatorQtWindow::forceCloseNow() {
+     updateWindowTitle();
+     mSafeShutdownTimeout.stop();
+     queueQuitEvent();
+-    System::get()->waitAndKillSelf(3);
++    // Long enough for QEMU to stop the VM and close its disks after the quit.
++    System::get()->waitAndKillSelf(10);
+ }
+ 
+ void EmulatorQtWindow::runAdbShellPowerDownAndQuit() {

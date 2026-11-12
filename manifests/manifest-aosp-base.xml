@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ModAVD mas-39（Pkg.BuildId=mas-39，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-11-10 生成。
+<!-- ModAVD mas-40（Pkg.BuildId=mas-40，emulator 37.2.10）Windows 构建所用源码的 repo 清单快照，2026-11-12 生成。
      manifest 源：https://android.googlesource.com/platform/manifest 分支 emu-main-dev（repo init 时 depth=1）。
-     revision 全部是 AOSP emu-main-dev 上的公开提交；qemu / gfxstream / crashpad 在此基础上按 patches/ 回放补丁得到 mas-39 的源码。
+     revision 全部是 AOSP emu-main-dev 上的公开提交；qemu / gfxstream / crashpad 在此基础上按 patches/ 回放补丁得到 mas-40 的源码。
 -->
 <manifest>
   <remote name="aosp" fetch="https://android.googlesource.com/" review="https://android-review.googlesource.com/"/>
@@ -42,7 +42,7 @@
   <project name="platform/external/nasm" path="external/nasm" revision="645e4f02c622ba67eb754000cc00c9db8be31f85" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/perfetto" path="external/perfetto" revision="37518c39e3db120322359090db3d54f6ac100078" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
   <project name="platform/external/protobuf" path="external/protobuf" revision="623d88a75a0b17ad2cc4be8fa79c3b97e7384a40" upstream="emu-main-dev" dest-branch="emu-main-dev"/>
-  <!-- external/qemu：AOSP 基准 f0c183f1cc7456ecd6f3607f2f47893768ae4334，补丁系列 patches/qemu/mas39 = 基准 + 98 个提交，HEAD ac8b73bd8bb327cf875f4570d0c644825bc16eef -->
+  <!-- external/qemu：AOSP 基准 f0c183f1cc7456ecd6f3607f2f47893768ae4334，补丁系列 patches/qemu/mas40 = 基准 + 101 个提交，HEAD 5d99d72b2b08f35249d66d929ee4277accd533f7 -->
   <project name="platform/external/qemu" path="external/qemu" revision="f0c183f1cc7456ecd6f3607f2f47893768ae4334" upstream="emu-main-dev" dest-branch="emu-main-dev">
     <copyfile src="android/vscode/emu.code-workspace" dest="emu.code-workspace"/>
     <linkfile src="toplevel.MODULE.bazel" dest="MODULE.bazel"/>
