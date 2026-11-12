@@ -1,6 +1,6 @@
 [
   {
-    "version": "v0.41.0",
+    "version": "v0.40.1",
     "build": 40,
     "min_automas": "5.7.0",
     "changes": {
@@ -9,7 +9,7 @@
         "实例卡片显示数据盘实际占了多少电脑硬盘。"
       ],
       "变更": [
-        "只重新打包：模拟器还是 mas-40；包里的管理器和命令行升到 0.9.0，截图库升到 v0.1.3，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.9.0)。版本号从这一版起和模拟器构建号分开。",
+        "只重新打包：模拟器还是 mas-40；包里的管理器和命令行升到 0.9.0，截图库升到 v0.1.3，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.9.0)。下一版起版本号和模拟器构建号分开。",
         "没起名的实例显示 emu-N，不再显示文件名 mas_N；包里不再带说明.txt。",
         "问题包和开机守护日志记下模拟器占的内存，以及电脑上占内存最多的程序。"
       ],

@@ -141,7 +141,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 
 0.36.0 起包里还有 `ModAVD.exe`（管理器）和 `tools/modavd.exe`（命令行、MCP），取自 `-Manager` 那个 Release 包（ModAVDManager 自己的发版流程可复现编译并核对过）。
 
-P3 审核过的 NOTICE 之后新发的、不再发的东西，由 assemble 按锚点改进去：程序图标条目去掉「同人」的说法、改名「ModAVD program icon」（`ICON_NOTICE_EDITS`）、已有条目里拿掉不再发的文件（`NOTICE_GONE_FILES`；0.41 起包里不再带 `说明.txt`，用法看管理器和文档站，整包更新会按旧清单把它删掉）、
+P3 审核过的 NOTICE 之后新发的、不再发的东西，由 assemble 按锚点改进去：程序图标条目去掉「同人」的说法、改名「ModAVD program icon」（`ICON_NOTICE_EDITS`）、已有条目里拿掉不再发的文件（`NOTICE_GONE_FILES`；0.40.1 起包里不再带 `说明.txt`，用法看管理器和文档站，整包更新会按旧清单把它删掉）、
 加上新发的文件（`NOTICE_MORE_FILES`）、Part 2 末尾加 `config/notice-additions.txt` / `.csv` 的条目（执行桥载荷、modavd 两个 exe、Go 运行时的 BSD-3 声明，Go 版本取自管理器 tag 的 go.mod；0.39.0 起还有截图库的 LGPL-3.0-or-later 声明）、
 锚点或原文找不到、不止一处就停。
 补完两个方向都核对：包根以下（`sdk/` 除外）每个文件、`sdk/emulator/resources/modavd/` 每个文件都要在 NOTICE.txt 里有条目，许可证全文除外；
