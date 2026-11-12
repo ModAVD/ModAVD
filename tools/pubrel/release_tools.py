@@ -43,7 +43,7 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # its version here: tag v<EXTRAS_VERSION> of the ModAVDExtras checkout (--extras-repo) must list that SHA-256 for
 # modavd_extras.dll in release/<version>.SHA256SUMS.txt, and the source bundle archives that tag (see extras_release).
 EXTRAS_DLL = "extras/modavd_extras.dll"
-EXTRAS_VERSION = "0.1.2"
+EXTRAS_VERSION = "0.1.3"
 # ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, from the same ModAVDExtras release as EXTRAS_DLL:
 # MAA loads shell\sdk\external_renderer_ipc.dll under the MuMu path it is given, so users who run MAA on its own set
 # that path to <ModAVD root>\mumu-shim (an interim measure until MAA / MaaFramework support ModAVD natively). It goes
