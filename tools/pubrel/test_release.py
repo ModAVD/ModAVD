@@ -579,6 +579,22 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             checks.check_manifest(tree)
 
+    def test_manifest_build_is_not_the_version(self):
+        """Since 0.41 the version counts on its own: 0.41.0 can be mas-40. The build only has to be a build number."""
+        path = self.folder()
+        tree = self.package(path)
+        manifest = tree / release.MANIFEST
+        for version, build in [("0.41.0", "mas40"), ("0.42.0", "mas41"), ("0.41.1", "mas40"), ("0.40.0", "mas40")]:
+            release.write_manifest(tree, {"build": build, "version": version, "upstream": "37.2.10", "min_automas": "5.7.0"})
+            data = checks.check_manifest(tree)
+            self.assertEqual((data["version"], data["build"]), ("v" + version, int(build[3:])))
+        good = release.load(manifest)
+        for field, value in [("build", 0), ("build", "40"), ("build", True), ("build", None), ("version", "0.41.0"),
+                             ("version", "v0.41")]:
+            release.save(manifest, {**good, field: value})
+            with self.assertRaises(ValueError):
+                checks.check_manifest(tree)
+
     def test_components_are_pinned_and_complete(self):
         path = self.folder()
         launcher = path / "de.jrpie.android.launcher_57.apk"
@@ -1095,10 +1111,26 @@ class ReleaseChecks(unittest.TestCase):
                 release.release_version(build, patch)
         self.assertGreater(checks.version_key("v0.100.0"), checks.version_key("v0.99.0"))
         self.assertGreater(checks.version_key("v0.33.0"), checks.version_key("v0.32.1"))
-        self.assertEqual(checks.build_of("v0.32.1"), 32)
         for bad in ["0.33.0", "v37.2.10-mas32", "v0.33", "v00.33.0"]:
             with self.assertRaises(ValueError):
                 checks.version_key(bad)
+        # since 0.41 the version is given on its own (--version); without it the old rule from --build and --patch
+        version = lambda build, patch=0, given=None: release.public_version(SimpleNamespace(build=build, patch=patch, version=given))
+        self.assertEqual(version("mas40", given="0.41.0"), "0.41.0")
+        self.assertEqual(version("mas41", given="0.42.0"), "0.42.0")
+        self.assertEqual(version("mas40", given="0.41.1"), "0.41.1")
+        # --version is not checked against the build at all, also below FIRST_NEW_BUILD
+        self.assertEqual(version("mas32", given="0.41.0"), "0.41.0")
+        self.assertEqual(version("mas40"), "0.40.0")
+        self.assertEqual(version("mas40", 2), "0.40.2")
+        self.assertEqual(release.public_version(SimpleNamespace(build="mas39", patch=0)), "0.39.0")
+        for given, patch in [("0.41.0", 1), ("v0.41.0", 0), ("0.41", 0), ("0.041.0", 0), ("0.41.0-rc1", 0)]:
+            with self.assertRaises(ValueError):
+                version("mas40", patch, given)
+        for good in [1, 40, 1000]:
+            self.assertTrue(checks.is_build(good))
+        for bad in [0, -1, "40", 40.0, True, None]:
+            self.assertFalse(checks.is_build(bad))
 
     def annotated_series(self, series, recorded):
         template = '<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
@@ -1444,6 +1476,20 @@ class ReleaseChecks(unittest.TestCase):
         self.assertIn("| 0.39.0（`Pkg.BuildId=mas-39`；0.39.1 相同） | one/mas39 | two/v22 |", repacked)
         self.assertEqual(repacked.replace("；0.39.1 相同", ""), (again / "patches/BASE.md").read_text(encoding="utf-8"))
         self.assertEqual(release.load(repack / "patches/series.json"), records)
+        # since 0.41 a version of its own can ship a published build (0.41.0 on mas-40): the row is found by the
+        # build, not by the middle of the version, and only names the version
+        later = self.export_into(root, "later", series, checkout, "0.41.0")
+        text_later = (later / "patches/BASE.md").read_text(encoding="utf-8")
+        self.assertIn("| 0.39.0（`Pkg.BuildId=mas-39`；0.41.0 相同） | one/mas39 | two/v22 |", text_later)
+        self.assertEqual(text_later.replace("；0.41.0 相同", ""), (again / "patches/BASE.md").read_text(encoding="utf-8"))
+        self.assertEqual(release.load(later / "logs/patch-dirs.json"),
+                         {"one": {"dir": "one/mas39", "new": False}, "two": {"dir": "two/v22", "new": False}})
+        # the version is matched whole: 0.39.1 is not named by 0.39.10, and 0.39.0 by itself adds nothing
+        self.commit_files(checkout, {"patches/BASE.md": text_later.replace("；0.41.0 相同", "；0.39.10 相同").encode()})
+        self.assertIn("；0.39.10 相同；0.39.1 相同）", (self.export_into(root, "whole", series, checkout, "0.39.1")
+                                                      / "patches/BASE.md").read_text(encoding="utf-8"))
+        self.assertNotIn("0.39.0 相同", (self.export_into(root, "same", series, checkout, "0.39.0")
+                                       / "patches/BASE.md").read_text(encoding="utf-8"))
 
     def test_patch_records_update_the_qemu_license_section(self):
         """A new qemu series that continues the previous one: the license section's list of commits and the replay
@@ -1597,8 +1643,9 @@ class ReleaseChecks(unittest.TestCase):
             release.incoming(SimpleNamespace(output=str(out), repository=str(changed_clone), keep_incoming=[]))
         self.assertTrue((changed_clone / "incoming/fix-a/tests/probe.py").exists())
 
-    def notes_text(self, changes=None, upper="## 更新内容\n\n- x", version="v0.33.0"):
-        data = {"version": version, "build": checks.build_of(version), "upstream": "37.2.10", "min_automas": "5.7.0",
+    def notes_text(self, changes=None, upper="## 更新内容\n\n- x", version="v0.33.0", build=None):
+        build = checks.version_key(version)[1] if build is None else build
+        data = {"version": version, "build": build, "upstream": "37.2.10", "min_automas": "5.7.0",
                 "changes": changes or {version: {"修复": ["修好一处"]}, "v0.32.0": {"变更": ["读写更快"]}}}
         return checks.machine_line(data) + "\n" + upper + "\n\n" + checks.SEPARATOR + "\n\n## 下载\n"
 
@@ -1618,6 +1665,15 @@ class ReleaseChecks(unittest.TestCase):
                 checks.check_announcement(text)
         with self.assertRaises(ValueError):
             checks.check_announcement(self.notes_text(), "v0.34.0", 34)
+        # since 0.41 the build is not the middle of the version
+        for version, build in [("v0.41.0", 40), ("v0.42.0", 41), ("v0.41.1", 40)]:
+            text = self.notes_text(changes={version: {"修复": ["a"]}, "v0.40.0": {"修复": ["b"]}}, version=version, build=build)
+            self.assertEqual(checks.check_announcement(text, version, build)["build"], build)
+            with self.assertRaises(ValueError):
+                checks.check_announcement(text, version, build + 1)
+        for build in [0, -1, "40", True, 40.0]:
+            with self.assertRaises(ValueError):
+                checks.check_announcement(self.notes_text(changes={"v0.41.0": {"修复": ["a"]}}, version="v0.41.0", build=build))
         with self.assertRaises(ValueError):
             checks.machine_line({"changes": {"v0.33.0": {"修复": ["a -- b"]}}})
 
@@ -1656,6 +1712,22 @@ class ReleaseChecks(unittest.TestCase):
         with contextlib.redirect_stdout(printed):
             release.notes_budget_command(SimpleNamespace(build="mas39", patch=0, sdk=None, changes=str(changes), changelog=str(changelog)))
         self.assertRegex(printed.getvalue(), r"v0\.39\.0: machine line \d+/8000, announcement \d+/4000")
+        # since 0.41 the version is given on its own: 0.41.0 on mas-40, the line before it still 0.40.0 on mas-40
+        release.save(changelog, [{**entry(40, "修好一处"), "version": "v0.41.0"}, entry(40, "旧版"), entry(39, "旧版")])
+        fields = release.text_fields("0.41.0", 40, "37.2.10", changes, changelog)
+        self.assertEqual((fields["VERSION"], fields["BUILD_ID"]), ("0.41.0", "mas-40"))
+        text = release.render_notes({**fields, **release.SAMPLE_ASSETS})
+        self.assertTrue(text.split("\n")[1].startswith("ModAVD 0.41.0，构建号 `mas-40`，"))
+        self.assertEqual(checks.check_announcement(text, "v0.41.0", 40)["build"], 40)
+        release.notes_budget("0.41.0", 40, "37.2.10", changes, changelog)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            release.notes_budget_command(SimpleNamespace(build="mas40", patch=0, version="0.41.0", sdk=None, changes=str(changes),
+                                                         changelog=str(changelog)))
+        self.assertRegex(printed.getvalue(), r"v0\.41\.0: machine line")
+        with self.assertRaisesRegex(ValueError, "differs from -Build"):
+            release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.41.0", sdk=None, changes=str(changes),
+                                                         changelog=str(changelog)))
 
     def test_changes_and_changelog(self):
         path = self.folder()
@@ -1675,6 +1747,25 @@ class ReleaseChecks(unittest.TestCase):
             release.save(log, bad)
             with self.assertRaises(ValueError):
                 release.read_changelog(log, "0.33.0", 33)
+        # since 0.41 the version counts on its own; the entries up to 0.40 still have build == the middle
+        release.save(log, [entry("v0.42.0", 41), entry("v0.41.1", 40), entry("v0.41.0", 40), entry("v0.40.0", 40),
+                           entry("v0.39.0", 39)])
+        self.assertEqual([e["version"] for e in release.read_changelog(log, "0.41.1", 40)],
+                         ["v0.41.1", "v0.41.0", "v0.40.0", "v0.39.0"])
+        self.assertEqual(release.read_changelog(log, "0.42.0", 41)[0]["build"], 41)
+        self.assertEqual(release.read_changelog(log, "0.41.0", 40)[0]["version"], "v0.41.0")
+        for version, number in [("0.41.1", 41), ("0.42.0", 40), ("0.41.0", 41)]:
+            with self.assertRaisesRegex(ValueError, "differs from -Build"):
+                release.read_changelog(log, version, number)
+        for build in [0, "40", True, None]:
+            release.save(log, [entry("v0.41.0", 40), entry("v0.40.0", build)])
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                release.read_changelog(log, "0.41.0", 40)
+        # still newest first, without duplicates
+        for bad in [[entry("v0.41.0", 40), entry("v0.41.1", 40)], [entry("v0.41.0", 40), entry("v0.41.0", 41)]]:
+            release.save(log, bad)
+            with self.assertRaises(ValueError):
+                release.read_changelog(log, "0.41.0", 40)
 
 
 if __name__ == "__main__":

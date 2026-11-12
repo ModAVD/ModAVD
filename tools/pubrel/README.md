@@ -8,9 +8,11 @@
 
 ## 版本号
 
-公开版本号是 `0.<N>.<P>`：0 表示内测阶段，N 是构建号（`sdk-masN`、`Pkg.BuildId=mas-N`），P 是不重编、只重新打包的次数，默认 0。
-mas33 发布成 tag `v0.33.0`，标题 `ModAVD mas-33（0.33.0）`；上游版本（`Pkg.Revision`，如 37.2.10）只写进公告第一句「基于 Google AOSP Android Emulator 37.2.10 构建」和清单。
-已发布的 mas30、mas32 保留旧名 `v37.2.10-masN`，算作 `0.N.0`，所以这两个构建只能带 `-Patch 1` 以上重新打包，例如 mas32 → `0.32.1`。
+公开版本号 `X.Y.Z` 单独往上加，用 `-Version` 给，和模拟器构建号无关：0.41.0 可以是 mas-40，下一版 0.42.0 是 mas-41，只重新打包 0.41.0 就发 0.41.1、构建号还是 mas-40。
+构建号照旧叫 mas-N（`sdk-masN`、`Pkg.BuildId=mas-N`、补丁目录 `qemu/masN`），记在 `modavd-manifest.json` 和公告机读行的 `build` 里，`changelog.json` 每条的 `build` 也是它。
+tag 是 `v<版本>`，标题 `ModAVD 0.41.0`；构建号、上游版本（`Pkg.Revision`，如 37.2.10）写进公告第一句「ModAVD 0.41.0，构建号 `mas-40`，基于 Google AOSP Android Emulator 37.2.10 构建」和清单。
+
+0.40 及以前是旧规矩：版本 `0.<N>.<P>` 的 N 就是构建号，P 是只重新打包的次数；不给 `-Version` 时 `release.ps1` 还照这个算（mas30、mas32 的旧名 `v37.2.10-masN` 算作 `0.N.0`，只能带 `-Patch 1` 以上重新打包）。校验照旧认这些旧条目。
 
 ## 构建
 
@@ -51,12 +53,12 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 回归跑完后填两个文件（发版时读取，不进构建快照）：
 
 - `config/changes.md`：`## 怎么更新`、`## AUTO-MAS 版本`、`## 已知问题`、`## 发布前回归` 四节，一节都不能少，不能留「发布前填写」占位。
-- `config/changelog.json`：在最前面加本版一条，`{"version": "v0.34.0", "build": 34, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`。分类只用 `新增`、`变更`、`修复`、`移除`、`说明`；条目一行一句，不能有 `--`。公告的「更新内容」就是本版这条按分类排出来的；第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
+- `config/changelog.json`：在最前面加本版一条，`{"version": "v0.41.0", "build": 40, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`。分类只用 `新增`、`变更`、`修复`、`移除`、`说明`；条目一行一句，不能有 `--`。公告的「更新内容」就是本版这条按分类排出来的；第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
 
 这两个文件写完（或写的过程中）先看公告长度，不用 SDK、不打包：
 
 ```powershell
-python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK 根目录>]
+python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.41.0 [--sdk <SDK 根目录>]
 ```
 
 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 条的改动，旧版的条目也算在里面）和分隔行以上的公告（限 4000 字）各多长；超了就报错并说该删哪里，过了 90% 会提醒。没给 `--sdk` 时上游版本按 `99.99.99` 估，比真的多一两个字。`release.ps1` 的预检用同一个算法再查一遍，超了在打包之前就停。
@@ -64,22 +66,22 @@ python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK �
 再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果表贴进 `config/changes.md` 的「发布前回归」。
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll>
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll>
 ```
 
-默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\mas34`。
+默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\mas40-v0.41.0`。
 
 管理器、输入法、截图库、执行桥源码和随包脚本都取公开仓库：管理器、输入法和截图库用各自 Release 的附件（管理器、截图库还没打 tag 时见下面一节），
 随包脚本和执行桥源码取发版克隆（`-Repository`，默认就是这份工具所在的克隆）当前提交的 `package/`、`bridge/`。
-发版前先把发版克隆更新到 ModAVD 的发版分支 `release/0.<N>`（见 [RELEASING.md](../../RELEASING.md)「发版分支」），`ManagerRepo`、`ImeRepo`、`ExtrasRepo` 三个克隆 `git fetch upstream --tags`。
+发版前先把发版克隆更新到 ModAVD 的发版分支 `release/<X>.<Y>`（版本号的前两位，比如 0.41.x 是 `release/0.41`；见 [RELEASING.md](../../RELEASING.md)「发版分支」），`ManagerRepo`、`ImeRepo`、`ExtrasRepo` 三个克隆 `git fetch upstream --tags`。
 
 ### 组件还没打 tag 时
 
 管理器和截图库不用先发版。它们的发版准备提交（版本号、`release/<版本>.md`、`release/<版本>.SHA256SUMS.txt`）合进各自仓库的
-`release/0.<N>`（N 是 `-Build` 的构建号）以后就能打包：
+`release/<X>.<Y>`（这一版 ModAVD 版本号的前两位）以后就能打包：
 
 - `v<版本>` 的 tag 在，就按 tag 核对，和以前一样。
-- tag 不在，取那个仓库 `upstream` 的 `release/0.<N>` 的头（先 `git fetch upstream`）：那个提交的版本号要是这一版
+- tag 不在，取那个仓库 `upstream` 的 `release/<X>.<Y>` 的头（先 `git fetch upstream`）：那个提交的版本号要是这一版
   （管理器看 `internal/buildinfo/buildinfo.go`，截图库看 `CMakeLists.txt`），给进来的文件要和那个提交上的
   `release/<版本>.SHA256SUMS.txt` 对上。预检和组包的输出里写着「NOT TAGGED YET」和取的提交。
 - `-Manager` 给本机从那个提交编的包（ModAVDManager 的 `build.ps1` 加 `mkzip`，同一份源码编出的字节相同）；
@@ -93,7 +95,8 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | 参数 | 用途 |
 | --- | --- |
 | `-Build` / `-Sdk` | 必填，构建号 `masNN`（mas32 及更早的只能重新打包）、SDK 根目录；检查 `Pkg.BuildId`，`Pkg.Revision` 记为上游版本 |
-| `-Patch` | 默认 0；只重新打包时加一，版本变成 `0.<N>.<P>`，输出目录 `masNN-pP` |
+| `-Version` | 公开版本号 `X.Y.Z`，要比 `changelog.json` 里已有的都新；输出目录 `masNN-v<版本>`。给了就不再用 `-Patch` |
+| `-Patch` | 不给 `-Version` 时才用（0.40 及以前的旧规矩）：默认 0，只重新打包时加一，版本变成 `0.<N>.<P>`，输出目录 `masNN-pP` |
 | `-Changes` / `-Changelog` | 默认 `config/changes.md`、`config/changelog.json`；试运行时指向临时副本 |
 | `-Snapshot` | 默认读 SDK 的 `build-info.json` |
 | `-EmuSrc` | 源码树（`EmuSrc`） |
@@ -111,7 +114,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 | `-MinFreeGB` | 写之前要求的磁盘空闲，默认 120（`MinFreeGB`） |
 | `-Force` | 只重建同名、有匹配所有权标记、没有链接的本脚本输出目录；不会清理别的目录 |
 | `-Python` / `-SevenZip` | 指定可执行文件；Python 也可由 `MODAVD_PYTHON` 指定，再是本机配置 `Python`、PATH 里的 `python.exe`；7-Zip 再是本机配置 `SevenZip`、PATH 里的 `7z.exe`、`Program Files\7-Zip` |
-| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿（tag 指向 `release/0.<N>`）；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
+| `-DraftRelease` | 全部校验通过后创建 GitHub 草稿（标题 `ModAVD <版本>`，tag 指向 `release/<X>.<Y>`）；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
 
 产物（以 `0.33.0` 为例）：
 
@@ -123,7 +126,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK 根目录>
 - `release-assets.json` 记录供仓库 CI 使用的大小与哈希。
 - `patches/`：要进发版提交的补丁。`series.json`、`BASE.md` 是发版克隆（`-Repository`）里那两份加上这一版，直接覆盖仓库里的：
   - 和已发布的某个系列仓库、基准、分支头都相同的，沿用那个目录（比如 Crashpad 一直是 `crashpad/module-version22`），不加新目录；它的导出放在 `work/patches-reused/` 给回放和 incoming 核对用，不在 `patches/` 里。
-  - 其余的是新目录（`patches/<仓库>/masN/`）：`series.json` 最前面加一条；`BASE.md` 版本表加一行（重新打包同一构建时只在那一行补「；0.N.P 相同」），目录表在同一仓库的旧行上面加一行，目录表下面的说明加一句（和上一个目录前几个补丁相同、从第几个起是新增的，按 patch-id 算）。
+  - 其余的是新目录（`patches/<仓库>/masN/`）：`series.json` 最前面加一条；`BASE.md` 版本表加一行（同一构建再发一个版本，比如重新打包，按构建号找到那一行，只补「；<版本> 相同」），目录表在同一仓库的旧行上面加一行，目录表下面的说明加一句（和上一个目录前几个补丁相同、从第几个起是新增的，按 patch-id 算）。
   - 新补丁的许可证、新增的补丁做了什么只能人写，留成「发布前填写」：填完再提交，`checks.py metadata` 见到它就失败。版本表下面的许可证表、回放示例也按需要手改。
   - 发版克隆里已经是加过这一版的（重跑一遍），不会重复加。`logs/patch-dirs.json` 记每个仓库这一版用哪个目录、是不是新的。
 
@@ -188,4 +191,4 @@ python -I tools/pubrel/test_release.py --work <全新临时目录>
 ```
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
-覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外只许 `extras/modavd_extras.dll`）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库和 tag `v<EXTRAS_VERSION>` 的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
+覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外只许 `extras/modavd_extras.dll`）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库和 tag `v<EXTRAS_VERSION>` 的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。

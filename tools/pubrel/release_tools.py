@@ -25,8 +25,10 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 import checks
 IDENTITY = checks.MAINTAINER
-# Public version 0.<N>.<P>. mas30 and mas32 were published as 37.2.10-masN, which counts as 0.N.0,
-# so builds before this one can only be repackaged (P >= 1), e.g. mas32 -> 0.32.1.
+# Public version X.Y.Z. Up to 0.40 it was 0.<N>.<P> from the build mas<N> (P: repack count); since then the version is
+# given on its own (--version, release.ps1 -Version) and the build is only recorded next to it ("build" in the manifest
+# and the machine line). Without --version the old rule still applies: mas30 and mas32 were published as
+# 37.2.10-masN, which counts as 0.N.0, so builds before this one can only be repackaged (P >= 1), e.g. mas32 -> 0.32.1.
 FIRST_NEW_BUILD = 33
 MANIFEST = "modavd-manifest.json"
 # Binary packages carry the platform (a Linux build may follow); the source bundle does not.
@@ -277,6 +279,18 @@ def release_version(build, patch):
     return f"0.{number}.{patch}"
 
 
+def public_version(args):
+    """The public version of this release (no leading v): --version when given, which leaves --patch out (a nonzero
+    --patch with it is refused), else release_version(--build, --patch) as up to 0.40."""
+    version = getattr(args, "version", None)
+    if not version:
+        return release_version(args.build, getattr(args, "patch", 0))
+    checks.version_key("v" + version)
+    if int(getattr(args, "patch", 0) or 0):
+        raise ValueError("--version gives the whole version; leave --patch out (release.ps1 -Patch)")
+    return version
+
+
 def package_name(version):
     """Main ZIP stem and its top-level folder: ModAVD-0.33.0-win-x64."""
     return f"ModAVD-{version}-{PLATFORM}"
@@ -310,7 +324,9 @@ def read_changes(path):
 
 
 def read_changelog(path, version, number):
-    """Entries newest first, starting at the release being built; validated with the public checks."""
+    """Entries newest first, starting at the release being built; validated with the public checks. Each build is an
+    emulator build number (up to 0.40 also the middle of the version, since then counted on its own); the release's
+    own entry has the build being packaged."""
     entries = load(path)
     if not isinstance(entries, list):
         raise ValueError("changelog.json must be a list")
@@ -319,8 +335,8 @@ def read_changelog(path, version, number):
         if not isinstance(e, dict) or set(e) != {"version", "build", "min_automas", "changes"}:
             raise ValueError(f"changelog entry needs exactly version/build/min_automas/changes: {e}")
         key = checks.version_key(e["version"])
-        if key[1] != e["build"]:
-            raise ValueError(f"changelog build differs from version: {e['version']}")
+        if not checks.is_build(e["build"]):
+            raise ValueError(f"changelog build must be a positive integer (Pkg.BuildId mas-N): {e['version']}")
         if seen and key >= seen[-1]:
             raise ValueError("changelog.json must be sorted newest first without duplicates")
         seen.append(key)
@@ -459,7 +475,7 @@ def preflight(args):
         safe_rel(s["dir"])
         if not re.fullmatch(r"[0-9a-f]{40}", s["base"]) or not re.fullmatch(r"[0-9a-f]{40}", s["head"]) or revisions.get(s["repo"]) != s["head"]:
             raise ValueError("Patch series and manifest revisions disagree")
-    version = release_version(args.build, args.patch)
+    version = public_version(args)
     number = build_number(args.build)
     sdk = Path(args.sdk) / "emulator"
     props = (sdk / "source.properties").read_text(encoding="utf-8-sig")
@@ -518,7 +534,7 @@ def go_toolchain(gomod):
 def component_ref(repo, version, branch=None, version_file=None, version_pattern=None):
     """(commit, where, tagged) of release `version` of a component in the checkout `repo`.
 
-    Released: tag v<version>. Not tagged yet, and `branch` given (release/0.<N>, release.ps1 -Build): the head of the
+    Released: tag v<version>. Not tagged yet, and `branch` given (release/<X>.<Y> of the ModAVD version): the head of the
     remote-tracking refs/remotes/upstream/<branch>, which must already be that version (`version_pattern` finds it in
     `version_file`, as the component's release workflow checks at the tag). release/<version>.SHA256SUMS.txt is
     committed before the tag in both cases, so the files are checked the same way; the package records the commit, and
@@ -684,12 +700,12 @@ def owned(args, create=False):
 def assemble(args):
     out = Path(args.output)
     data = load(args.snapshot)
-    version = release_version(args.build, args.patch)
+    version = public_version(args)
     number = build_number(args.build)
-    current = read_changelog(args.changelog, version, number)[0]
+    current =read_changelog(args.changelog, version, number)[0]
     own = checked_sources(args)
     # Later steps take the public version and the public sources from the output copy of the snapshot.
-    data.update(version=version, patch=int(args.patch or 0), upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
+    data.update(version=version, patch=checks.version_key("v" + version)[2], upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
                 own=own)
     save(out / "snapshot.json", data)
     sdk = Path(args.sdk) / "emulator"
@@ -1118,18 +1134,21 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
     if sorted(c.lower() for c in columns) != sorted(by_column):
         raise ValueError(f"patches/BASE.md: version table columns {columns} differ from the series {sorted(by_column)}")
     want = [by_column[c.lower()] for c in columns]
+    # The rows are keyed by the build, not by the version: one build can be published under several versions (a
+    # repack, or since 0.41 a release that changes only what is around the emulator, e.g. 0.41.0 on mas-40).
     build_id = f"`Pkg.BuildId=mas-{number}`"
     rows = [i for i in range(head + 2, end) if build_id in cells(lines[i])[0]]
     if len(rows) > 1:
         raise ValueError(f"patches/BASE.md: more than one version row for {build_id}")
-    # Only the first export of a build describes it: a rerun, or a repack of a published build, adds no notes.
+    # Only the first export of a build describes it: a rerun, or another version of a published build, adds no notes.
     first = not rows
     if rows:
         row = cells(lines[rows[0]])
         if row[1:] != want:
             raise ValueError(f"patches/BASE.md: the row for {build_id} names {row[1:]}, this build exports {want}")
-        if version not in row[0]:
-            # a repack of a published build: 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同）
+        # the version as a whole (0.4.0 is not in 0.40.0)
+        if not re.search(rf"(?<![0-9.]){re.escape(version)}(?![0-9])", row[0]):
+            # another version of a published build: 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同）
             row[0] = re.sub(r"）$", f"；{version} 相同）", row[0]) if row[0].endswith("）") else f"{row[0]}（{version} 相同）"
             lines[rows[0]] = "| " + " | ".join(row) + " |"
     else:
@@ -1561,8 +1580,8 @@ def describe_budget(machine, upper):
 
 def notes_budget_command(args):
     """`notes-budget`: the lengths, while changelog.json and changes.md are being written (no SDK or output needed)."""
-    version = release_version(args.build, args.patch)
-    upstream = sdk_upstream(args.sdk) if args.sdk else "99.99.99"
+    version = public_version(args)
+    upstream =sdk_upstream(args.sdk) if args.sdk else "99.99.99"
     machine, upper = notes_budget(version, build_number(args.build), upstream, args.changes, args.changelog)
     print(f"Release notes v{version}: {describe_budget(machine, upper)}"
           + ("" if args.sdk else "; upstream version assumed 99.99.99 (pass --sdk for the real one)"))
@@ -1740,8 +1759,11 @@ def main():
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
                  "extras-dll", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
-    # release/0.<N>: the manager and the extras library may be at the head of this branch before their tags exist
+    # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
+    # before their tags exist
     parser.add_argument("--release-branch")
+    # the public version X.Y.Z (release.ps1 -Version); without it 0.<N>.<--patch> from --build, as up to 0.40
+    parser.add_argument("--version")
     # preflight: every component must be tagged (release.ps1 -DraftRelease)
     parser.add_argument("--require-tags", action="store_true")
     parser.add_argument("--keep-incoming", action="append", default=[])
