@@ -10,4 +10,7 @@
   用法见脚本开头的说明。
 - extras\modavd_extras.dll：截图库，自动化工具用它不经 adb 直接取实例的画面。
   不用手动打开，也别挪走（工具按这个位置找它）；按 LGPL-3.0-or-later 发布。
+- mumu-shim\shell\sdk\external_renderer_ipc.dll：给只认 MuMu 截图接口的工具用的兼容外壳。
+  单独装的 MAA 要连 ModAVD 的实例，在 MAA 里把 MuMu 路径填成本目录下的 mumu-shim 文件夹。
+  别挪走，也别改文件名；按 LGPL-3.0-or-later 发布。
 

@@ -41,12 +41,12 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 默认只在本地执行到隐私扫描。SDK 和管理器包通过参数指定，源码树、源码基准、说明和许可证目录等外部输入用参数或本机配置给（见 [tools/pubrel/README.md](tools/pubrel/README.md)「外部输入」）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> -ImeApk <modavd-ime.apk> -ExtrasDll <modavd_extras.dll>
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> -ImeApk <modavd-ime.apk> -ExtrasDll <modavd_extras.dll> -MumuShim <external_renderer_ipc.dll>
 ```
 
-`-ImeApk`、`-ExtrasDll` 在 `release.ps1` 的参数里是可选的，但宿主输入法 APK 和截图库的哈希都钉在 `tools/pubrel/config/components.SHA256SUMS.txt` 里，钉了没给就停，所以 0.39.0 起打包这两项都必须给。
+`-ImeApk`、`-ExtrasDll`、`-MumuShim` 在 `release.ps1` 的参数里是可选的，但宿主输入法 APK、截图库和 MuMu 兼容外壳的哈希都钉在 `tools/pubrel/config/components.SHA256SUMS.txt` 里，钉了没给就停，所以打包这几项都必须给（截图库 0.39.0 起，外壳从钉上它的那一版起）。
 
-0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。管理器、截图库还没打 tag 时，取它们发版分支头上的提交（见上面「发版分支」和 [tools/pubrel/README.md](tools/pubrel/README.md)「组件还没打 tag 时」）。
+0.39.0 起包里有 ModAVDExtras 的截图库 `extras\modavd_extras.dll`（LGPL-3.0-or-later）：`-ExtrasDll` 给它 Release 里的附件，哈希和版本固定在 `tools/pubrel/config/components.SHA256SUMS.txt` 和 `release_tools.py` 的 `EXTRAS_VERSION`，对不上就停。同一版 ModAVDExtras 的 MuMu 兼容外壳 `external_renderer_ipc.dll` 放成 `mumu-shim\shell\sdk\external_renderer_ipc.dll`（`-MumuShim`），给单独装的 MAA 用：在 MAA 里把 MuMu 路径填成 `<ModAVD 根目录>\mumu-shim`；它和截图库要出自 ModAVDExtras 同一个提交的校验表，截图库钉了它没钉就停。管理器、截图库还没打 tag 时，取它们发版分支头上的提交（见上面「发版分支」和 [tools/pubrel/README.md](tools/pubrel/README.md)「组件还没打 tag 时」）。
 
 1. **组包**：依据已审核的文件政策复制 SDK、桌面 APK、随包脚本 `modavd-bridge.ps1`、说明与许可证，最后写 `modavd-manifest.json`（版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，以及其余每个文件的大小和 SHA-256）。SDK 文件集改变时先复核政策；不在原 SDK 上删除文件。
 2. **主包 ZIP**：`ModAVD-0.34.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录（Mirror 酱按路径比文件，外层文件夹带版本号会让增量等于全量）。文件名带平台，以后可能有 `linux-x64`。条目使用 `/`，7-Zip `-mcu=on`，中文文件名带 UTF-8 标志。完成后不再替换 ZIP 内的单个文件；任何改动都重新走完整流程。

@@ -45,6 +45,7 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 | 管理器（`-Manager`） | ModAVDManager 的 Release 附件 `ModAVDManager-<版本>-win-x64.zip` |
 | 宿主输入法（`-ImeApk`） | ModAVDHostIME 的 Release 附件 `modavd-ime.apk`；不给就不带 |
 | 截图库（`-ExtrasDll`） | ModAVDExtras 的 Release 附件 `modavd_extras.dll`，放成 `extras\modavd_extras.dll`；不给就不带 |
+| MuMu 兼容外壳（`-MumuShim`） | 同一版 ModAVDExtras 的 Release 附件 `external_renderer_ipc.dll`，放成 `mumu-shim\shell\sdk\external_renderer_ipc.dll`；只能和 `-ExtrasDll` 一起给 |
 | 三个公开仓库的克隆（`ManagerRepo`、`ImeRepo`、`ExtrasRepo`） | 只读 tag，不管当前检出哪个分支：先 `git fetch upstream --tags` |
 | 私有隐私规则（`PrivateRules`） | 维护者自己的 `privacy-private-rules.json`，放在仓库外，绝不提交（见下面「隐私规则」） |
 
@@ -66,7 +67,7 @@ python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.4
 再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果表贴进 `config/changes.md` 的「发布前回归」。
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll>
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll> -MumuShim <下载的 external_renderer_ipc.dll>
 ```
 
 默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\mas40-v0.41.0`。
@@ -85,7 +86,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
   （管理器看 `internal/buildinfo/buildinfo.go`，截图库看 `CMakeLists.txt`），给进来的文件要和那个提交上的
   `release/<版本>.SHA256SUMS.txt` 对上。预检和组包的输出里写着「NOT TAGGED YET」和取的提交。
 - `-Manager` 给本机从那个提交编的包（ModAVDManager 的 `build.ps1` 加 `mkzip`，同一份源码编出的字节相同）；
-  `-ExtrasDll` 给那个提交的 CI 产物（换一个 MSVC 编出的字节就不同，本机编的对不上）。
+  `-ExtrasDll`、`-MumuShim` 给那个提交的 CI 产物 `windows-libs` 里的两个 DLL（换一个 MSVC 编出的字节就不同，本机编的对不上）。
 - 包里记的是版本号和提交，`SOURCES.txt` 和 `modavd-src.tar.xz` 打没打 tag 都一样。回归用的就是这个输出；
   发布时先把 tag 打在记下的提交上，不重新打包。
 - `-DraftRelease` 只收组件都打了 tag 的包。
@@ -103,7 +104,8 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 | `-Baseline` | 源码基准（`Baseline`），见「外部输入」 |
 | `-Package` / `-Apk` | 已审核的说明/许可证目录（`LicensePackage`）、桌面 APK（`LauncherApk`） |
 | `-ImeApk` | 宿主输入法 APK，放成 `components\modavd-ime.apk`；默认空，即不带。包里每个 APK 都要在 `config/components.SHA256SUMS.txt` 固定 SHA-256：没固定的被拒，固定过的漏带或内容不同也被拒（漏带会让增量更新删掉用户机器上的文件）。预检还查 NOTICE.txt 里有它的条目。固定文件每行 `<小写 sha256>  components/<文件名>`（两个空格，不分大小写也不能重名；`Get-FileHash` 的输出要先转小写）。固定是全局的：IME 一旦写进去，重新打包 mas35 以前的构建要临时改回。另外要在 `-ImeRepo` 某个 tag 的 `release/<版本>.SHA256SUMS.txt` 里找得到这个 APK（列成 `modavd-ime.apk`），源码包放的就是那个 tag |
-| `-ExtrasDll` | ModAVDExtras 的截图库，放成 `extras\modavd_extras.dll`（0.39.0 起；MAA 这类工具从 ModAVD 根目录的 `extras\` 载入它，路径不变）；默认空，即不带。和 APK 一样固定在 `config/components.SHA256SUMS.txt`（那一行是 `<小写 sha256>  extras/modavd_extras.dll`，`components/` 以外只许这一个路径），对不上就停，固定了没给也停；版本固定在 `release_tools.py` 的 `EXTRAS_VERSION`：`-ExtrasRepo` 的 tag `v<EXTRAS_VERSION>` 下的 `release/<版本>.SHA256SUMS.txt` 要把这个 DLL 列成 `modavd_extras.dll`，源码包放的就是那个 tag。DLL 是 LGPL-3.0-or-later：NOTICE 条目在 `config/notice-additions.*`，预检还查许可证包里有 `LICENSES\LGPL-3.0.txt`、`LICENSES\GPL-3.0.txt`（换行统一成 LF 后的 SHA-256 是 `LGPL_TEXTS`）。换一版截图库就改 `EXTRAS_VERSION` 和固定的那一行 |
+| `-ExtrasDll` | ModAVDExtras 的截图库，放成 `extras\modavd_extras.dll`（0.39.0 起；MAA 这类工具从 ModAVD 根目录的 `extras\` 载入它，路径不变）；默认空，即不带。和 APK 一样固定在 `config/components.SHA256SUMS.txt`（那一行是 `<小写 sha256>  extras/modavd_extras.dll`，`components/` 以外只许它和下面 MuMu 兼容外壳的路径），对不上就停，固定了没给也停；版本固定在 `release_tools.py` 的 `EXTRAS_VERSION`：`-ExtrasRepo` 的 tag `v<EXTRAS_VERSION>` 下的 `release/<版本>.SHA256SUMS.txt` 要把这个 DLL 列成 `modavd_extras.dll`，源码包放的就是那个 tag。DLL 是 LGPL-3.0-or-later：NOTICE 条目在 `config/notice-additions.*`，预检还查许可证包里有 `LICENSES\LGPL-3.0.txt`、`LICENSES\GPL-3.0.txt`（换行统一成 LF 后的 SHA-256 是 `LGPL_TEXTS`）。换一版截图库就改 `EXTRAS_VERSION` 和固定的那一行（MuMu 兼容外壳那一行一起换） |
+| `-MumuShim` | ModAVDExtras 的 MuMu 兼容外壳，放成 `mumu-shim\shell\sdk\external_renderer_ipc.dll`（单独装的 MAA 只认 MuMu 的截图接口，会到 MuMu 路径下载入 `shell\sdk\external_renderer_ipc.dll`；用户在 MAA 里把 MuMu 路径填成 `<ModAVD 根目录>\mumu-shim`）；默认空，即不带，只能和 `-ExtrasDll` 一起给。和截图库同一版：`-ExtrasRepo` 同一个提交的 `release/<EXTRAS_VERSION>.SHA256SUMS.txt` 要把它列成 `external_renderer_ipc.dll`。固定在 `config/components.SHA256SUMS.txt`（`<小写 sha256>  mumu-shim/shell/sdk/external_renderer_ipc.dll`）；截图库固定了而它没固定，预检就停，所以两个总是一起带。NOTICE 条目、许可证全文的检查和截图库相同。这是 MAA、MaaFramework 原生支持 ModAVD 以前的过渡办法；以后从包里拿掉时要记得，增量更新会把用户根目录里的这个文件删掉（AUTO-MAS 往同一路径拷的那份也一样） |
 | `-ExtrasRepo` | ModAVDExtras 的克隆（`ExtrasRepo`；不带截图库时可以不给）；只读 tag 和 `upstream` 的发版分支，都没取下来就停 |
 | `-Manager` | 必填，`ModAVDManager-<版本>-win-x64.zip`：ModAVDManager 的 Release 附件，或者还没打 tag 时从发版分支编的。包和里面的 `ModAVD.exe`、`tools/modavd.exe` 都要和 `-ManagerRepo` 里 tag `v<版本>`（没有 tag 时是发版分支头）的 `release/<版本>.SHA256SUMS.txt` 一致，包里的两个 exe 就取自它；NOTICE 里的 Go 版本取那个提交的 go.mod |
 | `-ManagerRepo` / `-ImeRepo` | 两个公开仓库的克隆（`ManagerRepo`、`ImeRepo`；不带输入法时 `-ImeRepo` 可以不给）；管理器读 tag 和 `upstream` 的发版分支，输入法只读 tag，没取下来就停 |
