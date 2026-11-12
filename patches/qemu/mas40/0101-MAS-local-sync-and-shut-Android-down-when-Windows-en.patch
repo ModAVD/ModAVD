@@ -1,8 +1,8 @@
-From 9c6280919f24df98d527581d6a7ad4d95e3f0d4d Mon Sep 17 00:00:00 2001
+From 5d99d72b2b08f35249d66d929ee4277accd533f7 Mon Sep 17 00:00:00 2001
 From: qiyinxi <qiyinxi@foxmail.com>
 Date: Wed, 11 Nov 2026 23:33:44 +0100
-Subject: [PATCH] MAS local: sync and shut Android down when Windows ends a
- headless session
+Subject: [PATCH 101/101] MAS local: sync and shut Android down when Windows
+ ends a headless session
 
 The headless emulator has no window, so Windows does not tell it that the
 session is ending (logoff, restart, shutdown). The console control handler
@@ -498,7 +498,7 @@ index 5a84d83f8..dcf1a72e1 100644
         android-emu
         android-emu-base
 diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
-index 90e3932ae..e3fa7df1d 100644
+index 71047b87c..8f3855c3e 100644
 --- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
 +++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
 @@ -33,6 +33,7 @@
@@ -669,7 +669,7 @@ index 90e3932ae..e3fa7df1d 100644
                                             ? QString::fromUtf8("（正在关机…）")
                                             : QString()));
      }
-@@ -4662,261 +4623,14 @@ void EmulatorQtWindow::slot_adbWarningMessageAccepted() {
+@@ -4714,261 +4675,14 @@ void EmulatorQtWindow::slot_adbWarningMessageAccepted() {
      }
  }
  
@@ -935,7 +935,7 @@ index 90e3932ae..e3fa7df1d 100644
  }
  
  void EmulatorQtWindow::hideForSafeShutdown() {
-@@ -4939,19 +4653,6 @@ void EmulatorQtWindow::hideForSafeShutdown() {
+@@ -4991,19 +4705,6 @@ void EmulatorQtWindow::hideForSafeShutdown() {
      mOverlay.hide();
  }
  
@@ -955,7 +955,7 @@ index 90e3932ae..e3fa7df1d 100644
  // Windows logging off, restarting or shutting down sends WM_QUERYENDSESSION
  // to every top-level window and ends the process after WM_ENDSESSION. Qt
  // agrees at once and quits, which stops the guest as if the power were cut.
-@@ -5021,43 +4722,19 @@ void EmulatorQtWindow::endSession(bool ending) {
+@@ -5073,43 +4774,19 @@ void EmulatorQtWindow::endSession(bool ending) {
          if (!safeShutdownInProgress()) {
              dinfo("Safe toolbar shutdown: Windows is ending the session without asking");
              mToolWindow->beginLeanSafeShutdown(false);
@@ -1004,7 +1004,7 @@ index 90e3932ae..e3fa7df1d 100644
      // we need to run it only once, so don't ever reset this
      if (mStartedAdbStopProcess) {
 diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
-index 8b9ced518..3f94b0c26 100644
+index 90a2d34ec..86ebf87f0 100644
 --- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
 +++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
 @@ -72,6 +72,9 @@ class CarClusterWindow;
@@ -1025,7 +1025,7 @@ index 8b9ced518..3f94b0c26 100644
      bool safeShutdownInProgress() const;
      // Windows ending the session: WM_QUERYENDSESSION (returns whether to
      // refuse it) and WM_ENDSESSION (|ending| is its wParam).
-@@ -570,10 +572,6 @@ private:
+@@ -574,10 +576,6 @@ private:
                       android::emulation::FilePusher::Result result);
  
      void runAdbShellPowerDownAndQuit();
@@ -1036,7 +1036,7 @@ index 8b9ced518..3f94b0c26 100644
      void setVisibleExtent(QBitmap bitMap);
      Qt::CursorShape getCursorShape(bool mouseGrabbed);
  
-@@ -761,13 +759,11 @@ private:
+@@ -768,13 +766,11 @@ private:
      std::unique_ptr<SwipeGesture> mSwipeGesture;
      bool mStartedAdbStopProcess;
  
@@ -2063,6 +2063,3 @@ index 000000000..aad29eb8c
 +    adb.complete(0, 0);
 +    EXPECT_TRUE(host.tasks.empty());
 +}
--- 
-2.54.0.windows.1
-

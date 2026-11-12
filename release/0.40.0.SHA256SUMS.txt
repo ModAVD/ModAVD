@@ -1,0 +1,2 @@
+3db06f13266712bc7d85e1aa22b0d0819351cfb76d6e7ef9099aa6af5efe00e6  ModAVD-0.40.0-sources.zip
+2762617d6ac49809f5ba3fdacc83cda01902f5f90fdcdbc2f5f7793191233d9f  ModAVD-0.40.0-win-x64.zip

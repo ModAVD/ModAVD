@@ -41,7 +41,7 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # its version here: tag v<EXTRAS_VERSION> of the ModAVDExtras checkout (--extras-repo) must list that SHA-256 for
 # modavd_extras.dll in release/<version>.SHA256SUMS.txt, and the source bundle archives that tag (see extras_release).
 EXTRAS_DLL = "extras/modavd_extras.dll"
-EXTRAS_VERSION = "0.1.1"
+EXTRAS_VERSION = "0.1.2"
 # The license texts the NOTICE entry of EXTRAS_DLL points to: SHA-256 with LF line endings of LICENSES/<name> in the
 # license package (the texts from gnu.org; ModAVDExtras' own LICENSE / COPYING are the same licenses).
 LGPL_TEXTS = {"LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",

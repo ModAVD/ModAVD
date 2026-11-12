@@ -1,0 +1,118 @@
+From 310c0b6b5e5e941fa809c6fbd7fb3454adc19230 Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 21:57:05 +0800
+Subject: [PATCH 066/101] file-win32: preserve direct I/O alignment and
+ propagate read errors
+
+Keep the original aligned iovecs for uncached handles. Return signed I/O errors through the worker and reserve zero padding for real EOF.
+
+Change-Id: I31b5178f6a5c3452ba2dce3cade58374f82db321
+---
+ block/file-win32.c | 41 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 30 insertions(+), 11 deletions(-)
+
+diff --git a/block/file-win32.c b/block/file-win32.c
+index f460872a0..6b736583d 100644
+--- a/block/file-win32.c
++++ b/block/file-win32.c
+@@ -80,7 +80,7 @@ typedef struct BDRVRawState {
+  */
+ #define RAW_WIN32_BOUNCE_MAX (64 * 1024)
+ 
+-static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
++static ssize_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+ {
+     OVERLAPPED ov;
+     DWORD ret, ret_count = 0;
+@@ -96,7 +96,13 @@ static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+         ret = ReadFile(aiocb->hfile, buf, len, &ret_count, &ov);
+     }
+     if (!ret) {
+-        ret_count = 0;
++        /* Only ERROR_HANDLE_EOF is a short read. Other errors must reach
++         * aio_worker(), rather than being turned into successful zeroes. */
++        if (!(aiocb->aio_type & QEMU_AIO_WRITE) &&
++            GetLastError() == ERROR_HANDLE_EOF) {
++            return 0;
++        }
++        return -EIO;
+     }
+     if (!(aiocb->aio_type & QEMU_AIO_WRITE) && ret_count) {
+         iov_from_buf(aiocb->aio_iov, aiocb->aio_niov, 0, buf, ret_count);
+@@ -110,17 +116,20 @@ static size_t handle_aiocb_rw_bounce(RawWin32AIOData *aiocb, void *buf)
+  * Returns the number of bytes handles or -errno in case of an error. Short
+  * reads are only returned if the end of the file is reached.
+  */
+-static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
++static ssize_t handle_aiocb_rw(RawWin32AIOData *aiocb)
+ {
+     size_t offset = 0;
+     int i;
+ 
+-    if (aiocb->aio_niov > 1 && aiocb->aio_nbytes <= RAW_WIN32_BOUNCE_MAX) {
++    /* The block layer aligned the original iovecs for direct I/O. A heap
++     * bounce buffer has no such guarantee, so keep those iovecs intact. */
++    if (!(aiocb->bs->open_flags & BDRV_O_NOCACHE) &&
++        aiocb->aio_niov > 1 && aiocb->aio_nbytes <= RAW_WIN32_BOUNCE_MAX) {
+         void *buf = g_try_malloc(aiocb->aio_nbytes);
+         if (buf) {
+-            offset = handle_aiocb_rw_bounce(aiocb, buf);
++            ssize_t count = handle_aiocb_rw_bounce(aiocb, buf);
+             g_free(buf);
+-            return offset;
++            return count;
+         }
+     }
+ 
+@@ -140,7 +149,11 @@ static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
+                            len, &ret_count, &ov);
+         }
+         if (!ret) {
+-            ret_count = 0;
++            if (!(aiocb->aio_type & QEMU_AIO_WRITE) &&
++                GetLastError() == ERROR_HANDLE_EOF) {
++                break;
++            }
++            return -EIO;
+         }
+         if (ret_count != len) {
+             offset += ret_count;
+@@ -168,12 +181,16 @@ static int aio_worker(void *arg)
+ {
+     RawWin32AIOData *aiocb = arg;
+     ssize_t ret = 0;
+-    size_t count;
++    ssize_t count;
+ 
+     switch (aiocb->aio_type & QEMU_AIO_TYPE_MASK) {
+     case QEMU_AIO_READ:
+         count = handle_aiocb_rw(aiocb);
+-        if (count < aiocb->aio_nbytes) {
++        if (count < 0) {
++            ret = count;
++            break;
++        }
++        if ((size_t)count < aiocb->aio_nbytes) {
+             /* A short read means that we have reached EOF. Pad the buffer
+              * with zeros for bytes after EOF. */
+             iov_memset(aiocb->aio_iov, aiocb->aio_niov, count,
+@@ -181,7 +198,7 @@ static int aio_worker(void *arg)
+ 
+             count = aiocb->aio_nbytes;
+         }
+-        if (count == aiocb->aio_nbytes) {
++        if ((size_t)count == aiocb->aio_nbytes) {
+             ret = 0;
+         } else {
+             ret = -EINVAL;
+@@ -189,7 +206,9 @@ static int aio_worker(void *arg)
+         break;
+     case QEMU_AIO_WRITE:
+         count = handle_aiocb_rw(aiocb);
+-        if (count == aiocb->aio_nbytes) {
++        if (count < 0) {
++            ret = count;
++        } else if ((size_t)count == aiocb->aio_nbytes) {
+             ret = 0;
+         } else {
+             ret = -EINVAL;

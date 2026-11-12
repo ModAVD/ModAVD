@@ -1,0 +1,317 @@
+From 68826965443d70797adb176156084f8632cf834e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 15:15:55 +0100
+Subject: [PATCH 072/101] MAS local: harden toolbar shutdown and window
+ navigation
+
+Place the navigation column in the reserved viewport margin with a black surface, add native dark title-bar attributes, and keep the full-toolbar and non-Windows paths unchanged. Start the external shutdown watchdog before guest power-down, add the main-loop exit fallback, and preserve console-requested exits.
+
+Change-Id: I6e4a2c8f0b7d9e1a3c5f7b2d4e6a8c0f1b3d5e7
+---
+ .../android/skin/qt/emulator-container.cpp    | 21 ++++++++-
+ .../src/android/skin/qt/emulator-container.h  |  1 +
+ .../android/skin/qt/emulator-qt-window.cpp    | 43 ++++++++-----------
+ .../src/android/skin/qt/emulator-qt-window.h  |  2 -
+ .../src/android/skin/qt/tool-window.cpp       | 15 +++++--
+ .../android/skin/qt/windows-native-window.cpp | 22 ++++++++++
+ .../android/skin/qt/windows-native-window.h   |  3 ++
+ 7 files changed, 76 insertions(+), 31 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 6b95332fb..6ba9f193e 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -25,6 +25,8 @@
+ #include <QScrollBar>     // for QScrollBar
+ #include <QStyle>         // for QStyle
+ #include <QStyleFactory>  // for QStyleFactory
++#include <QStyleHints>
++#include <QTimer>
+ #include <QVector2D>      // for QVector2D
+ #include <algorithm>      // for min, find, max
+ #include <functional>     // for __base
+@@ -437,13 +439,30 @@ void EmulatorContainer::resizeEvent(QResizeEvent* event) {
+ 
+ bool EmulatorContainer::viewportEvent(QEvent* event) {
+     const bool handled = QScrollArea::viewportEvent(event);
+-    if (event->type() == QEvent::Resize) {
++    if (event->type() == QEvent::Resize && ToolWindow::inWindowNav() &&
++        mEmulatorWindow->toolWindow()) {
+         mEmulatorWindow->toolWindow()->dockMainWindow();
+     }
+     return handled;
+ }
+ 
+ void EmulatorContainer::showEvent(QShowEvent* event) {
++#ifdef _WIN32
++    if (ToolWindow::inWindowNav()) {
++        setDarkTitleBar(effectiveWinId());
++        if (!mDarkTitleBarConnected) {
++            mDarkTitleBarConnected = true;
++            QObject::connect(QGuiApplication::styleHints(),
++                             &QStyleHints::colorSchemeChanged, this, [this] {
++                                 QTimer::singleShot(0, this, [this] {
++                                     if (ToolWindow::inWindowNav()) {
++                                         setDarkTitleBar(effectiveWinId());
++                                     }
++                                 });
++                             });
++        }
++    }
++#endif
+ // Disable the minimize and maximize buttons on OSX. See the comment in the
+ // constructor for an explanation of why this is necessary.
+ #ifdef __APPLE__
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index baa3f73d3..de9cda358 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -116,6 +116,7 @@ private:
+     QList<QEvent::Type> mEventBuffer;
+     QTimer mResizeTimer;
+     bool mRotating = false;
++    bool mDarkTitleBarConnected = false;
+     std::unique_ptr<android::base::RaiiEventListener<
+             android::DisplayPowerModeNotificationSupport,
+             android::DisplayPowerModeChangeEvent>>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 8a51581f1..159c1ba36 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -796,15 +796,6 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+             startSafeShutdownSync();
+         }
+     });
+-    mSafeShutdownGraceTimer.setSingleShot(true);
+-    mSafeShutdownGraceTimer.setInterval(3000);
+-    QObject::connect(&mSafeShutdownGraceTimer, &QTimer::timeout, this, [this] {
+-        if (mSafeShutdownState == SafeShutdownState::GuestStopped &&
+-            isMainThreadRunning()) {
+-            LOG(WARNING) << "Guest is shut down but qemu did not exit; forcing exit";
+-            forceCloseNow();
+-        }
+-    });
+     QObject::connect(this, &EmulatorQtWindow::requestUpdate, this,
+                      &EmulatorQtWindow::slot_requestUpdate);
+     QObject::connect(this, &EmulatorQtWindow::setDeviceGeometry, this,
+@@ -1206,16 +1197,17 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
+     }
+ 
+     if (!isMainThreadRunning()) {
+-        if (auto* modal = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+-            modal->done(QMessageBox::No);
+-        }
+         mSafeShutdownTimeout.stop();
+-        mSafeShutdownGraceTimer.stop();
++        if (mSafeShutdownState == SafeShutdownState::StoppingGuest ||
++            mSafeShutdownState == SafeShutdownState::Syncing) {
++            System::get()->waitAndKillSelf(3);
++        }
+         mSafeShutdownState = SafeShutdownState::Idle;
+     }
+ 
+     // make sure to use the close button on tool window
+-    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked()) {
++    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked() &&
++        !ToolWindow::inWindowNav()) {
+         mToolWindow->on_close_button_clicked();
+         event->ignore();
+         return;
+@@ -2542,7 +2534,8 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
+ }
+ 
+ void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
+-    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked()) {
++    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked() &&
++        !ToolWindow::inWindowNav()) {
+         mToolWindow->on_close_button_clicked();
+     }
+     QSemaphoreReleaser semReleaser(semaphore);
+@@ -4153,10 +4146,9 @@ void EmulatorQtWindow::toggleZoomMode() {
+ }
+ 
+ void EmulatorQtWindow::recenterFocusPoint() {
+-    const QSize viewport = mContainer.viewportSize();
+-    mContainer.horizontalScrollBar()->setValue(mFocus.x() * viewport.width() -
++    mContainer.horizontalScrollBar()->setValue(mFocus.x() * width() -
+                                                mViewportFocus.x());
+-    mContainer.verticalScrollBar()->setValue(mFocus.y() * viewport.height() -
++    mContainer.verticalScrollBar()->setValue(mFocus.y() * height() -
+                                              mViewportFocus.y());
+ 
+     mFocus = QPointF();
+@@ -4243,7 +4235,7 @@ void EmulatorQtWindow::zoomTo(const QPoint& focus, const QSize& rectSize) {
+     // scale x" through the emulator console. At scale = 1, the device
+     // should be at a 1:1 pixel mapping with the monitor. We allow going to
+     // twice this size.
+-    double scale = ((double)guestAreaSize().width() /
++    double scale = ((double)size().width() /
+                     (double)mBackingSurface->bitmap->size().width());
+ 
+     // Calculate the "ideal" zoom factor, which would perfectly frame this
+@@ -4251,9 +4243,11 @@ void EmulatorQtWindow::zoomTo(const QPoint& focus, const QSize& rectSize) {
+     // pick the smaller one. Adding 20 accounts for the scroll bars
+     // potentially cutting off parts of the selection
+     double maxZoom = mZoomFactor * 2.0 / scale;
+-    double idealWidthZoom = mZoomFactor * (double)mContainer.width() /
++    const QSize zoomArea = ToolWindow::inWindowNav() ? guestAreaSize()
++                                                      : mContainer.size();
++    double idealWidthZoom = mZoomFactor * (double)zoomArea.width() /
+                             (double)(rectSize.width() + 20);
+-    double idealHeightZoom = mZoomFactor * (double)mContainer.height() /
++    double idealHeightZoom = mZoomFactor * (double)zoomArea.height() /
+                              (double)(rectSize.height() + 20);
+ 
+     simulateSetZoom(std::min({idealWidthZoom, idealHeightZoom, maxZoom}));
+@@ -4563,6 +4557,7 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ 
+     mSafeShutdownState = SafeShutdownState::StoppingGuest;
++    System::get()->waitAndKillSelf(25);
+     updateWindowTitle();
+     mSafeShutdownTimeout.start();
+     auto* adb = *mAdbInterface;
+@@ -4609,7 +4604,6 @@ void EmulatorQtWindow::startSafeShutdownSync() {
+ 
+     mSafeShutdownState = SafeShutdownState::Syncing;
+     mSafeShutdownTimeout.stop();
+-    mSafeShutdownGraceTimer.stop();
+     auto* adb = *mAdbInterface;
+     if (!adb) {
+         LOG(WARNING) << "Safe toolbar shutdown could not run guest sync";
+@@ -4649,7 +4643,6 @@ void EmulatorQtWindow::forceCloseNow() {
+     mSafeShutdownState = SafeShutdownState::Forced;
+     updateWindowTitle();
+     mSafeShutdownTimeout.stop();
+-    mSafeShutdownGraceTimer.stop();
+     queueQuitEvent();
+     System::get()->waitAndKillSelf(3);
+ }
+@@ -5035,7 +5028,9 @@ bool EmulatorQtWindow::addMultiDisplayWindow(uint32_t id,
+             LOG(INFO) << "DisplayId: " << id << ", Title: " << tId;
+             snprintf(title, 16, "Display %d", tId);
+             mMultiDisplayWindow[id]->setWindowTitle(title);
+-            QRect geoTool = mContainer.frameGeometry();
++            QRect geoTool = ToolWindow::inWindowNav()
++                                     ? mContainer.frameGeometry()
++                                     : mToolWindow->geometry();
+             mMultiDisplayWindow[id]->move(
+                     geoTool.right() + (mMultiDisplayWindow.size() - 1) * 100,
+                     geoTool.top());
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 9215e4e6e..dd00fb9ec 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -751,13 +751,11 @@ private:
+     enum class SafeShutdownState {
+         Idle,
+         StoppingGuest,
+-        GuestStopped,
+         Syncing,
+         Forced,
+     };
+     SafeShutdownState mSafeShutdownState = SafeShutdownState::Idle;
+     QTimer mSafeShutdownTimeout;
+-    QTimer mSafeShutdownGraceTimer;
+ 
+     bool mSkinRemoved{false};
+     bool mFrameAlways;  // true = no floating emulator
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 335efc13f..54ff07c54 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -669,6 +669,7 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         // Hide everything else; all_apps_button remains the home button for
+         // AVDs that use AllAppsForHomeTray.
+         const QPushButton* keep[] = {
++                mToolsUi->close_button,    mToolsUi->minimize_button,
+                 mToolsUi->back_button,     mToolsUi->home_button,
+                 mToolsUi->all_apps_button,
+         };
+@@ -712,8 +713,10 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         mToolsUi->back_button->setToolTip(QString::fromUtf8("返回"));
+         mToolsUi->home_button->setToolTip(QString::fromUtf8("主页"));
+         mToolsUi->all_apps_button->setToolTip(QString::fromUtf8("主页"));
+-        mToolsUi->close_button->hide();
+-        mToolsUi->minimize_button->hide();
++        if (inWindowNav()) {
++            mToolsUi->close_button->hide();
++            mToolsUi->minimize_button->hide();
++        }
+     }
+ 
+     if (inWindowNav()) {
+@@ -964,6 +967,11 @@ void ToolWindow::createWindowNavColumn() {
+         return;
+     }
+     mWindowNavColumn = new QWidget(mEmulatorWindow->containerWindow());
++    mWindowNavColumn->setObjectName(QStringLiteral("windowNavColumn"));
++    mWindowNavColumn->setStyleSheet(QStringLiteral(
++            "#windowNavColumn { background: #000000; }"
++            "#windowNavColumn QPushButton { background: #000000; color: #ffffff; border: 0; }"
++            "#windowNavColumn QPushButton:hover, #windowNavColumn QPushButton:pressed { background: #333333; }"));
+     mWindowNavColumn->setFocusPolicy(Qt::NoFocus);
+     auto* layout = new QVBoxLayout(mWindowNavColumn);
+     layout->setContentsMargins(10, 0, 10, 0);
+@@ -995,7 +1003,6 @@ void ToolWindow::createWindowNavColumn() {
+                                                  : mToolsUi->home_button,
+               &ToolWindow::on_home_button_pressed,
+               &ToolWindow::on_home_button_released);
+-    layout->addStretch(1);
+     mWindowNavColumn->show();
+     positionWindowNavColumn();
+ }
+@@ -1006,7 +1013,7 @@ void ToolWindow::positionWindowNavColumn() {
+     }
+     auto* container = mEmulatorWindow->containerWindow();
+     const QRect vr = container->viewport()->geometry();
+-    mWindowNavColumn->setGeometry(vr.right() - 53, vr.top(), 54, vr.height());
++    mWindowNavColumn->setGeometry(vr.right() + 1, vr.top(), 54, vr.height());
+     mWindowNavColumn->raise();
+ }
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+index 836bf63f6..dddb91b18 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+@@ -27,3 +27,25 @@ int numHeldMouseButtons() {
+     }
+     return numHeld;
+ }
++
++void setDarkTitleBar(WId wid) {
++    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
++    if (!dwm || !wid) {
++        return;
++    }
++    using SetAttr = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
++    auto setAttr = reinterpret_cast<SetAttr>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
++    if (!setAttr) {
++        FreeLibrary(dwm);
++        return;
++    }
++    const BOOL dark = TRUE;
++    if (FAILED(setAttr(reinterpret_cast<HWND>(wid), 20, &dark, sizeof(dark)))) {
++        setAttr(reinterpret_cast<HWND>(wid), 19, &dark, sizeof(dark));
++    }
++    const DWORD black = 0x00000000;
++    const DWORD white = 0x00ffffff;
++    setAttr(reinterpret_cast<HWND>(wid), 35, &black, sizeof(black));
++    setAttr(reinterpret_cast<HWND>(wid), 36, &white, sizeof(white));
++    FreeLibrary(dwm);
++}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
+index 6a77749f3..39cc14fbb 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.h
+@@ -12,7 +12,10 @@
+ 
+ #pragma once
+ 
++#include <qwindowdefs.h>
++
+ #ifdef __cplusplus
+ extern "C"
+ #endif
+ int numHeldMouseButtons();
++void setDarkTitleBar(WId wid);
