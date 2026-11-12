@@ -1,0 +1,137 @@
+From 65d04101a99d0a6860ec5b267284b6ddb7d98d3a Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 3 Nov 2026 10:20:02 +0100
+Subject: [PATCH 082/101] MAS local: resume a paused VM and sync first in the
+ lean safe shutdown
+
+Two gaps in the lean toolbar's safe shutdown:
+
+- With the VM paused (console "avd pause", gRPC setVmState), the
+  guest's adbd does not answer. The shutdown command waited out its
+  15 s, the fallback sync its 5 s, and the emulator quit without a
+  sync, losing what the guest had not written back yet. Resume a
+  paused VM when the shutdown starts, on the QEMU main loop as gRPC
+  does. Only a plain pause is undone: a debugger stop, a snapshot save
+  or load and an I/O error stay as they are. The manager and AUTO-MAS
+  never pause an instance.
+- The guest was synced only when Android had not powered off within
+  15 s, and by then adbd may be gone. A process killed while Android
+  powers off (Task Manager, Windows ending the session) lost what was
+  written before the close. Sync first, then ask Android to power off;
+  a failed sync still goes on to the shutdown command, which has its
+  own fallback. This adds one adb run and a sync, usually under a
+  second, before Android starts shutting down; the windows still go
+  away at once.
+
+The 15 s timer, the fallback sync and the 25 s kill guard are
+unchanged.
+
+Change-Id: Ic14a782704871cbd40bb1b75125f992f2afcdcbd
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 56 ++++++++++++++++++-
+ .../src/android/skin/qt/emulator-qt-window.h  |  1 +
+ 2 files changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 8d5769ea8..95c6258a6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -82,6 +82,7 @@
+ #include "host-common/multi_display_agent.h"
+ #include "host-common/opengl/emugl_config.h"
+ #include "host-common/snapshot_common.h"
++#include "host-common/vm_operations.h"
+ 
+ #define DEBUG 1
+ 
+@@ -4626,6 +4627,21 @@ static void registerWithAdbServer() {
+     });
+ }
+ 
++// A paused VM (console "avd pause", gRPC setVmState) runs no vCPU, so the
++// guest's adbd does not answer: the sync and shutdown commands would wait out
++// their limits and the emulator would quit without a sync. Resume it first, on
++// the QEMU main loop as gRPC does: the transition takes the I/O lock. Only a
++// plain pause is undone; a debugger stop, a snapshot save or load and an I/O
++// error are left as they are.
++static void resumePausedVmForSafeShutdown() {
++    const auto* vm = getConsoleAgents()->vm;
++    if (!vm || vm->getRunState() != QEMU_RUN_STATE_PAUSED) {
++        return;
++    }
++    dinfo("Safe toolbar shutdown: the VM is paused; resuming it first");
++    android::base::ThreadLooper::runOnMainLooper([vm] { vm->vmResume(); });
++}
++
+ void EmulatorQtWindow::startSafeShutdown() {
+     if (mSafeShutdownState != SafeShutdownState::Idle) {
+         return;
+@@ -4636,10 +4652,11 @@ void EmulatorQtWindow::startSafeShutdown() {
+         AutoLock lock(safeShutdownLock());
+         sSafeShutdownWindow = this;
+     }
+-    dinfo("Safe toolbar shutdown: asking Android to power off");
++    dinfo("Safe toolbar shutdown: syncing the guest, then asking Android to power off");
+     System::get()->waitAndKillSelf(25);
+     updateWindowTitle();
+     mSafeShutdownTimeout.start();
++    resumePausedVmForSafeShutdown();
+     auto* adb = *mAdbInterface;
+     if (!adb) {
+         dwarning("Safe toolbar shutdown has no ADB interface; syncing guest");
+@@ -4648,6 +4665,43 @@ void EmulatorQtWindow::startSafeShutdown() {
+     }
+ 
+     registerWithAdbServer();
++    // Sync before Android starts shutting down: what was written before the
++    // close is then on disk even if the process is killed while Android powers
++    // off (Task Manager, Windows ending the session), and it no longer hangs
++    // on the fallback sync after the timeout, when adbd may be gone.
++    auto command = adb->runAdbCommand(
++            {"wait-for-device", "shell", "sync"},
++            [this](const android::emulation::OptionalAdbCommandResult& result) {
++                const bool success = result && result->exit_code == 0;
++                AutoLock lock(safeShutdownLock());
++                if (sSafeShutdownWindow != this) {
++                    return;
++                }
++                QMetaObject::invokeMethod(
++                        this,
++                        [this, success] {
++                            if (mSafeShutdownState !=
++                                SafeShutdownState::StoppingGuest) {
++                                return;
++                            }
++                            if (success) {
++                                dinfo("Safe toolbar shutdown: guest synced; asking Android to power off");
++                            } else {
++                                dwarning("Safe toolbar shutdown guest sync failed; asking Android to power off anyway");
++                            }
++                            requestGuestPowerOff();
++                        },
++                        Qt::QueuedConnection);
++            },
++            5000);
++    if (!command) {
++        dwarning("Safe toolbar shutdown guest sync could not start; asking Android to power off anyway");
++        requestGuestPowerOff();
++    }
++}
++
++void EmulatorQtWindow::requestGuestPowerOff() {
++    auto* adb = *mAdbInterface;
+     auto command = adb->runAdbCommand(
+             {"wait-for-device", "shell", "su", "0", "setprop", "sys.powerctl",
+              "shutdown"},
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index f277c9da0..c0e005105 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -563,6 +563,7 @@ private:
+                      android::emulation::FilePusher::Result result);
+ 
+     void runAdbShellPowerDownAndQuit();
++    void requestGuestPowerOff();
+     void startSafeShutdownSync();
+     void setVisibleExtent(QBitmap bitMap);
+     Qt::CursorShape getCursorShape(bool mouseGrabbed);

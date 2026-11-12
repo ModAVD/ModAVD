@@ -1,0 +1,83 @@
+From 14d97eed4f7d4a8166a9c8ed0de70c4e7160607d Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 1 Nov 2026 16:02:48 +0100
+Subject: [PATCH 074/101] MAS local: use MuMu light toolbar colors
+
+Use MuMu's light gray title bar and navigation column with dark controls, hover/pressed/disabled states, and matching resize background. Windows 11 receives the explicit DWM caption and text colors; Windows 10 keeps its supported light title-bar rendering.
+
+Change-Id: I8c4e2a6b0d9f1a3c5e7b2d4f6a8c0e1b3d5f7a9
+---
+ .../src/android/skin/qt/emulator-container.cpp    |  2 +-
+ .../src/android/skin/qt/tool-window.cpp           | 15 +++++++++++----
+ .../src/android/skin/qt/windows-native-window.cpp | 10 +++++-----
+ 3 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index aac55b0fa..c6668f706 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -86,7 +86,7 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+                             Qt::WindowCloseButtonHint)
+                          : Qt::WindowFlags()));
+     if (lean) {
+-        setStyleSheet(QStringLiteral("EmulatorContainer { background: #000000; }"));
++        setStyleSheet(QStringLiteral("EmulatorContainer { background: #E8E8E8; }"));
+     }
+ #endif
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index cc37b46c9..791d3001b 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -969,9 +969,11 @@ void ToolWindow::createWindowNavColumn() {
+     mWindowNavColumn = new QWidget(mEmulatorWindow->containerWindow());
+     mWindowNavColumn->setObjectName(QStringLiteral("windowNavColumn"));
+     mWindowNavColumn->setStyleSheet(QStringLiteral(
+-            "#windowNavColumn { background: #000000; }"
+-            "#windowNavColumn QPushButton { background: #000000; color: #ffffff; border: 0; }"
+-            "#windowNavColumn QPushButton:hover, #windowNavColumn QPushButton:pressed { background: #333333; }"));
++            "#windowNavColumn { background: #E8E8E8; }"
++            "#windowNavColumn QPushButton { background: #E8E8E8; color: #141414; border: 0; }"
++            "#windowNavColumn QPushButton:hover { background: #D9D9D9; }"
++            "#windowNavColumn QPushButton:pressed { background: #CCCCCC; }"
++            "#windowNavColumn QPushButton:disabled { color: #A0A0A0; background: #E8E8E8; }"));
+     mWindowNavColumn->setFocusPolicy(Qt::NoFocus);
+     auto* layout = new QVBoxLayout(mWindowNavColumn);
+     layout->setContentsMargins(10, 0, 10, 0);
+@@ -1793,7 +1795,12 @@ void ToolWindow::updateTheme(const QString& styleSheet) {
+             [&] { mTouchpadWindow.get()->setStyleSheet(styleSheet); });
+     setStyleSheet(styleSheet);
+     if (mWindowNavColumn) {
+-        mWindowNavColumn->setStyleSheet(styleSheet);
++        mWindowNavColumn->setStyleSheet(QStringLiteral(
++                "#windowNavColumn { background: #E8E8E8; }"
++                "#windowNavColumn QPushButton { background: #E8E8E8; color: #141414; border: 0; }"
++                "#windowNavColumn QPushButton:hover { background: #D9D9D9; }"
++                "#windowNavColumn QPushButton:pressed { background: #CCCCCC; }"
++                "#windowNavColumn QPushButton:disabled { color: #A0A0A0; background: #E8E8E8; }"));
+         remaskButtons();
+     }
+ }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+index dddb91b18..ff3e110c9 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-native-window.cpp
+@@ -39,13 +39,13 @@ void setDarkTitleBar(WId wid) {
+         FreeLibrary(dwm);
+         return;
+     }
+-    const BOOL dark = TRUE;
++    const BOOL dark = FALSE;
+     if (FAILED(setAttr(reinterpret_cast<HWND>(wid), 20, &dark, sizeof(dark)))) {
+         setAttr(reinterpret_cast<HWND>(wid), 19, &dark, sizeof(dark));
+     }
+-    const DWORD black = 0x00000000;
+-    const DWORD white = 0x00ffffff;
+-    setAttr(reinterpret_cast<HWND>(wid), 35, &black, sizeof(black));
+-    setAttr(reinterpret_cast<HWND>(wid), 36, &white, sizeof(white));
++    const DWORD caption = 0x00e8e8e8;
++    const DWORD text = 0x00000000;
++    setAttr(reinterpret_cast<HWND>(wid), 35, &caption, sizeof(caption));
++    setAttr(reinterpret_cast<HWND>(wid), 36, &text, sizeof(text));
+     FreeLibrary(dwm);
+ }

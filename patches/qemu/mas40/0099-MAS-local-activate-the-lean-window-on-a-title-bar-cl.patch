@@ -1,7 +1,8 @@
 From 226b5b5567978287489cf23036cd71eac9cda99e Mon Sep 17 00:00:00 2001
 From: qiyinxi <qiyinxi@foxmail.com>
 Date: Wed, 11 Nov 2026 02:44:10 +0100
-Subject: [PATCH] MAS local: activate the lean window on a title bar click
+Subject: [PATCH 099/101] MAS local: activate the lean window on a title bar
+ click
 
 DefWindowProc answers WM_MOUSEACTIVATE with MA_NOACTIVATE for HTCAPTION;
 a normal window is activated and raised later, by DefWindowProc's own
@@ -39,6 +40,3 @@ index ed0eb8a1f..c9de2fcc6 100644
          case WM_NCLBUTTONDOWN:
          case WM_NCLBUTTONDBLCLK: {
              // A double click on the title bar does not maximize; it is just
--- 
-2.54.0.windows.1
-
