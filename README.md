@@ -34,7 +34,7 @@
 
 和官方模拟器相比，已发布的 0.39.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，让一部分只有 arm64 版本的游戏也能跑，其他只有 arm64 的游戏仍需逐个验证。实测过哪些游戏见[已实测的游戏](#已实测的游戏)。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 
-版本号从 `0.32.1` 起写成 `0.<构建号>.<重新打包次数>`：0 表示还在内测，构建号就是 mas-N。当前版本 `0.39.0`（构建号 mas-39）。
+版本号写成 `0.<Y>.<Z>`，0 表示还在内测。从 `0.32.1` 到 0.40，Y 就是模拟器构建号 mas-N、Z 是重新打包次数；0.41 起版本号单独往上加，构建号另记在发布说明第一句和包里的 `modavd-manifest.json`。
 
 这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)。
 

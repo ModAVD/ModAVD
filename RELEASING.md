@@ -5,11 +5,15 @@
 
 ## 版本号
 
-从 0.32.1 起，版本号是 `0.<N>.<P>`：0 表示内测阶段，N 是构建号（`source.properties` 的 `Pkg.BuildId=mas-N`），P 是不重编、只重新打包的次数。
-tag 是 `v0.<N>.<P>`，标题是 `ModAVD mas-<N>（0.<N>.<P>）`；Release 说明第一句写明基于的 Google AOSP Android Emulator 版本。
+版本号 `0.<N>.<P>` 单独往上加（`release.ps1 -Version`）：0 表示内测阶段，比如只重新打包 0.41.0 就发 0.41.1。
+模拟器构建号照旧是 mas-N（`source.properties` 的 `Pkg.BuildId=mas-N`），和版本号无关，记在 `modavd-manifest.json` 和公告机读行的 `build` 里，比如 0.41.0 是 mas-40。
+tag 是 `v0.<N>.<P>`，标题是 `ModAVD 0.<N>.<P>`；Release 说明第一句写明构建号和基于的 Google AOSP Android Emulator 版本。
+0.32.1 到 0.40 是旧规矩：N 就是构建号，P 是不重编、只重新打包的次数，标题 `ModAVD mas-<N>（0.<N>.<P>）`。
 mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.32.1` 是 mas32 原样重新打包成新格式。
 
 ## 发版分支
+
+下面的 `release/0.<N>` 按版本号取（0.41.x 在 `release/0.41`），不按构建号。
 
 发版在单独的分支上做，和 main 上的开发分开（[#175](https://github.com/ModAVD/ModAVD/issues/175)）：
 
