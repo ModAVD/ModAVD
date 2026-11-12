@@ -139,3 +139,38 @@ You should have received a copy of the GNU Lesser General Public License
 supplements (LICENSES\GPL-3.0.txt) along with this library. If not, see
 <https://www.gnu.org/licenses/>.
 
+===========================================================
+Notices for file(s):
+(package root) mumu-shim/shell/sdk/external_renderer_ipc.dll
+The notices is included for the library: ModAVDExtras MuMu compatibility shell (external_renderer_ipc.dll)
+
+===========================================================
+[ModAVD]
+mumu-shim/shell/sdk/external_renderer_ipc.dll is ModAVD's compatibility
+shell (ModAVDExtras), written by the ModAVD project: MAA loads it when its
+MuMu path is set to the mumu-shim folder, and it reads an instance's frames
+from the emulator's shared memory. Its exported function names match the
+ones MaaCore looks up in MuMu's external_renderer_ipc.dll; it contains no
+code from MuMu or MaaCore. Apart from the Microsoft C runtime, which it
+links statically, it contains no third-party code. Source code:
+https://github.com/ModAVD/ModAVDExtras; the source of this build is
+ModAVDExtras in modavd-src.tar.xz, in the sources ZIP of the same GitHub
+Release.
+
+Copyright 2026 qiyinxi
+
+This library is free software: you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This library is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public
+License for more details.
+
+You should have received a copy of the GNU Lesser General Public License
+(LICENSES\LGPL-3.0.txt) and of the GNU General Public License that it
+supplements (LICENSES\GPL-3.0.txt) along with this library. If not, see
+<https://www.gnu.org/licenses/>.
+

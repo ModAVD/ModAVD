@@ -13,8 +13,10 @@ Public License, version 3 or (at your option) any later version
   ModAVDHostIME/   the host input method components\modavd-ime.apk
                    (org.modavd.ime).
                    Public repository: https://github.com/ModAVD/ModAVDHostIME
-  ModAVDExtras/    the capture library extras\modavd_extras.dll (from 0.39.0).
-                   Not AGPL: it is licensed under the GNU Lesser General Public
+  ModAVDExtras/    the capture library extras\modavd_extras.dll (from 0.39.0)
+                   and the MuMu compatibility shell
+                   mumu-shim\shell\sdk\external_renderer_ipc.dll.
+                   Not AGPL: they are licensed under the GNU Lesser General Public
                    License, version 3 or later (LGPL-3.0-or-later); the full
                    texts are ModAVDExtras/LICENSE (LGPL-3.0) and
                    ModAVDExtras/COPYING (GPL-3.0), see also ModAVDExtras/NOTICE.
@@ -62,7 +64,8 @@ Copyright 2026 qiyinxi
                    公开仓库：https://github.com/ModAVD/ModAVDManager
   ModAVDHostIME/   宿主输入法 components\modavd-ime.apk（org.modavd.ime）。
                    公开仓库：https://github.com/ModAVD/ModAVDHostIME
-  ModAVDExtras/    截图库 extras\modavd_extras.dll（0.39.0 起）。它不是 AGPL，按 GNU Lesser
+  ModAVDExtras/    截图库 extras\modavd_extras.dll（0.39.0 起）和 MuMu 兼容外壳
+                   mumu-shim\shell\sdk\external_renderer_ipc.dll。它们不是 AGPL，按 GNU Lesser
                    General Public License 第 3 版或任何更新的版本授权（LGPL-3.0-or-later），
                    全文是 ModAVDExtras/LICENSE（LGPL-3.0）和 ModAVDExtras/COPYING（GPL-3.0），
                    另见 ModAVDExtras/NOTICE。

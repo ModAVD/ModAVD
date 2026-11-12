@@ -4,6 +4,9 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^mas[1-9][0-9]*$')][string]$Build,
     [Parameter(Mandatory)][string]$Sdk,
     [ValidateRange(0, 999)][int]$Patch = 0,
+    # public version X.Y.Z, counted on its own since 0.41 (the build is only recorded next to it); with it -Patch is
+    # left out. Without it the version is 0.<N>.<Patch> from -Build, as up to 0.40.
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version,
     # Paths not given here come from the local configuration (tools\local.ps1, keys in tools\local.example.psd1);
     # one that is in neither place stops the run. AOSP emulator source tree (EmuSrc).
     [string]$EmuSrc,
@@ -12,7 +15,7 @@ param(
     [string]$OutputName,
     # source baseline: unchanged source archives are reused after checking their frozen hashes (Baseline)
     [string]$Baseline,
-    # reviewed 说明.txt and LICENSES\ (LicensePackage); preflight refuses a package without LICENSES\AGPL-3.0.txt or
+    # reviewed LICENSES\ (LicensePackage); preflight refuses a package without LICENSES\AGPL-3.0.txt or
     # with another text in it (SHA-256 after CRLF -> LF, release_tools.py AGPL_SHA256)
     [string]$Package,
     # ModAVD release checkout: the bundled scripts (package/) and the bridge source (bridge/) are taken from its HEAD,
@@ -25,7 +28,7 @@ param(
     # checkouts of the public repositories, fetched from upstream with tags: the manager ZIP and the IME APK are checked
     # against the release checksums at their tags, and the source bundle archives those commits (ManagerRepo / ImeRepo;
     # ExtrasRepo below). A manager or extras version that has no tag yet is taken at the head of upstream's
-    # release/0.<N> (N from -Build), which already carries its release/<version>.SHA256SUMS.txt: the package can be
+    # release/<X>.<Y> (X.Y of this ModAVD version), which already carries its release/<version>.SHA256SUMS.txt: the package can be
     # built and tested before the components are tagged, and the serial release tags exactly those commits.
     # -DraftRelease refuses a package with untagged components.
     [string]$ManagerRepo,
@@ -39,9 +42,14 @@ param(
     [string]$ImeApk = '',
     # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll; '' = not shipped. Pinned like
     # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo;
-    # before the tag, the head of its release/0.<N>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
+    # before the tag, the head of its release/<X>.<Y>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
     # archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
     [string]$ExtrasDll = '',
+    # ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, shipped as mumu-shim\shell\sdk\external_renderer_ipc.dll
+    # (MAA's MuMu path set to <root>\mumu-shim finds it there); '' = not shipped. Only with -ExtrasDll, from the same
+    # ModAVDExtras release: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same commit must list both. Pinned like
+    # -ExtrasDll, and while that is pinned this one must be too.
+    [string]$MumuShim = '',
     [string]$ExtrasRepo,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
@@ -70,10 +78,17 @@ $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot '..\local.ps1')
 # pwsh -File 把 `-KeepIncoming a,b` 当成一个字符串
 $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-# 公开版本号 0.<N>.<P>：0 是内测阶段，N 是构建号，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
+# 公开版本号 0.41 起单独往上加，用 -Version 给；构建号 mas-N 只记在清单和公告机读行的 build 里。
+# 不给 -Version 照 0.40 及以前的旧规矩：0.<N>.<P>，N 是构建号，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
 $number = [int]$Build.Substring(3)
-$version = "0.$number.$Patch"
-$defaultName = if ($Patch) { "$Build-p$Patch" } else { $Build }
+# PowerShell 的变量名不分大小写：下面的 $version 就是参数 $Version，先把给的值另存
+$givenVersion = $Version
+if ($givenVersion -and $Patch) { throw '-Version 已经是完整版本号，不再和 -Patch 一起用' }
+$versionArgs = @(if ($givenVersion) { '--version', $givenVersion })
+$version = if ($givenVersion) { $givenVersion } else { "0.$number.$Patch" }
+# 发版分支按公开版本号的前两位：0.41.x 在 release/0.41
+$releaseBranch = 'release/' + (($version -split '\.')[0..1] -join '.')
+$defaultName = if ($givenVersion) { "$Build-v$givenVersion" } elseif ($Patch) { "$Build-p$Patch" } else { $Build }
 if (-not $OutputName) { $OutputName = $defaultName }
 if ($OutputName -notin @($defaultName, "$defaultName-check")) { throw "OutputName 只能是 $defaultName 或 $defaultName-check" }
 
@@ -132,12 +147,13 @@ function Step([int]$StepNumber, [string]$Title, [scriptblock]$Action) {
 # preflight validates the SDK, version, release texts, immutable baseline assets, the license package (AGPL-3.0 full text),
 # disk budget and snapshot before any deletion.
 if (-not $Snapshot) { $Snapshot = Join-Path $Sdk 'build-info.json' }
-$texts = @('--patch', $Patch, '--changes', $Changes, '--changelog', $Changelog)
+$texts = @('--patch', $Patch) + $versionArgs + @('--changes', $Changes, '--changelog', $Changelog)
 $componentArgs = @(if ($ImeApk) { '--ime-apk', $ImeApk, '--ime-repo', $ImeRepo })
 if ($ExtrasDll) { $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo) }
+if ($MumuShim) { $componentArgs += @('--mumu-shim', $MumuShim) }
 # 还没打 tag 的管理器、截图库取各自仓库 upstream 的发版分支头（release_tools.py 的 component_ref）
 $public = @('--repository', $Repository, '--manager', $Manager, '--manager-repo', $ManagerRepo,
-    '--release-branch', "release/0.$number") + $protectArgs
+    '--release-branch', $releaseBranch) + $protectArgs
 # 建草稿的那一轮只收已经打了 tag 的组件
 $tagArgs = @(if ($DraftRelease) { '--require-tags' })
 Run-Python (@('preflight') + $tagArgs + @('--build', $Build, '--sdk', $Sdk, '--snapshot', $Snapshot, '--min-free-gb', $MinFreeGB,
@@ -190,7 +206,7 @@ Step 8 '隐私扫描（含全部源码包成员，加上仓库外的私有规则
 if ($DraftRelease) {
     Write-Host '[9] 创建 GitHub 草稿（不会发布）'
     $upload = @($zip, $sourcesZip, (Join-Path $out 'SHA256SUMS.txt'))
-    & gh release create "v$version" --draft --repo ModAVD/ModAVD --target "release/0.$number" --title "ModAVD mas-$number（$version）" --notes-file (Join-Path $out 'release-notes.md') @upload
+    & gh release create "v$version" --draft --repo ModAVD/ModAVD --target $releaseBranch --title "ModAVD $version" --notes-file (Join-Path $out 'release-notes.md') @upload
     if ($LASTEXITCODE -ne 0) { throw "步骤 9（创建草稿）失败：gh 返回 $LASTEXITCODE；未自动重试，请检查草稿状态" }
 }
 Write-Host "完成：$out（v$version）"

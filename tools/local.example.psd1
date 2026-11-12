@@ -27,7 +27,7 @@
     ExtrasRepo     = ''
     # 源码基准目录：没变的源码归档逐个核对冻结的哈希后复用（做法见 tools\pubrel\README.md「外部输入」）
     Baseline       = ''
-    # 已审核的说明和许可证目录（说明.txt、LICENSES\）
+    # 已审核的许可证目录（里面有 LICENSES\）
     LicensePackage = ''
     # 随包的桌面 APK，放成 components\<文件名>；哈希固定在 tools\pubrel\config\components.SHA256SUMS.txt
     LauncherApk    = ''

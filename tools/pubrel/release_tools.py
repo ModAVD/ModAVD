@@ -25,8 +25,10 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 import checks
 IDENTITY = checks.MAINTAINER
-# Public version 0.<N>.<P>. mas30 and mas32 were published as 37.2.10-masN, which counts as 0.N.0,
-# so builds before this one can only be repackaged (P >= 1), e.g. mas32 -> 0.32.1.
+# Public version X.Y.Z. Up to 0.40 it was 0.<N>.<P> from the build mas<N> (P: repack count); since then the version is
+# given on its own (--version, release.ps1 -Version) and the build is only recorded next to it ("build" in the manifest
+# and the machine line). Without --version the old rule still applies: mas30 and mas32 were published as
+# 37.2.10-masN, which counts as 0.N.0, so builds before this one can only be repackaged (P >= 1), e.g. mas32 -> 0.32.1.
 FIRST_NEW_BUILD = 33
 MANIFEST = "modavd-manifest.json"
 # Binary packages carry the platform (a Linux build may follow); the source bundle does not.
@@ -41,53 +43,38 @@ COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # its version here: tag v<EXTRAS_VERSION> of the ModAVDExtras checkout (--extras-repo) must list that SHA-256 for
 # modavd_extras.dll in release/<version>.SHA256SUMS.txt, and the source bundle archives that tag (see extras_release).
 EXTRAS_DLL = "extras/modavd_extras.dll"
-EXTRAS_VERSION = "0.1.2"
+EXTRAS_VERSION = "0.1.3"
+# ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, from the same ModAVDExtras release as EXTRAS_DLL:
+# MAA loads shell\sdk\external_renderer_ipc.dll under the MuMu path it is given, so users who run MAA on its own set
+# that path to <ModAVD root>\mumu-shim (an interim measure until MAA / MaaFramework support ModAVD natively). It goes
+# in only with -MumuShim, and only together with -ExtrasDll: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same
+# ModAVDExtras commit has to list both. Pinned in COMPONENT_SUMS like EXTRAS_DLL; while EXTRAS_DLL is pinned, so must
+# it be (see pinned_components).
+MUMU_SHIM = "mumu-shim/shell/sdk/external_renderer_ipc.dll"
+# package path -> its name in ModAVDExtras' release/<version>.SHA256SUMS.txt
+EXTRAS_FILES = {EXTRAS_DLL: "modavd_extras.dll", MUMU_SHIM: "external_renderer_ipc.dll"}
 # The license texts the NOTICE entry of EXTRAS_DLL points to: SHA-256 with LF line endings of LICENSES/<name> in the
 # license package (the texts from gnu.org; ModAVDExtras' own LICENSE / COPYING are the same licenses).
 LGPL_TEXTS = {"LGPL-3.0.txt": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
               "GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"}
-# What shipped after the P3 review of the NOTICE and 说明.txt (see extend_texts): files added to entries already
-# there, the entries appended to Part 2 (NOTICE.txt / NOTICE.csv), and a section for 说明.txt.
+# What shipped after the P3 review of the NOTICE (see extend_texts): files added to entries already there, and the
+# entries appended to Part 2 (NOTICE.txt / NOTICE.csv).
 NOTICE_MORE_FILES = {
     "ModAVD program icon": ["(package root) ModAVD.exe"],  # named so by ICON_NOTICE_EDITS
     "ModAVD scripts and documents": ["(package root) tools/modavd-bridge.ps1"],
 }
 # Files the reviewed NOTICE still names but the package no longer ships: fetching the components, collecting a problem
 # report and copying the system info are in the manager and tools/modavd.exe, and the batch files and scripts that did
-# them are gone (ModAVD/ModAVD#45). Each is taken out of its entry, where it has to be exactly once.
+# them are gone (ModAVD/ModAVD#45). The readme 说明.txt is gone too: the manager and the docs site say how to use it
+# (the whole-root update deletes it from a root, as a file of the old manifest the new package lacks). Each is taken out
+# of its entry, where it has to be exactly once.
 NOTICE_GONE_FILES = {
     "ModAVD scripts and documents": ["(package root) tools/fetch-components.ps1", "(package root) tools/collect-info.ps1",
-                                     "(package root) 补全组件.bat", "(package root) 收集问题信息.bat"],
+                                     "(package root) 补全组件.bat", "(package root) 收集问题信息.bat",
+                                     "(package root) 说明.txt"],
 }
 NOTICE_ADDITIONS = HERE / "config/notice-additions.txt"
 NOTICE_ADDITIONS_CSV = HERE / "config/notice-additions.csv"
-README_TOOLS = HERE / "config/readme-tools.txt"
-# Passages of the reviewed 说明.txt that told the user to run the batch files, and what they say now (ModAVD/ModAVD#45).
-# Each old passage has to be there exactly once (see extend_texts).
-README_EDITS = [
-    ("2. 双击「补全组件.bat」。\n"
-     "   它会先显示 Google《Android 软件开发套件许可协议》，输入 y 回车表示同意，\n"
-     "   然后下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
-     "   中途断了，再运行一次会接着下。看到「完成」就好了。\n",
-     "2. 双击 ModAVD.exe（管理器），点上方提示里的「补全组件」\n"
-     "   （顶栏「电脑检查」的「组件」一项下面也有）。\n"
-     "   先选下载源（拿不准就选「自动」），看完 Google《Android 软件开发套件许可协议》后同意，\n"
-     "   它就下载 adb 和 Android 14 系统镜像（约 1.5 GB）。\n"
-     "   中途断了，再点一次会接着下。装好后「电脑检查」的「组件」一项会通过。\n"
-     "   也可以在这个文件夹里运行 tools\\modavd.exe components fetch，做的事一样。\n"),
-    ("先别关模拟器，双击「收集问题信息.bat」，桌面上会生成一个问题包 zip。\n",
-     "先别关模拟器，在管理器的「设置」→「组件与问题反馈」里点「收集问题信息」\n"
-     "（或者在这个文件夹里运行 tools\\modavd.exe collect-info），桌面上会生成一个问题包 zip。\n"),
-    ("ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥、宿主输入法、补全组件和问题收集脚本）按\n",
-     "ModAVD 自己的程序和脚本（管理器、命令行、arm64 执行桥和装它的脚本、宿主输入法）按\n"),
-    ("程序图标是同人创作（《明日方舟》的艾雅法拉，角色版权归上海鹰角网络所有），\n不随本包的任何许可证授权。\n",
-     "程序图标是 ModAVD 自己的图标，不随本包的任何许可证授权。\n"),
-    # a manual upgrade over a 0.38.1 or older folder leaves the batch files and scripts behind (ModAVD/ModAVD#140)
-    ("  不要删 avd 文件夹，游戏和登录状态都在里面。\n",
-     "  不要删 avd 文件夹，游戏和登录状态都在里面。\n"
-     "  从 0.38.1 及更早的版本覆盖升级的，包根「补全组件」「收集问题信息」「复制配置信息」三个批处理\n"
-     "  和 tools 里的 fetch-components.ps1、collect-info.ps1、report-config.ps1 不再用到，可以自己删。\n"),
-]
 # The scripts entry of the reviewed NOTICE still speaks of batch files; the package has one .ps1 left
 # (ModAVD/ModAVD#140). NOTICE.txt passages, each exactly once, and the entry's license name in NOTICE.csv.
 SCRIPT_NOTICE_EDITS = [
@@ -97,6 +84,9 @@ SCRIPT_NOTICE_EDITS = [
      "themselves the source code.\n",
      "Source code: https://github.com/ModAVD/ModAVD/tree/main/package; the .ps1\nfiles listed above are themselves "
      "the source code.\n"),
+    # and its documents are only the NOTICE now (说明.txt is in NOTICE_GONE_FILES)
+    ("The documents of ModAVD (说明.txt, NOTICE.txt, NOTICE.csv):\n",
+     "The documents of ModAVD (NOTICE.txt, NOTICE.csv):\n"),
 ]
 SCRIPT_CSV_LICENSE = ("AGPL-3.0-or-later (scripts and batch files) / Apache-2.0 (documents)",
                       "AGPL-3.0-or-later (scripts) / Apache-2.0 (documents)")
@@ -160,7 +150,7 @@ OWN_SOURCES_IME_TEXT = """\
                             https://github.com/ModAVD/ModAVDHostIME
 """
 OWN_SOURCES_EXTRAS_TEXT = """\
-     ModAVDExtras/          extras\\modavd_extras.dll（截图库）：ModAVDExtras {extras_tag}（提交 {extras_commit}），即它的 Release 附件 modavd_extras.dll 的源码。
+     ModAVDExtras/          extras\\modavd_extras.dll（截图库）{shim}：ModAVDExtras {extras_tag}（提交 {extras_commit}），即它的 Release 附件 modavd_extras.dll{shim_asset} 的源码。
                             按 LGPL-3.0-or-later 发布（不是 AGPL），全文是其中的 LICENSE（LGPL-3.0）和 COPYING（GPL-3.0），
                             另见其中的 NOTICE。用 CMake 和 MSVC 编（cmake -A x64，--config Release，/Brepro）。
                             https://github.com/ModAVD/ModAVDExtras
@@ -277,6 +267,18 @@ def release_version(build, patch):
     return f"0.{number}.{patch}"
 
 
+def public_version(args):
+    """The public version of this release (no leading v): --version when given, which leaves --patch out (a nonzero
+    --patch with it is refused), else release_version(--build, --patch) as up to 0.40."""
+    version = getattr(args, "version", None)
+    if not version:
+        return release_version(args.build, getattr(args, "patch", 0))
+    checks.version_key("v" + version)
+    if int(getattr(args, "patch", 0) or 0):
+        raise ValueError("--version gives the whole version; leave --patch out (release.ps1 -Patch)")
+    return version
+
+
 def package_name(version):
     """Main ZIP stem and its top-level folder: ModAVD-0.33.0-win-x64."""
     return f"ModAVD-{version}-{PLATFORM}"
@@ -310,7 +312,9 @@ def read_changes(path):
 
 
 def read_changelog(path, version, number):
-    """Entries newest first, starting at the release being built; validated with the public checks."""
+    """Entries newest first, starting at the release being built; validated with the public checks. Each build is an
+    emulator build number (up to 0.40 also the middle of the version, since then counted on its own); the release's
+    own entry has the build being packaged."""
     entries = load(path)
     if not isinstance(entries, list):
         raise ValueError("changelog.json must be a list")
@@ -319,8 +323,8 @@ def read_changelog(path, version, number):
         if not isinstance(e, dict) or set(e) != {"version", "build", "min_automas", "changes"}:
             raise ValueError(f"changelog entry needs exactly version/build/min_automas/changes: {e}")
         key = checks.version_key(e["version"])
-        if key[1] != e["build"]:
-            raise ValueError(f"changelog build differs from version: {e['version']}")
+        if not checks.is_build(e["build"]):
+            raise ValueError(f"changelog build must be a positive integer (Pkg.BuildId mas-N): {e['version']}")
         if seen and key >= seen[-1]:
             raise ValueError("changelog.json must be sorted newest first without duplicates")
         seen.append(key)
@@ -401,11 +405,18 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
     """
     pinned = read_sums(pinned_path)
     # NTFS ignores case: two names that differ only in case would be one file in the package
-    if (any(not (re.fullmatch(r"components/[^/]+", rel) or rel == EXTRAS_DLL) for rel in pinned)
+    if (any(not (re.fullmatch(r"components/[^/]+", rel) or rel in EXTRAS_FILES) for rel in pinned)
             or len({r.casefold() for r in pinned}) != len(pinned)):
-        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name> or {EXTRAS_DLL} "
-                         "(case-insensitive)")
+        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name>, {EXTRAS_DLL} "
+                         f"or {MUMU_SHIM} (case-insensitive)")
+    # the shell comes with the capture library, from the same ModAVDExtras release
+    if EXTRAS_DLL in pinned and MUMU_SHIM not in pinned:
+        raise ValueError(f"{MUMU_SHIM} is not pinned in {Path(pinned_path).name} next to {EXTRAS_DLL}: add the SHA-256 of "
+                         f"external_renderer_ipc.dll from release/<version>.SHA256SUMS.txt of the same ModAVDExtras release")
     ime, extras = getattr(args, "ime_apk", None), getattr(args, "extras_dll", None)
+    shim = getattr(args, "mumu_shim", None)
+    if shim and not extras:
+        raise ValueError("-MumuShim goes with -ExtrasDll: both come from the same ModAVDExtras release")
     given = {"components/" + Path(args.apk).name: Path(args.apk)}
     if ime:
         given["components/" + IME_APK] = Path(ime)
@@ -413,6 +424,8 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
         raise ValueError("desktop APK name collides with the IME APK")
     if extras:
         given[EXTRAS_DLL] = Path(extras)
+    if shim:
+        given[MUMU_SHIM] = Path(shim)
     for rel, src in given.items():
         if not src.is_file():
             raise FileNotFoundError(src)
@@ -422,7 +435,7 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
             raise ValueError(f"{rel} differs from its pinned SHA-256 ({src})")
     missing = sorted(set(pinned) - set(given))
     if missing:
-        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll): {missing}")
+        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll / -MumuShim): {missing}")
     return given
 
 
@@ -459,7 +472,7 @@ def preflight(args):
         safe_rel(s["dir"])
         if not re.fullmatch(r"[0-9a-f]{40}", s["base"]) or not re.fullmatch(r"[0-9a-f]{40}", s["head"]) or revisions.get(s["repo"]) != s["head"]:
             raise ValueError("Patch series and manifest revisions disagree")
-    version = release_version(args.build, args.patch)
+    version = public_version(args)
     number = build_number(args.build)
     sdk = Path(args.sdk) / "emulator"
     props = (sdk / "source.properties").read_text(encoding="utf-8-sig")
@@ -476,13 +489,14 @@ def preflight(args):
         src = baseline / "source" / name
         if sha(src) != expected:
             raise ValueError(f"Baseline asset hash differs: {name}")
-    for name in ["说明.txt", "LICENSES/NOTICE.txt", "LICENSES/NOTICE.csv"]:
+    for name in ["LICENSES/NOTICE.txt", "LICENSES/NOTICE.csv"]:
         if not (Path(args.package) / name).is_file():
             raise FileNotFoundError(name)
     notice = (Path(args.package) / "LICENSES/NOTICE.txt").read_text(encoding="utf-8-sig")
     check_agpl(args.package)
     components = pinned_components(args)
-    if EXTRAS_DLL in components:
+    lgpl = any(rel in EXTRAS_FILES for rel in components)
+    if lgpl:
         check_lgpl(args.package)
     additions = NOTICE_ADDITIONS.read_text(encoding="utf-8")
     for rel in components:
@@ -494,7 +508,7 @@ def preflight(args):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = checked_sources(args)
     print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
-          f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if EXTRAS_DLL in components else ''}, "
+          f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if lgpl else ''}, "
           f"pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
           f"{describe_sources(own)}")
 
@@ -518,7 +532,7 @@ def go_toolchain(gomod):
 def component_ref(repo, version, branch=None, version_file=None, version_pattern=None):
     """(commit, where, tagged) of release `version` of a component in the checkout `repo`.
 
-    Released: tag v<version>. Not tagged yet, and `branch` given (release/0.<N>, release.ps1 -Build): the head of the
+    Released: tag v<version>. Not tagged yet, and `branch` given (release/<X>.<Y> of the ModAVD version): the head of the
     remote-tracking refs/remotes/upstream/<branch>, which must already be that version (`version_pattern` finds it in
     `version_file`, as the component's release workflow checks at the tag). release/<version>.SHA256SUMS.txt is
     committed before the tag in both cases, so the files are checked the same way; the package records the commit, and
@@ -592,14 +606,14 @@ def ime_release(apk, repo):
                      f"use the APK of a published release and fetch the tags (git -C {repo} fetch upstream --tags)")
 
 
-def extras_release(dll, repo, branch=None):
-    """The ModAVDExtras source of the shipped EXTRAS_DLL in the checkout `repo`: tag v<EXTRAS_VERSION>, or before that
-    tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt there lists this DLL as
-    modavd_extras.dll: the workflows there build the DLL and check it against that list (another MSVC gives other
-    bytes, so the DLL is the one CI built, not a local build)."""
+def extras_release(dll, repo, branch=None, shim=None):
+    """The ModAVDExtras source of the shipped EXTRAS_DLL (and MUMU_SHIM, `shim`) in the checkout `repo`: tag
+    v<EXTRAS_VERSION>, or before that tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt
+    at that one commit lists this DLL as modavd_extras.dll and the shell as external_renderer_ipc.dll, so both are of
+    the same ModAVDExtras version and commit: the workflows there build them and check them against that list (another
+    MSVC gives other bytes, so the files are the ones CI built, not a local build)."""
     if not repo:
         raise ValueError("--extras-dll needs the ModAVDExtras checkout (release.ps1 -ExtrasRepo, local configuration ExtrasRepo)")
-    digest, name = sha(dll), Path(EXTRAS_DLL).name
     commit, tag, is_tagged = component_ref(repo, EXTRAS_VERSION, branch, "CMakeLists.txt",
                                            r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)")
     where = f"{tag}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"
@@ -607,10 +621,16 @@ def extras_release(dll, repo, branch=None):
         listed = parse_sums(git(repo, "show", f"{commit}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"), where)
     except RuntimeError:
         raise ValueError(f"{repo}: no release/{EXTRAS_VERSION}.SHA256SUMS.txt at {tag}") from None
-    if listed.get(name) != digest:
-        raise ValueError(f"{dll} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
+    files = {}
+    for rel, path in [(EXTRAS_DLL, dll), (MUMU_SHIM, shim)]:
+        if not path:
+            continue
+        digest, name = sha(path), EXTRAS_FILES[rel]
+        if listed.get(name) != digest:
+            raise ValueError(f"{path} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
+        files[rel] = digest
     return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": "v" + EXTRAS_VERSION, "commit": commit,
-            "tagged": is_tagged, "sha256": digest}
+            "tagged": is_tagged, "sha256": files[EXTRAS_DLL], "files": files}
 
 
 def public_sources(args):
@@ -619,11 +639,13 @@ def public_sources(args):
     and package/ and bridge/ of the ModAVD release checkout unchanged since its HEAD. With --release-branch the
     manager and the extras library may also be at the head of that branch of their repository, before their tags
     exist (component_ref). assemble records the result in the snapshot, so every later step uses the same revisions."""
-    extras = getattr(args, "extras_dll", None)
+    extras, shim = getattr(args, "extras_dll", None), getattr(args, "mumu_shim", None)
+    if shim and not extras:
+        raise ValueError("-MumuShim goes with -ExtrasDll: both come from the same ModAVDExtras release")
     branch = getattr(args, "release_branch", None)
     own = {"manager": manager_release(args.manager, args.manager_repo, branch),
            "ime": ime_release(args.ime_apk, args.ime_repo) if getattr(args, "ime_apk", None) else None,
-           "extras": extras_release(extras, getattr(args, "extras_repo", None), branch) if extras else None}
+           "extras": extras_release(extras, getattr(args, "extras_repo", None), branch, shim) if extras else None}
     repo = release_repository(args.repository, getattr(args, "protect", None))
     if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
@@ -641,7 +663,8 @@ def describe_sources(own):
     def at(part):
         return part["tag"] if part.get("tagged", True) else f"{part['tag']} (NOT TAGGED YET: release branch head {part['commit'][:12]})"
     ime = f", ModAVDHostIME {own['ime']['tag']}" if own["ime"] else ""
-    extras = f", ModAVDExtras {at(own['extras'])}" if own.get("extras") else ""
+    extras = (f", ModAVDExtras {at(own['extras'])}{' (with the MuMu shell)' if MUMU_SHIM in own['extras'].get('files', {}) else ''}"
+              if own.get("extras") else "")
     return (f"ModAVDManager {at(own['manager'])} (Go {own['manager']['go']}){ime}{extras}, "
             f"ModAVD package/ and bridge/ at {own['modavd']['commit'][:12]}")
 
@@ -684,12 +707,12 @@ def owned(args, create=False):
 def assemble(args):
     out = Path(args.output)
     data = load(args.snapshot)
-    version = release_version(args.build, args.patch)
+    version = public_version(args)
     number = build_number(args.build)
-    current = read_changelog(args.changelog, version, number)[0]
+    current =read_changelog(args.changelog, version, number)[0]
     own = checked_sources(args)
     # Later steps take the public version and the public sources from the output copy of the snapshot.
-    data.update(version=version, patch=int(args.patch or 0), upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
+    data.update(version=version, patch=checks.version_key("v" + version)[2], upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],
                 own=own)
     save(out / "snapshot.json", data)
     sdk = Path(args.sdk) / "emulator"
@@ -709,21 +732,13 @@ def assemble(args):
             copy(sdk / rel, dest / "sdk/emulator" / rel)
     (out / "removed-files.txt").write_text("\n".join(sorted(removed)) + "\n", encoding="utf-8")
     copy_public_files(own, args.manager, dest)
-    pinned = read_sums(COMPONENT_SUMS)
-    for rel, src in pinned_components(args).items():
-        copy(src, dest / rel)
-        # checked again after the copy: the source may have been rebuilt in between. The extras DLL against what
-        # public_sources recorded (the pinned SHA-256).
-        want = own["extras"]["sha256"] if rel == EXTRAS_DLL else pinned[rel]
-        if sha(dest / rel) != want:
-            raise ValueError(f"{rel} in the package differs from its pinned SHA-256")
+    copy_pinned_components(args, own, dest)
     for p in (Path(args.package) / "LICENSES").iterdir():
         if p.is_file():
             copy(p, dest / "LICENSES" / p.name)
-    copy(Path(args.package) / "说明.txt", dest / "说明.txt")
     # The reviewed P3 texts say "37.2.10-mas30": the folder name becomes ModAVD-<version>-<platform>, the product
     # name the new version; the build ID and manifest names stay masN.
-    for text in [dest / "说明.txt", *list((dest / "LICENSES").glob("NOTICE.*"))]:
+    for text in (dest / "LICENSES").glob("NOTICE.*"):
         content = text.read_text(encoding="utf-8-sig").replace("ModAVD-37.2.10-mas30", name).replace("37.2.10-mas30", version)
         content = content.replace("mas-30", f"mas-{number}").replace("mas30", args.build)
         text.write_text(content, encoding="utf-8")
@@ -734,6 +749,18 @@ def assemble(args):
     write_manifest(dest, data)
     print(f"Assembled {sum(p.is_file() for p in dest.rglob('*'))} files including {MANIFEST}; excluded {len(removed)}; "
           f"{describe_sources(own)}")
+
+
+def copy_pinned_components(args, own, dest, pinned_path=COMPONENT_SUMS):
+    """Into the package tree `dest`, at their package paths: the files pinned_components checks. Each is checked again
+    after the copy, as the source may have been rebuilt in between: the ModAVDExtras files against what public_sources
+    recorded for them (`own`), the APKs against their pinned SHA-256."""
+    pinned = read_sums(pinned_path)
+    for rel, src in pinned_components(args, pinned_path).items():
+        copy(src, dest / rel)
+        want = own["extras"]["files"][rel] if rel in EXTRAS_FILES else pinned[rel]
+        if sha(dest / rel) != want:
+            raise ValueError(f"{rel} in the package differs from its pinned SHA-256")
 
 
 def copy_public_files(own, manager, dest):
@@ -757,10 +784,9 @@ def render_csv(rows):
 
 
 def extend_texts(dest, go):
-    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv and 说明.txt up to what this package ships: ICON_NOTICE_EDITS
+    """Bring the P3-reviewed NOTICE.txt / NOTICE.csv up to what this package ships: ICON_NOTICE_EDITS
     (and the icon entry's name and note in NOTICE.csv), SCRIPT_NOTICE_EDITS (and SCRIPT_CSV_LICENSE), NOTICE_GONE_FILES out of their entries, NOTICE_MORE_FILES into entries already there, config/notice-additions.* at the end of Part 2
-    (`go`: the Go version the manager was built with), README_EDITS in 说明.txt and config/readme-tools.txt before its
-    troubleshooting section. Every anchor has to be there exactly once."""
+    (`go`: the Go version the manager was built with). Every anchor has to be there exactly once."""
     path = dest / "LICENSES/NOTICE.txt"
     text = path.read_text(encoding="utf-8-sig")
     for old, new in ICON_NOTICE_EDITS + SCRIPT_NOTICE_EDITS:
@@ -825,17 +851,6 @@ def extend_texts(dest, go):
     if added[0] != rows[0]:
         raise ValueError("config/notice-additions.csv: header differs from NOTICE.csv")
     path.write_text(render_csv(rows + added[1:]), encoding="utf-8")
-
-    path = dest / "说明.txt"
-    text = path.read_text(encoding="utf-8-sig")
-    for old, new in README_EDITS:
-        if text.count(old) != 1:
-            raise ValueError(f"说明.txt: the passage {old.splitlines()[0]!r} not found exactly once")
-        text = text.replace(old, new)
-    anchor = "====================\n出问题怎么办\n"
-    if text.count(anchor) != 1:
-        raise ValueError("说明.txt: the troubleshooting heading not found exactly once")
-    path.write_text(text.replace(anchor, README_TOOLS.read_text(encoding="utf-8") + anchor), encoding="utf-8")
 
 
 def check_notice_coverage(dest):
@@ -1118,18 +1133,21 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
     if sorted(c.lower() for c in columns) != sorted(by_column):
         raise ValueError(f"patches/BASE.md: version table columns {columns} differ from the series {sorted(by_column)}")
     want = [by_column[c.lower()] for c in columns]
+    # The rows are keyed by the build, not by the version: one build can be published under several versions (a
+    # repack, or since 0.41 a release that changes only what is around the emulator, e.g. 0.41.0 on mas-40).
     build_id = f"`Pkg.BuildId=mas-{number}`"
     rows = [i for i in range(head + 2, end) if build_id in cells(lines[i])[0]]
     if len(rows) > 1:
         raise ValueError(f"patches/BASE.md: more than one version row for {build_id}")
-    # Only the first export of a build describes it: a rerun, or a repack of a published build, adds no notes.
+    # Only the first export of a build describes it: a rerun, or another version of a published build, adds no notes.
     first = not rows
     if rows:
         row = cells(lines[rows[0]])
         if row[1:] != want:
             raise ValueError(f"patches/BASE.md: the row for {build_id} names {row[1:]}, this build exports {want}")
-        if version not in row[0]:
-            # a repack of a published build: 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同）
+        # the version as a whole (0.4.0 is not in 0.40.0)
+        if not re.search(rf"(?<![0-9.]){re.escape(version)}(?![0-9])", row[0]):
+            # another version of a published build: 0.37.0（`Pkg.BuildId=mas-37`；0.37.1 相同）
             row[0] = re.sub(r"）$", f"；{version} 相同）", row[0]) if row[0].endswith("）") else f"{row[0]}（{version} 相同）"
             lines[rows[0]] = "| " + " | ".join(row) + " |"
     else:
@@ -1363,12 +1381,15 @@ def sources(args):
 def own_sources_text(own):
     """Section 6 of SOURCES.txt: what modavd-src holds and which public version each part is."""
     m, ime, extras = own["manager"], own["ime"], own.get("extras")
+    shim = bool(extras) and MUMU_SHIM in extras.get("files", {})
     return OWN_SOURCES_TEXT.format(
         name=OWN_SOURCES_NAME, manager_tag=m["tag"], manager_commit=m["commit"][:12], manager_version=m["version"], go=m["go"],
         modavd_commit=own["modavd"]["commit"][:12],
         ime=OWN_SOURCES_IME_TEXT.format(ime_tag=ime["tag"], ime_commit=ime["commit"][:12]) if ime else "",
         extras=OWN_SOURCES_EXTRAS_TEXT.format(
-            extras_tag=extras["tag"], extras_commit=extras["commit"][:12])
+            extras_tag=extras["tag"], extras_commit=extras["commit"][:12],
+            shim="和 mumu-shim\\shell\\sdk\\external_renderer_ipc.dll（MuMu 兼容外壳）" if shim else "",
+            shim_asset="、external_renderer_ipc.dll" if shim else "")
         if extras else "")
 
 
@@ -1561,8 +1582,8 @@ def describe_budget(machine, upper):
 
 def notes_budget_command(args):
     """`notes-budget`: the lengths, while changelog.json and changes.md are being written (no SDK or output needed)."""
-    version = release_version(args.build, args.patch)
-    upstream = sdk_upstream(args.sdk) if args.sdk else "99.99.99"
+    version = public_version(args)
+    upstream =sdk_upstream(args.sdk) if args.sdk else "99.99.99"
     machine, upper = notes_budget(version, build_number(args.build), upstream, args.changes, args.changelog)
     print(f"Release notes v{version}: {describe_budget(machine, upper)}"
           + ("" if args.sdk else "; upstream version assumed 99.99.99 (pass --sdk for the real one)"))
@@ -1738,10 +1759,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "notes-budget", "privacy-release"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
-                 "extras-dll", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
+                 "extras-dll", "mumu-shim", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
         parser.add_argument("--" + name)
-    # release/0.<N>: the manager and the extras library may be at the head of this branch before their tags exist
+    # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
+    # before their tags exist
     parser.add_argument("--release-branch")
+    # the public version X.Y.Z (release.ps1 -Version); without it 0.<N>.<--patch> from --build, as up to 0.40
+    parser.add_argument("--version")
     # preflight: every component must be tagged (release.ps1 -DraftRelease)
     parser.add_argument("--require-tags", action="store_true")
     parser.add_argument("--keep-incoming", action="append", default=[])

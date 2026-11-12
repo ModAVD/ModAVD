@@ -97,16 +97,17 @@ def check_incoming(root):
 
 
 def version_key(value):
-    """v0.<N>.<P>: stage (0 while in testing), build N (Pkg.BuildId mas-N), repack count P."""
+    """v<X>.<Y>.<Z> as numbers, for ordering. Up to 0.40 Y was the emulator build (Pkg.BuildId mas-Y) and Z the repack
+    count; since then the version counts on its own and the build is only the "build" field next to it."""
     m = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value if isinstance(value, str) else "")
     if not m:
         raise ValueError(f"Version must look like v0.33.0: {value!r}")
     return tuple(int(x) for x in m.groups())
 
 
-def build_of(value):
-    """The build number N of v0.<N>.<P>."""
-    return version_key(value)[1]
+def is_build(value):
+    """The emulator build number N of Pkg.BuildId mas-N: a positive integer (not a bool)."""
+    return type(value) is int and value >= 1
 
 
 def check_min_automas(value):
@@ -150,7 +151,7 @@ def check_announcement(text, version=None, build=None):
     if set(data) != {"version", "build", "upstream", "min_automas", "changes"}:
         raise ValueError("Machine line needs exactly version/build/upstream/min_automas/changes")
     key = version_key(data["version"])
-    if data["build"] != key[1] or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(data["upstream"])):
+    if not is_build(data["build"]) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(data["upstream"])):
         raise ValueError("Machine line build/upstream invalid")
     check_min_automas(data["min_automas"])
     check_changes(data["changes"])
@@ -175,8 +176,9 @@ def check_manifest(tree):
     data = json.loads((tree / MANIFEST).read_text(encoding="utf-8"))
     if data.get("schema") != 1 or set(data) != {"schema", "version", "build", "upstream", "platform", "min_automas", "files"}:
         raise ValueError("Manifest fields differ from schema 1")
-    if build_of(data["version"]) != data["build"]:
-        raise ValueError("Manifest build differs from version")
+    version_key(data["version"])
+    if not is_build(data["build"]):
+        raise ValueError(f"Manifest build must be a positive integer (Pkg.BuildId mas-N): {data['build']!r}")
     if not re.fullmatch(r"(?:win|linux)-(?:x64|arm64)", str(data["platform"])):
         raise ValueError(f"Manifest platform invalid: {data['platform']!r}")
     check_min_automas(data["min_automas"])

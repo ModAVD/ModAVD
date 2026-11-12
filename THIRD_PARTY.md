@@ -76,11 +76,12 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 | 文件 | 许可证 |
 |---|---|
 | `components\de.jrpie.android.launcher_57.apk`（µLauncher 0.2.12，F-Droid 发布的原包） | MIT；按它的构建文件，APK 里还有 AndroidX、Material Components、Kotlin 标准库、kotlinx.serialization，都是 Apache-2.0 |
-| `补全组件.bat`、`收集问题信息.bat`、`tools\*.ps1`、`说明.txt`、`LICENSES\NOTICE.*` | Apache-2.0，Copyright 2026 qiyinxi |
+| `补全组件.bat`、`收集问题信息.bat`、`tools\*.ps1`、`LICENSES\NOTICE.*` | Apache-2.0，Copyright 2026 qiyinxi |
 | `ModAVD.exe`（管理器）、`tools\modavd.exe`（命令行、MCP），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接的 Go 运行时和标准库是 BSD-3-Clause；`ModAVD.exe` 的程序图标同上文「程序图标」。源码在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) |
 | `components\modavd-ime.apk`（宿主输入法），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi。源码在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) |
 | `sdk\emulator\resources\modavd\*`（arm64 执行桥：`libmodavd_bridge.so`、`libmodavd_gate.so`、`modavd_bridge.rc`），0.36.0 起 | AGPL-3.0-or-later，Copyright 2026 qiyinxi；`libmodavd_gate.so` 静态链接的 Android NDK 的 LLVM libc++ / libc++abi 是 Apache-2.0 WITH LLVM-exception。源码在本仓库的 [bridge/](bridge/) |
 | `extras\modavd_extras.dll`（截图库），0.39.0 起 | LGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接 Microsoft 的 C 运行库。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) |
+| `mumu-shim\shell\sdk\external_renderer_ipc.dll`（MuMu 兼容外壳） | LGPL-3.0-or-later，Copyright 2026 qiyinxi；静态链接 Microsoft 的 C 运行库，不含 MuMu 或 MaaCore 的代码。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) |
 
 `补全组件.bat` 那一行是 `37.2.10-mas30` 的情况。0.36.0 起，其中包根的 `.bat` 和 `tools\*.ps1`（源码在本仓库的 [package/](package/)）改按 AGPL-3.0-or-later 发布；见 README 的[许可证与源码](README.md#许可证与源码)。0.38.2 起包里不再有 `.bat`，`tools\` 下的脚本只剩装执行桥的 `modavd-bridge.ps1`，补全组件、收集问题信息由管理器和命令行做。
 
