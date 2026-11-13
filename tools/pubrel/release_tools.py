@@ -36,20 +36,22 @@ PLATFORM = "win-x64"
 # The guest half of the host input method channel (mas-35+), shipped as components/<this name>; the name never
 # changes, MAS finds it by name. It goes in only when release.ps1 gets -ImeApk.
 IME_APK = "modavd-ime.apk"
-# Every APK under components/, and EXTRAS_DLL, pinned by SHA-256 (see pinned_components).
+# Every APK under components/, pinned by SHA-256 (see pinned_components).
 COMPONENT_SUMS = HERE / "config/components.SHA256SUMS.txt"
 # ModAVDExtras' capture library (LGPL-3.0-or-later, mas-39+): tools such as MAA load it from <ModAVD root>\extras\, so
-# the path never changes. It goes in only when release.ps1 gets -ExtrasDll. Its SHA-256 is pinned in COMPONENT_SUMS and
-# its version here: tag v<EXTRAS_VERSION> of the ModAVDExtras checkout (--extras-repo) must list that SHA-256 for
-# modavd_extras.dll in release/<version>.SHA256SUMS.txt, and the source bundle archives that tag (see extras_release).
+# the path never changes. Every package carries it (release.ps1 -ExtrasDll): once shipped, a package without it would
+# make the incremental update delete it on users' machines. Nothing about it is pinned here, as for the manager: its
+# version is the one in CMakeLists.txt at the head of the release branch of the ModAVDExtras checkout (--extras-repo),
+# or the tag whose checksums list it, and release/<version>.SHA256SUMS.txt at that commit must list the DLL as
+# modavd_extras.dll; the source bundle archives that commit (see extras_release).
 EXTRAS_DLL = "extras/modavd_extras.dll"
-EXTRAS_VERSION = "0.1.3"
-# ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, from the same ModAVDExtras release as EXTRAS_DLL:
+# How ModAVDExtras writes its version (its release workflow checks the tag against it).
+EXTRAS_VERSION_FILE = "CMakeLists.txt"
+EXTRAS_VERSION_RE = r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)"
+# ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, from the same ModAVDExtras commit as EXTRAS_DLL:
 # MAA loads shell\sdk\external_renderer_ipc.dll under the MuMu path it is given, so users who run MAA on its own set
-# that path to <ModAVD root>\mumu-shim (an interim measure until MAA / MaaFramework support ModAVD natively). It goes
-# in only with -MumuShim, and only together with -ExtrasDll: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same
-# ModAVDExtras commit has to list both. Pinned in COMPONENT_SUMS like EXTRAS_DLL; while EXTRAS_DLL is pinned, so must
-# it be (see pinned_components).
+# that path to <ModAVD root>\mumu-shim (an interim measure until MAA / MaaFramework support ModAVD natively). Every
+# package carries it with EXTRAS_DLL (-MumuShim); the same release/<version>.SHA256SUMS.txt lists it.
 MUMU_SHIM = "mumu-shim/shell/sdk/external_renderer_ipc.dll"
 # package path -> its name in ModAVDExtras' release/<version>.SHA256SUMS.txt
 EXTRAS_FILES = {EXTRAS_DLL: "modavd_extras.dll", MUMU_SHIM: "external_renderer_ipc.dll"}
@@ -396,36 +398,34 @@ def snapshot_data(args):
 
 
 def pinned_components(args, pinned_path=COMPONENT_SUMS):
-    """{package path: source} of the files taken from other projects' releases: the APKs that go into components/ and
-    EXTRAS_DLL, checked against config/components.SHA256SUMS.txt.
+    """{package path: source} of the files taken from other projects' releases: the APKs that go into components/,
+    checked against config/components.SHA256SUMS.txt, and EXTRAS_DLL with MUMU_SHIM, which extras_release checks
+    against ModAVDExtras' own release checksums instead.
 
-    Every such file the package carries is pinned there, and every pinned file must come with exactly that content:
-    once a file has shipped, a release without it would make the incremental update delete it on users' machines. A
-    file that is not pinned is refused, so shipping a new one (or a new build of one) is a reviewed change to that file.
+    Every APK the package carries is pinned there, and every pinned APK must come with exactly that content: once a
+    file has shipped, a release without it would make the incremental update delete it on users' machines. An APK that
+    is not pinned is refused, so shipping a new one (or a new build of one) is a reviewed change to that file. The two
+    ModAVDExtras files come together, and with --require-extras (every real package) they must come.
     """
     pinned = read_sums(pinned_path)
     # NTFS ignores case: two names that differ only in case would be one file in the package
-    if (any(not (re.fullmatch(r"components/[^/]+", rel) or rel in EXTRAS_FILES) for rel in pinned)
+    if (any(not re.fullmatch(r"components/[^/]+", rel) for rel in pinned)
             or len({r.casefold() for r in pinned}) != len(pinned)):
-        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name>, {EXTRAS_DLL} "
-                         f"or {MUMU_SHIM} (case-insensitive)")
-    # the shell comes with the capture library, from the same ModAVDExtras release
-    if EXTRAS_DLL in pinned and MUMU_SHIM not in pinned:
-        raise ValueError(f"{MUMU_SHIM} is not pinned in {Path(pinned_path).name} next to {EXTRAS_DLL}: add the SHA-256 of "
-                         f"external_renderer_ipc.dll from release/<version>.SHA256SUMS.txt of the same ModAVDExtras release")
+        raise ValueError(f"{Path(pinned_path).name}: every line must be a distinct components/<file name> "
+                         f"(case-insensitive); {EXTRAS_DLL} and {MUMU_SHIM} are checked against ModAVDExtras' own "
+                         "release checksums, not pinned here")
     ime, extras = getattr(args, "ime_apk", None), getattr(args, "extras_dll", None)
     shim = getattr(args, "mumu_shim", None)
-    if shim and not extras:
-        raise ValueError("-MumuShim goes with -ExtrasDll: both come from the same ModAVDExtras release")
+    if bool(shim) != bool(extras):
+        raise ValueError("-ExtrasDll and -MumuShim go together: both come from the same ModAVDExtras commit")
+    if not extras and getattr(args, "require_extras", False):
+        raise ValueError(f"Every package carries {EXTRAS_DLL} and {MUMU_SHIM} (a release without them would make the "
+                         "incremental update delete them): pass -ExtrasDll and -MumuShim")
     given = {"components/" + Path(args.apk).name: Path(args.apk)}
     if ime:
         given["components/" + IME_APK] = Path(ime)
     if len({r.casefold() for r in given}) != 1 + bool(ime):
         raise ValueError("desktop APK name collides with the IME APK")
-    if extras:
-        given[EXTRAS_DLL] = Path(extras)
-    if shim:
-        given[MUMU_SHIM] = Path(shim)
     for rel, src in given.items():
         if not src.is_file():
             raise FileNotFoundError(src)
@@ -435,7 +435,13 @@ def pinned_components(args, pinned_path=COMPONENT_SUMS):
             raise ValueError(f"{rel} differs from its pinned SHA-256 ({src})")
     missing = sorted(set(pinned) - set(given))
     if missing:
-        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk / -ExtrasDll / -MumuShim): {missing}")
+        raise ValueError(f"Pinned components missing from this release (pass -ImeApk / -Apk): {missing}")
+    if extras:
+        given[EXTRAS_DLL] = Path(extras)
+        given[MUMU_SHIM] = Path(shim)
+        for src in (given[EXTRAS_DLL], given[MUMU_SHIM]):
+            if not src.is_file():
+                raise FileNotFoundError(src)
     return given
 
 
@@ -606,21 +612,55 @@ def ime_release(apk, repo):
                      f"use the APK of a published release and fetch the tags (git -C {repo} fetch upstream --tags)")
 
 
+def extras_version(dll, repo, branch=None):
+    """The ModAVDExtras version this release ships, read from `repo` (nothing in ModAVD pins it): when `branch` (the
+    release branch, release/<X>.<Y> of the ModAVD version) exists as refs/remotes/upstream/<branch>, the version in
+    EXTRAS_VERSION_FILE at its head, tagged or not (so a DLL of an older version is refused there); otherwise the tag
+    v<version> whose release/<version>.SHA256SUMS.txt lists this DLL as modavd_extras.dll (as ime_release finds the
+    IME)."""
+    head = None
+    if branch:
+        try:
+            head = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/upstream/{branch}^{{commit}}")
+        except RuntimeError:
+            pass
+    if head:
+        try:
+            found = re.findall(EXTRAS_VERSION_RE, git(repo, "show", f"{head}:{EXTRAS_VERSION_FILE}"))
+        except RuntimeError:
+            found = []
+        if len(found) != 1:
+            raise ValueError(f"{repo}: {EXTRAS_VERSION_FILE} at {branch} ({head[:12]}) says {found or 'no version'}")
+        return found[0]
+    digest = sha(dll)
+    for tag in git(repo, "tag", "--list", "v*").split():
+        try:
+            text = git(repo, "show", f"{tag}:release/{tag[1:]}.SHA256SUMS.txt")
+        except RuntimeError:
+            continue
+        if parse_sums(text, f"{tag}:release/{tag[1:]}.SHA256SUMS.txt").get(EXTRAS_FILES[EXTRAS_DLL]) == digest:
+            return tag[1:]
+    raise ValueError(f"No tag of {repo} lists {Path(dll).name} (SHA-256 {digest}) as modavd_extras.dll in "
+                     f"release/<version>.SHA256SUMS.txt; use the DLL of a published release and fetch the tags "
+                     f"(git -C {repo} fetch upstream --tags), or fetch its release branch (--release-branch)")
+
+
 def extras_release(dll, repo, branch=None, shim=None):
-    """The ModAVDExtras source of the shipped EXTRAS_DLL (and MUMU_SHIM, `shim`) in the checkout `repo`: tag
-    v<EXTRAS_VERSION>, or before that tag exists the head of `branch` (component_ref). release/<version>.SHA256SUMS.txt
-    at that one commit lists this DLL as modavd_extras.dll and the shell as external_renderer_ipc.dll, so both are of
-    the same ModAVDExtras version and commit: the workflows there build them and check them against that list (another
-    MSVC gives other bytes, so the files are the ones CI built, not a local build)."""
+    """The ModAVDExtras source of the shipped EXTRAS_DLL (and MUMU_SHIM, `shim`) in the checkout `repo`: the version
+    extras_version reads, at tag v<version> or before that tag exists the head of `branch` (component_ref).
+    release/<version>.SHA256SUMS.txt at that one commit lists this DLL as modavd_extras.dll and the shell as
+    external_renderer_ipc.dll, so both are of the same ModAVDExtras version and commit: the workflows there build them
+    and check them against that list (another MSVC gives other bytes, so the files are the ones CI built, not a local
+    build)."""
     if not repo:
         raise ValueError("--extras-dll needs the ModAVDExtras checkout (release.ps1 -ExtrasRepo, local configuration ExtrasRepo)")
-    commit, tag, is_tagged = component_ref(repo, EXTRAS_VERSION, branch, "CMakeLists.txt",
-                                           r"(?m)^project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)")
-    where = f"{tag}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"
+    version = extras_version(dll, repo, branch)
+    commit, tag, is_tagged = component_ref(repo, version, branch, EXTRAS_VERSION_FILE, EXTRAS_VERSION_RE)
+    where = f"{tag}:release/{version}.SHA256SUMS.txt"
     try:
-        listed = parse_sums(git(repo, "show", f"{commit}:release/{EXTRAS_VERSION}.SHA256SUMS.txt"), where)
+        listed = parse_sums(git(repo, "show", f"{commit}:release/{version}.SHA256SUMS.txt"), where)
     except RuntimeError:
-        raise ValueError(f"{repo}: no release/{EXTRAS_VERSION}.SHA256SUMS.txt at {tag}") from None
+        raise ValueError(f"{repo}: no release/{version}.SHA256SUMS.txt at {tag}") from None
     files = {}
     for rel, path in [(EXTRAS_DLL, dll), (MUMU_SHIM, shim)]:
         if not path:
@@ -629,14 +669,14 @@ def extras_release(dll, repo, branch=None, shim=None):
         if listed.get(name) != digest:
             raise ValueError(f"{path} is not the published {name}: SHA-256 {digest}, {where} lists {listed.get(name)}")
         files[rel] = digest
-    return {"repo": str(Path(repo).resolve()), "version": EXTRAS_VERSION, "tag": "v" + EXTRAS_VERSION, "commit": commit,
+    return {"repo": str(Path(repo).resolve()), "version": version, "tag": "v" + version, "commit": commit,
             "tagged": is_tagged, "sha256": files[EXTRAS_DLL], "files": files}
 
 
 def public_sources(args):
     """What the package takes from the public repositories, checked: the manager ZIP against the checksums at its
-    tag, the IME APK against the tag that lists it, the extras DLL against the checksums at tag v<EXTRAS_VERSION>,
-    and package/ and bridge/ of the ModAVD release checkout unchanged since its HEAD. With --release-branch the
+    tag, the IME APK against the tag that lists it, the extras DLL against the checksums of the ModAVDExtras version
+    extras_version reads, and package/ and bridge/ of the ModAVD release checkout unchanged since its HEAD. With --release-branch the
     manager and the extras library may also be at the head of that branch of their repository, before their tags
     exist (component_ref). assemble records the result in the snapshot, so every later step uses the same revisions."""
     extras, shim = getattr(args, "extras_dll", None), getattr(args, "mumu_shim", None)
@@ -1778,6 +1818,8 @@ def main():
     parser.add_argument("--changes", default=str(HERE / "config/changes.md"))
     parser.add_argument("--changelog", default=str(HERE / "config/changelog.json"))
     args = parser.parse_args()
+    # a real package always carries the ModAVDExtras files (see pinned_components); only unit tests build without
+    args.require_extras = True
     commands = {"snapshot": snapshot_data, "preflight": preflight, "own": lambda a: owned(a, True), "check-owned": owned,
                 "assemble": assemble, "verify-zip": verify_zip, "patches": export_patches, "replay": replay, "incoming": incoming,
                 "sources": sources, "bundle": bundle, "sums": sums, "notes": notes, "notes-budget": notes_budget_command,
