@@ -8,9 +8,9 @@
 
 ## 版本号
 
-公开版本号 `X.Y.Z` 单独往上加，用 `-Version` 给，和模拟器构建号无关：0.41.0 可以是 mas-40，下一版 0.42.0 是 mas-41，只重新打包 0.41.0 就发 0.41.1、构建号还是 mas-40。
+公开版本号 `X.Y.Z` 用 `-Version` 给，不要求 Y 等于模拟器构建号：模拟器本体重新编译才加 Y，没重编（只换组件或只重新打包）只加 Z，比如 0.40.1 之后只换了管理器和截图库就是 0.40.2。
 构建号照旧叫 mas-N（`sdk-masN`、`Pkg.BuildId=mas-N`、补丁目录 `qemu/masN`），记在 `modavd-manifest.json` 和公告机读行的 `build` 里，`changelog.json` 每条的 `build` 也是它。
-tag 是 `v<版本>`，标题 `ModAVD 0.41.0`；构建号、上游版本（`Pkg.Revision`，如 37.2.10）写进公告第一句「ModAVD 0.41.0，构建号 `mas-40`，基于 Google AOSP Android Emulator 37.2.10 构建」和清单。
+tag 是 `v<版本>`，标题 `ModAVD 0.41.0`；上游版本（`Pkg.Revision`，如 37.2.10）写进公告第一句「ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建」；构建号只记在清单和公告机读行的 `build` 里，公告正文不写。
 
 0.40 及以前是旧规矩：版本 `0.<N>.<P>` 的 N 就是构建号，P 是只重新打包的次数；不给 `-Version` 时 `release.ps1` 还照这个算（mas30、mas32 的旧名 `v37.2.10-masN` 算作 `0.N.0`，只能带 `-Patch 1` 以上重新打包）。校验照旧认这些旧条目。
 

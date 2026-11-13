@@ -77,7 +77,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot '..\local.ps1')
 # pwsh -File 把 `-KeepIncoming a,b` 当成一个字符串
 $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-# 公开版本号 0.41 起单独往上加，用 -Version 给；构建号 mas-N 只记在清单和公告机读行的 build 里。
+# 公开版本号用 -Version 给：模拟器重编才加第二位，没重编只加第三位；构建号 mas-N 只记在清单和公告机读行的 build 里。
 # 不给 -Version 照 0.40 及以前的旧规矩：0.<N>.<P>，N 是构建号，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
 $number = [int]$Build.Substring(3)
 # PowerShell 的变量名不分大小写：下面的 $version 就是参数 $Version，先把给的值另存

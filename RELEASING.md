@@ -5,8 +5,8 @@
 
 ## 版本号
 
-版本号 `0.<N>.<P>` 单独往上加（`release.ps1 -Version`）：0 表示内测阶段，比如只重新打包 0.41.0 就发 0.41.1。
-模拟器构建号照旧是 mas-N（`source.properties` 的 `Pkg.BuildId=mas-N`），和版本号无关，记在 `modavd-manifest.json` 和公告机读行的 `build` 里，比如 0.41.0 是 mas-40。
+版本号 `0.<N>.<P>` 用 `release.ps1 -Version` 给：0 表示内测阶段；模拟器本体重新编译才加 N，模拟器没重编（只换管理器、截图库、输入法等，或只重新打包）只加 P，比如 0.40.1 之后只换了管理器和截图库就发 0.40.2。
+模拟器构建号照旧是 mas-N（`source.properties` 的 `Pkg.BuildId=mas-N`），不要求等于 N，只记在 `modavd-manifest.json` 和公告机读行的 `build` 里；公告、标题和 PR 里不写构建号。
 0.40.0 带的管理器 0.8.0 装包时还要求版本中间那位等于构建号，所以 0.40.0 之后先发 0.40.1（mas-40，带不再要这个对应的管理器 0.9.0）；装了 0.40.1 以后的根目录才能用「更新」装上版本号和构建号对不上的包。
 tag 是 `v0.<N>.<P>`，标题是 `ModAVD 0.<N>.<P>`；Release 说明第一句写明构建号和基于的 Google AOSP Android Emulator 版本。
 0.32.1 到 0.40 是旧规矩：N 就是构建号，P 是不重编、只重新打包的次数，标题 `ModAVD mas-<N>（0.<N>.<P>）`。
