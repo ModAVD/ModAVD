@@ -23,6 +23,9 @@ import checks
 import privacy
 import release_tools as release
 
+# the ModAVDExtras version of the stand-in checkout (public_repos); ModAVD itself pins none
+EXTRAS_V = "0.2.0"
+
 WORK = None
 # Stand-ins for the maintainer's private rules (which never enter this repository): made-up names, so this file
 # passes the real rules too.
@@ -632,57 +635,41 @@ class ReleaseChecks(unittest.TestCase):
         bad.write_text(line(ime, release.IME_APK) + line(upper, "MODAVD-IME.APK"), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "distinct"):
             release.pinned_components(with_ime, bad)
-        # the extras DLL is pinned like the APKs, at exactly extras/modavd_extras.dll
+        # the ModAVDExtras files are not pinned here (extras_release checks them against ModAVDExtras' own release
+        # checksums); they land at exactly extras/modavd_extras.dll and mumu-shim/shell/sdk/external_renderer_ipc.dll
         dll = path / "modavd_extras.dll"
         dll.write_bytes(b"dll")
-        # and the MuMu shell with it, at exactly mumu-shim/shell/sdk/external_renderer_ipc.dll
         shim = path / "external_renderer_ipc.dll"
         shim.write_bytes(b"shim")
         with_extras = SimpleNamespace(apk=str(launcher), ime_apk=str(ime), extras_dll=str(dll), mumu_shim=str(shim))
-        extras_line = release.sha(dll) + "  " + release.EXTRAS_DLL + "\n"
-        shim_line = release.sha(shim) + "  " + release.MUMU_SHIM + "\n"
         self.assertEqual(release.MUMU_SHIM, "mumu-shim/shell/sdk/external_renderer_ipc.dll")
-        with self.assertRaisesRegex(ValueError, "extras/modavd_extras.dll is not pinned"):
-            release.pinned_components(with_extras, pins)
-        # the capture library pinned without the shell: refused whatever is given (the state until the shell's
-        # SHA-256 is added)
-        pins.write_text(line(launcher, launcher.name) + line(ime, release.IME_APK) + extras_line, encoding="utf-8")
-        for args in [with_extras, SimpleNamespace(**{**vars(with_extras), "mumu_shim": None})]:
-            with self.assertRaisesRegex(ValueError, "mumu-shim/shell/sdk/external_renderer_ipc.dll is not pinned in "
-                                                    "components.SHA256SUMS.txt next to extras/modavd_extras.dll"):
-                release.pinned_components(args, pins)
-        pins.write_text(line(launcher, launcher.name) + line(ime, release.IME_APK) + extras_line + shim_line, encoding="utf-8")
+        pins.write_text(line(launcher, launcher.name) + line(ime, release.IME_APK), encoding="utf-8")
         got = release.pinned_components(with_extras, pins)
         self.assertEqual(sorted(got), sorted(["components/" + launcher.name, "components/" + release.IME_APK,
                                               release.EXTRAS_DLL, release.MUMU_SHIM]))
         self.assertEqual((got[release.EXTRAS_DLL], got[release.MUMU_SHIM]), (dll, shim))
-        # pinned, so they have to come every time; and the files have to be there
-        with self.assertRaisesRegex(ValueError, r"missing from this release \(pass -ImeApk / -Apk / -ExtrasDll / -MumuShim\).*"
-                                                r"extras/modavd_extras.dll.*mumu-shim/shell/sdk/external_renderer_ipc.dll"):
-            release.pinned_components(with_ime, pins)
-        with self.assertRaisesRegex(ValueError, r"missing from this release.*\['mumu-shim/shell/sdk/external_renderer_ipc.dll'\]"):
-            release.pinned_components(SimpleNamespace(**{**vars(with_extras), "mumu_shim": None}), pins)
+        # any build of them passes here: which one is right is extras_release's question
+        dll.write_bytes(b"local build")
+        self.assertEqual(release.pinned_components(with_extras, pins)[release.EXTRAS_DLL], dll)
+        # a real package (--require-extras, set by the command line) must carry both, together
+        required = SimpleNamespace(**{**vars(with_extras), "require_extras": True})
+        self.assertEqual(sorted(release.pinned_components(required, pins)), sorted(got))
+        with self.assertRaisesRegex(ValueError, r"Every package carries extras/modavd_extras.dll and "
+                                                r"mumu-shim/shell/sdk/external_renderer_ipc.dll.*pass -ExtrasDll and -MumuShim"):
+            release.pinned_components(SimpleNamespace(**{**vars(with_ime), "require_extras": True}), pins)
+        self.assertEqual(sorted(release.pinned_components(with_ime, pins)),
+                         sorted(["components/" + launcher.name, "components/" + release.IME_APK]))
         for key in ["extras_dll", "mumu_shim"]:
+            with self.assertRaisesRegex(ValueError, "-ExtrasDll and -MumuShim go together"):
+                release.pinned_components(SimpleNamespace(**{**vars(required), key: None}), pins)
             with self.assertRaises(FileNotFoundError):
                 release.pinned_components(SimpleNamespace(**{**vars(with_extras), key: str(path / "gone.dll")}), pins)
-        # the shell only with the capture library (the same ModAVDExtras release)
-        with self.assertRaisesRegex(ValueError, "-MumuShim goes with -ExtrasDll"):
-            release.pinned_components(SimpleNamespace(**{**vars(with_extras), "extras_dll": None}), pins)
-        # another build (a local one: another MSVC gives other bytes) is refused
-        shim.write_bytes(b"AUTO-MAS copy")
-        with self.assertRaisesRegex(ValueError, "mumu-shim/shell/sdk/external_renderer_ipc.dll differs from its pinned SHA-256"):
-            release.pinned_components(with_extras, pins)
-        shim.write_bytes(b"shim")
-        dll.write_bytes(b"local build")
-        with self.assertRaisesRegex(ValueError, "extras/modavd_extras.dll differs from its pinned SHA-256"):
-            release.pinned_components(with_extras, pins)
-        # no other path outside components/ can be pinned
-        for other in ["extras/other.dll", "modavd_extras.dll", "extras/x/modavd_extras.dll", "EXTRAS/MODAVD_EXTRAS.DLL",
-                      "external_renderer_ipc.dll", "mumu-shim/external_renderer_ipc.dll", "shell/sdk/external_renderer_ipc.dll",
-                      "MUMU-SHIM/SHELL/SDK/EXTERNAL_RENDERER_IPC.DLL", "extras/external_renderer_ipc.dll"]:
+        # no path outside components/ can be pinned, the ModAVDExtras ones included
+        for other in [release.EXTRAS_DLL, release.MUMU_SHIM, "extras/other.dll", "modavd_extras.dll",
+                      "extras/x/modavd_extras.dll", "EXTRAS/MODAVD_EXTRAS.DLL", "external_renderer_ipc.dll",
+                      "mumu-shim/external_renderer_ipc.dll", "MUMU-SHIM/SHELL/SDK/EXTERNAL_RENDERER_IPC.DLL"]:
             bad.write_text(line(launcher, launcher.name) + release.sha(dll) + "  " + other + "\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "distinct components/<file name>, extras/modavd_extras.dll or "
-                                                    "mumu-shim/shell/sdk/external_renderer_ipc.dll"):
+            with self.assertRaisesRegex(ValueError, "distinct components/<file name>.*not pinned here"):
                 release.pinned_components(with_extras, bad)
 
     def test_draft_takes_tagged_components_only(self):
@@ -899,12 +886,12 @@ class ReleaseChecks(unittest.TestCase):
         apk.write_bytes(b"apk")
         self.commit_files(root / "ime", {"ime/AndroidManifest.xml": b"<manifest/>\n",
                                          "release/1.0.0.SHA256SUMS.txt": self.sums_line(release.IME_APK, b"apk").encode()}, "v1.0.0")
-        # ModAVDExtras at tag v<EXTRAS_VERSION>, whose release checksums list the DLL (in the order its workflow writes)
+        # ModAVDExtras at tag v<EXTRAS_V>, whose release checksums list the DLL (in the order its workflow writes)
         dll = root / "modavd_extras.dll"
         dll.write_bytes(b"dll")
         shim = root / "external_renderer_ipc.dll"
         shim.write_bytes(b"shim")
-        version = release.EXTRAS_VERSION
+        version = EXTRAS_V
         self.commit_files(root / "extras", {"CMakeLists.txt": f"project(ModAVDExtras VERSION {version} LANGUAGES C)\n".encode(),
                                             "LICENSE": b"lgpl\n", "COPYING": b"gpl\n", "src/core.c": b"int x;\n",
                                             f"release/{version}.SHA256SUMS.txt": (self.sums_line("external_renderer_ipc.dll", b"shim") +
@@ -999,7 +986,7 @@ class ReleaseChecks(unittest.TestCase):
         release.checked_sources(SimpleNamespace(**{**vars(with_branch), "require_tags": True}))
         described = release.describe_sources(release.public_sources(next_args))
         self.assertIn(f"ModAVDManager v0.4.0 (NOT TAGGED YET: release branch head {head[:12]})", described)
-        self.assertIn(f"ModAVDExtras v{release.EXTRAS_VERSION} (with the MuMu shell),", described)
+        self.assertIn(f"ModAVDExtras v{EXTRAS_V} (with the MuMu shell),", described)
         # another build of it is refused as at a tag
         other = root / "other4" / zip4.name
         other.parent.mkdir()
@@ -1020,24 +1007,34 @@ class ReleaseChecks(unittest.TestCase):
         # the checksums are read at that commit: what a later commit (the checkout's HEAD) lists does not count
         self.commit_files(mgr, {"release/0.4.0.SHA256SUMS.txt": self.sums_line(zip4.name, b"other").encode()})
         self.assertEqual(release.public_sources(next_args)["manager"]["commit"], head)
-        # the extras library the same way: a branch head at EXTRAS_VERSION whose checksums list the DLL
-        release.git(extras, "tag", "-d", "v" + release.EXTRAS_VERSION)
-        with self.assertRaisesRegex(ValueError, "neither tag"):
+        # the extras library the same way: a branch head at EXTRAS_V whose checksums list the DLL. Without the
+        # branch fetched and without the tag, nothing lists it
+        release.git(extras, "tag", "-d", "v" + EXTRAS_V)
+        with self.assertRaisesRegex(ValueError, "No tag of .* lists modavd_extras.dll"):
             release.public_sources(with_branch)
         ehead = release.git(extras, "rev-parse", "HEAD")
         release.git(extras, "update-ref", "refs/remotes/upstream/" + branch, ehead)
         got = release.public_sources(with_branch)["extras"]
-        self.assertEqual((got["tag"], got["commit"], got["tagged"]), ("v" + release.EXTRAS_VERSION, ehead, False))
+        self.assertEqual((got["tag"], got["commit"], got["tagged"]), ("v" + EXTRAS_V, ehead, False))
         self.commit_files(extras, {"CMakeLists.txt": b"project(ModAVDExtras VERSION 9.9.9 LANGUAGES C)\n"})
         release.git(extras, "update-ref", "refs/remotes/upstream/" + branch, release.git(extras, "rev-parse", "HEAD"))
-        with self.assertRaisesRegex(ValueError, r"CMakeLists\.txt at release/0\.40 .* says \['9\.9\.9'\], not"):
+        # the version is the branch head's: a DLL of the version before is not taken from an older tag then
+        with self.assertRaisesRegex(ValueError, r"no release/9\.9\.9\.SHA256SUMS\.txt at [0-9a-f]{40}"):
+            release.public_sources(with_branch)
+        release.git(extras, "tag", "v" + EXTRAS_V, ehead)
+        with self.assertRaisesRegex(ValueError, r"no release/9\.9\.9\.SHA256SUMS\.txt"):
+            release.public_sources(with_branch)
+        self.commit_files(extras, {"CMakeLists.txt": b"cmake_minimum_required(VERSION 3.20)\n"})
+        release.git(extras, "update-ref", "refs/remotes/upstream/" + branch, release.git(extras, "rev-parse", "HEAD"))
+        with self.assertRaisesRegex(ValueError, r"CMakeLists\.txt at release/0\.40 \([0-9a-f]{12}\) says no version"):
             release.public_sources(with_branch)
 
     def test_extras_dll_checked_against_its_tag(self):
-        """The extras DLL of a release is the one tag v<EXTRAS_VERSION> of ModAVDExtras lists."""
+        """Without the release branch, the extras DLL of a release is found by the tag of ModAVDExtras whose checksums
+        list it, as the IME APK is: nothing in ModAVD pins its version or hash."""
         root = self.folder()
         args = self.public_repos(root)
-        version, tag, extras = release.EXTRAS_VERSION, "v" + release.EXTRAS_VERSION, root / "extras"
+        version, tag, extras = EXTRAS_V, "v" + EXTRAS_V, root / "extras"
         own = release.public_sources(args)
         self.assertEqual({k: own["extras"][k] for k in ("version", "tag", "sha256")},
                          {"version": version, "tag": tag, "sha256": hashlib.sha256(b"dll").hexdigest()})
@@ -1080,16 +1077,30 @@ class ReleaseChecks(unittest.TestCase):
         local.write_bytes(b"local build")
         nosums = root / "nosums"
         self.commit_files(nosums, {"CMakeLists.txt": f"project(ModAVDExtras VERSION {version} LANGUAGES C)\n".encode()}, tag)
-        for change, message in [({"extras_dll": str(local)}, f"not the published modavd_extras.dll: SHA-256 {release.sha(local)}"),
+        for change, message in [({"extras_dll": str(local)}, f"No tag of .* lists modavd_extras.dll \\(SHA-256 {release.sha(local)}\\)"),
                                 ({"extras_repo": None}, "needs the ModAVDExtras checkout"),
                                 # not released yet, or the tags not fetched
-                                ({"extras_repo": str(root / "ime")}, f"has no tag {re.escape(tag)}"),
-                                ({"extras_repo": str(nosums)}, f"no release/{re.escape(version)}.SHA256SUMS.txt at {re.escape(tag)}")]:
+                                ({"extras_repo": str(root / "ime")}, "No tag of .* lists modavd_extras.dll"),
+                                ({"extras_repo": str(nosums)}, "No tag of .* lists modavd_extras.dll")]:
             with self.assertRaisesRegex(ValueError, message):
                 release.public_sources(SimpleNamespace(**{**vars(args), **change}))
         # the release takes the tag, not HEAD
         self.commit_files(extras, {"src/core.c": b"int y;\n"})
         self.assertEqual(release.public_sources(args)["extras"]["commit"], own["extras"]["commit"])
+        # of several tags, the one whose checksums list this DLL; its version is the one recorded
+        self.commit_files(extras, {"CMakeLists.txt": b"project(ModAVDExtras VERSION 0.3.0 LANGUAGES C)\n",
+                                   "release/0.3.0.SHA256SUMS.txt": (self.sums_line("external_renderer_ipc.dll", b"shim3") +
+                                                                    self.sums_line("modavd_extras.dll", b"dll3")).encode()}, "v0.3.0")
+        self.assertEqual(release.public_sources(args)["extras"]["tag"], tag)
+        dll3, shim3 = root / "v3/modavd_extras.dll", root / "v3/external_renderer_ipc.dll"
+        dll3.parent.mkdir()
+        dll3.write_bytes(b"dll3")
+        shim3.write_bytes(b"shim3")
+        got = release.public_sources(SimpleNamespace(**{**vars(args), "extras_dll": str(dll3), "mumu_shim": str(shim3)}))["extras"]
+        self.assertEqual((got["version"], got["tag"], got["commit"]), ("0.3.0", "v0.3.0", release.git(extras, "rev-parse", "v0.3.0")))
+        # the shell of another version than the DLL is refused
+        with self.assertRaisesRegex(ValueError, "not the published external_renderer_ipc.dll"):
+            release.public_sources(SimpleNamespace(**{**vars(args), "extras_dll": str(dll3)}))
 
     def test_pinned_components_land_at_their_package_paths(self):
         """assemble copies the APKs, the capture library and the MuMu shell to their package paths, and checks each
@@ -1101,8 +1112,7 @@ class ReleaseChecks(unittest.TestCase):
         args.apk = str(launcher)
         pins = root / "components.SHA256SUMS.txt"
         pins.write_text("".join(f"{release.sha(Path(src))}  {rel}\n" for rel, src in [
-            ("components/" + launcher.name, launcher), ("components/" + release.IME_APK, args.ime_apk),
-            (release.EXTRAS_DLL, args.extras_dll), (release.MUMU_SHIM, args.mumu_shim)]), encoding="utf-8")
+            ("components/" + launcher.name, launcher), ("components/" + release.IME_APK, args.ime_apk)]), encoding="utf-8")
         own = release.public_sources(args)
         dest = root / "tree"
         release.copy_pinned_components(args, own, dest, pins)
@@ -1154,7 +1164,7 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual(rc, b"service modavd\r\n")
         text = release.own_sources_text(own)
         for part in ["ModAVDManager v0.2.0", "ModAVDManager-0.2.0-win-x64.zip", "Go go1.26.5", "ModAVDHostIME v1.0.0",
-                     own["modavd"]["commit"][:12], f"ModAVDExtras v{release.EXTRAS_VERSION}（提交 {own['extras']['commit'][:12]}），即它的 Release",
+                     own["modavd"]["commit"][:12], f"ModAVDExtras v{EXTRAS_V}（提交 {own['extras']['commit'][:12]}），即它的 Release",
                      "LGPL-3.0-or-later"]:
             self.assertIn(part, text)
         self.assertNotIn("{", text)

@@ -40,15 +40,14 @@ param(
     # host input method APK, shipped as components\modavd-ime.apk; '' = not shipped. Every APK in the package is pinned
     # in config\components.SHA256SUMS.txt: an unpinned one is refused, a pinned one that is missing fails the release.
     [string]$ImeApk = '',
-    # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll; '' = not shipped. Pinned like
-    # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo;
-    # before the tag, the head of its release/<X>.<Y>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
-    # archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
+    # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll. Required: every package carries
+    # it. Nothing in ModAVD pins it: its version is the one in CMakeLists.txt at the head of release/<X>.<Y> of -ExtrasRepo
+    # (local configuration ExtrasRepo; once tagged, the tag v<version>), and release/<version>.SHA256SUMS.txt at that commit
+    # must list it; the source bundle archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
     [string]$ExtrasDll = '',
     # ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, shipped as mumu-shim\shell\sdk\external_renderer_ipc.dll
-    # (MAA's MuMu path set to <root>\mumu-shim finds it there); '' = not shipped. Only with -ExtrasDll, from the same
-    # ModAVDExtras release: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same commit must list both. Pinned like
-    # -ExtrasDll, and while that is pinned this one must be too.
+    # (MAA's MuMu path set to <root>\mumu-shim finds it there). Required with -ExtrasDll, from the same ModAVDExtras commit:
+    # the same release/<version>.SHA256SUMS.txt must list both.
     [string]$MumuShim = '',
     [string]$ExtrasRepo,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
