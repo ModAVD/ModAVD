@@ -40,15 +40,14 @@ param(
     # host input method APK, shipped as components\modavd-ime.apk; '' = not shipped. Every APK in the package is pinned
     # in config\components.SHA256SUMS.txt: an unpinned one is refused, a pinned one that is missing fails the release.
     [string]$ImeApk = '',
-    # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll; '' = not shipped. Pinned like
-    # the APKs (config\components.SHA256SUMS.txt), and tag v<EXTRAS_VERSION> of -ExtrasRepo (local configuration ExtrasRepo;
-    # before the tag, the head of its release/<X>.<Y>) must list it in release/<version>.SHA256SUMS.txt; the source bundle
-    # archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
+    # ModAVDExtras' capture library modavd_extras.dll, shipped as extras\modavd_extras.dll. Required: every package carries
+    # it. Nothing in ModAVD pins it: its version is the one in CMakeLists.txt at the head of release/<X>.<Y> of -ExtrasRepo
+    # (local configuration ExtrasRepo; once tagged, the tag v<version>), and release/<version>.SHA256SUMS.txt at that commit
+    # must list it; the source bundle archives that commit. The DLL is the one its CI built: another MSVC gives other bytes.
     [string]$ExtrasDll = '',
     # ModAVDExtras' MuMu compatibility shell external_renderer_ipc.dll, shipped as mumu-shim\shell\sdk\external_renderer_ipc.dll
-    # (MAA's MuMu path set to <root>\mumu-shim finds it there); '' = not shipped. Only with -ExtrasDll, from the same
-    # ModAVDExtras release: release/<EXTRAS_VERSION>.SHA256SUMS.txt at the same commit must list both. Pinned like
-    # -ExtrasDll, and while that is pinned this one must be too.
+    # (MAA's MuMu path set to <root>\mumu-shim finds it there). Required with -ExtrasDll, from the same ModAVDExtras commit:
+    # the same release/<version>.SHA256SUMS.txt must list both.
     [string]$MumuShim = '',
     [string]$ExtrasRepo,
     [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
@@ -78,7 +77,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot '..\local.ps1')
 # pwsh -File 把 `-KeepIncoming a,b` 当成一个字符串
 $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-# 公开版本号 0.41 起单独往上加，用 -Version 给；构建号 mas-N 只记在清单和公告机读行的 build 里。
+# 公开版本号用 -Version 给：模拟器重编才加第二位，没重编只加第三位；构建号 mas-N 只记在清单和公告机读行的 build 里。
 # 不给 -Version 照 0.40 及以前的旧规矩：0.<N>.<P>，N 是构建号，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
 $number = [int]$Build.Substring(3)
 # PowerShell 的变量名不分大小写：下面的 $version 就是参数 $Version，先把给的值另存
