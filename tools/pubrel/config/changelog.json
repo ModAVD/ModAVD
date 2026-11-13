@@ -1,5 +1,26 @@
 [
   {
+    "version": "v0.40.2",
+    "build": 40,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "截图库 v0.2.0 能点击了：自动化工具可以直接经模拟器控制台在触屏上按下、移动、抬起，最多 10 根手指，客体里不用装东西。MAA、MaaFramework 还没有接入。",
+        "开着的实例也登记到默认的 adb server（5037），`adb devices` 和 MAA 这类工具能直接看到，不用再手动 `adb connect`；不想登记就在 mas-avd.json 里写 `\"shareDefaultAdbServer\": false`。（[#196](https://github.com/ModAVD/ModAVD/issues/196)）",
+        "双击托盘图标隐藏或恢复管理器窗口。（[#188](https://github.com/ModAVD/ModAVD/issues/188)）"
+      ],
+      "变更": [
+        "模拟器没有重编；包里的管理器和命令行升到 0.10.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.10.0)。",
+        "要先装执行桥的带窗口实例，装桥那几次开机一律无头，窗口不再弹出、关掉好几次；新建实例去掉「编号」选项，卡片不再显示运行时长。",
+        "开机守护每分钟看一次模拟器内存，变化大时提前记一行，模拟器退出时写汇总。（[#159](https://github.com/ModAVD/ModAVD/issues/159)）"
+      ],
+      "修复": [
+        "关掉模拟器窗口或在安卓里关机后，卡片不再先显示好几秒「开机中」。",
+        "整包更新更稳：只读 DLL 被占着时换包前就停（[#191](https://github.com/ModAVD/ModAVD/issues/191)）；从目录链接进入的根目录能自更新（[#195](https://github.com/ModAVD/ModAVD/issues/195)）；断网时能接着装已经下好的新版；按区间更新不再把大文件整块放进内存（[#182](https://github.com/ModAVD/ModAVD/issues/182)）。"
+      ]
+    }
+  },
+  {
     "version": "v0.40.1",
     "build": 40,
     "min_automas": "5.7.0",
