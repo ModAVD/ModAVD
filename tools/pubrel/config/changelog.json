@@ -19,7 +19,8 @@
         "整包更新更稳：只读 DLL 被占着时换包前就停（[#191](https://github.com/ModAVD/ModAVD/issues/191)）；从目录链接进入的根目录能自更新（[#195](https://github.com/ModAVD/ModAVD/issues/195)）；断网时能接着装已经下好的新版；按区间更新不再把大文件整块放进内存（[#182](https://github.com/ModAVD/ModAVD/issues/182)）。"
       ]
     }
-  },  {
+  },
+  {
     "version": "v0.40.1",
     "build": 40,
     "min_automas": "5.7.0",
