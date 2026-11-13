@@ -1797,21 +1797,23 @@ class ReleaseChecks(unittest.TestCase):
         with contextlib.redirect_stdout(printed):
             release.notes_budget_command(SimpleNamespace(build="mas39", patch=0, sdk=None, changes=str(changes), changelog=str(changelog)))
         self.assertRegex(printed.getvalue(), r"v0\.39\.0: machine line \d+/8000, announcement \d+/4000")
-        # since 0.41 the version is given on its own: 0.41.0 on mas-40, the line before it still 0.40.0 on mas-40
-        release.save(changelog, [{**entry(40, "修好一处"), "version": "v0.41.0"}, entry(40, "旧版"), entry(39, "旧版")])
-        fields = release.text_fields("0.41.0", 40, "37.2.10", changes, changelog)
-        self.assertEqual((fields["VERSION"], fields["BUILD_ID"]), ("0.41.0", "mas-40"))
+        # the version is given on its own: 0.40.2 repackages the same emulator as 0.40.0 (build 40)
+        release.save(changelog, [{**entry(40, "修好一处"), "version": "v0.40.2"}, entry(40, "旧版"), entry(39, "旧版")])
+        fields = release.text_fields("0.40.2", 40, "37.2.10", changes, changelog)
+        self.assertEqual(fields["VERSION"], "0.40.2")
         text = release.render_notes({**fields, **release.SAMPLE_ASSETS})
-        self.assertTrue(text.split("\n")[1].startswith("ModAVD 0.41.0，构建号 `mas-40`，"))
-        self.assertEqual(checks.check_announcement(text, "v0.41.0", 40)["build"], 40)
-        release.notes_budget("0.41.0", 40, "37.2.10", changes, changelog)
+        # the announcement names the version only: the build number stays in the machine line and the manifest
+        self.assertTrue(text.split("\n")[1].startswith("ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建。"))
+        self.assertNotIn("mas", text.split("<!-- modavd:github-only -->")[0].split("\n", 1)[1].replace("AUTO-MAS", ""))
+        self.assertEqual(checks.check_announcement(text, "v0.40.2", 40)["build"], 40)
+        release.notes_budget("0.40.2", 40, "37.2.10", changes, changelog)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
-            release.notes_budget_command(SimpleNamespace(build="mas40", patch=0, version="0.41.0", sdk=None, changes=str(changes),
+            release.notes_budget_command(SimpleNamespace(build="mas40", patch=0, version="0.40.2", sdk=None, changes=str(changes),
                                                          changelog=str(changelog)))
-        self.assertRegex(printed.getvalue(), r"v0\.41\.0: machine line")
+        self.assertRegex(printed.getvalue(), r"v0\.40\.2: machine line")
         with self.assertRaisesRegex(ValueError, "differs from -Build"):
-            release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.41.0", sdk=None, changes=str(changes),
+            release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.40.2", sdk=None, changes=str(changes),
                                                          changelog=str(changelog)))
 
     def test_changes_and_changelog(self):
