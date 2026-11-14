@@ -1,5 +1,24 @@
 [
   {
+    "version": "v0.40.3",
+    "build": 40,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "新建的实例语言和时区跟随这台电脑；已有实例不变，可以在实例设置里改。（[#166](https://github.com/ModAVD/ModAVD/issues/166)）",
+        "截图库 v0.3.0 能经模拟器控制台输入文字，客体里不用装东西；MAA、MaaFramework 还没有接入。"
+      ],
+      "变更": [
+        "模拟器没有重编；包里的管理器和命令行升到 0.11.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.11.0)。",
+        "管理器里点「更新」：下载期间实例照常能用，关实例前列出名字再确认一次。下一次更新起生效。（[#170](https://github.com/ModAVD/ModAVD/issues/170)）"
+      ],
+      "修复": [
+        "有实例开着时在管理器里点「更新」不再报「还有程序在用」；从旧版更新前请先把实例关机。",
+        "Windows 的时区名是本地化的时，新建的实例不再一律用 GMT。（[#141](https://github.com/ModAVD/ModAVD/issues/141)）"
+      ]
+    }
+  },
+  {
     "version": "v0.40.2",
     "build": 40,
     "min_automas": "5.7.0",
@@ -142,19 +161,16 @@
       "变更": [
         "模拟器重新编译（mas-37 到 mas-38），同步了上游 gfxstream 的一批改动。",
         "窗口标题改成实例名；精简窗口自己画标题栏，右边是 ◁ ○ − ×（返回、桌面、最小化、关机），画面右侧那一列去掉了，也不再有最大化。（[#58](https://github.com/ModAVD/ModAVD/issues/58)、[#59](https://github.com/ModAVD/ModAVD/issues/59)）",
-        "write-combined 内存仍默认按 cached 分配，改用上游 gfxstream 的写法，行为不变。（[#37](https://github.com/ModAVD/ModAVD/issues/37)）",
         "包里的管理器和命令行升到 0.4.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases)；新建实例默认 1080p；正在新建的实例 stop 默认提示忙（[#103](https://github.com/ModAVD/ModAVD/issues/103)）；exFAT / FAT32 上的根目录不能自动换包，请手动下载整包。"
       ],
       "修复": [
         "点 × 改走安卓自己的正常关机（先 sync 再关机），前台应用会先收到关机通知；暂停中的实例先恢复再关。（[#60](https://github.com/ModAVD/ModAVD/issues/60)）",
         "图形：游戏进程退出后按进程回收 EGL 资源（[#38](https://github.com/ModAVD/ModAVD/issues/38)）；ASTC / ETC2 压缩纹理能正确解压，没有原生 ASTC 的显卡上不再花屏或全黑（[#39](https://github.com/ModAVD/ModAVD/issues/39)）；游戏进程被杀后渲染线程不再一直等它，不会因此卡死整台模拟器（[#40](https://github.com/ModAVD/ModAVD/issues/40)）。",
         "FAT32 / exFAT 上首次建数据盘按实际需要的空间检查，不再固定要上限的 1.2 倍。（[#3](https://github.com/ModAVD/ModAVD/issues/3)）",
-        "加载快照、手动开 CUDA 硬解 VPX 时的几处媒体解码问题修了（默认配置碰不到）。（[#43](https://github.com/ModAVD/ModAVD/issues/43)）",
         "整个根目录搬走以后，装过执行桥的实例也能开机了；老实例先在原位置用新版开关机一次再搬。（[#99](https://github.com/ModAVD/ModAVD/issues/99)）"
       ],
       "说明": [
-        "点 × 以后模拟器进程还会在后台跑一会儿（通常几秒到十几秒，最长约半分钟），请不要结束它。",
-        "FAT32 / exFAT 卷上新的首次建盘空间检查还没实测，只有单元测试；碰到问题请新开 issue。"
+        "点 × 以后模拟器进程还会在后台跑一会儿（通常几秒到十几秒，最长约半分钟），请不要结束它。"
       ]
     }
   },
