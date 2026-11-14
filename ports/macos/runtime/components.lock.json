@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "checkedOn": "2026-11-07",
+  "metadata": {
+    "sdk": {
+      "url": "https://dl.google.com/android/repository/repository2-3.xml",
+      "sha256": "fb1bd2fcd70b6116519563f1ff96cc578381e4e29237ab05ec8920f0864a7955"
+    },
+    "images": {
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml",
+      "sha256": "b1261b4f645125367bc74d5e0881a55cb489cf13bae26a3c9d61bdef287d228e"
+    }
+  },
+  "components": {
+    "platform-tools": {
+      "package": "platform-tools",
+      "revision": "37.0.1",
+      "metadata": "sdk",
+      "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip",
+      "size": 16110554,
+      "sha1": "6ae73f4de6452dc57e62ec02b68eed92a4c21661",
+      "license": "android-sdk-license",
+      "licenseTextSha256": "1f8729233617b193fd619213792ae16a41b95d2bbbf525dfe66998252ba68b16",
+      "archiveRoot": "platform-tools",
+      "destination": "platform-tools",
+      "expandedBudgetBytes": 60000000
+    },
+    "commandline-tools": {
+      "package": "cmdline-tools;latest",
+      "revision": "23.0",
+      "metadata": "sdk",
+      "url": "https://dl.google.com/android/repository/commandlinetools-mac_arm64-16111833_latest.zip",
+      "size": 155384151,
+      "sha1": "ad03dc49bfacfd52c110b14104ea548b8a07e830",
+      "license": "android-sdk-license",
+      "licenseTextSha256": "1f8729233617b193fd619213792ae16a41b95d2bbbf525dfe66998252ba68b16",
+      "archiveRoot": "cmdline-tools",
+      "destination": "cmdline-tools/23.0",
+      "expandedBudgetBytes": 400000000
+    },
+    "system-image": {
+      "package": "system-images;android-35;google_apis;arm64-v8a",
+      "revision": "9",
+      "metadata": "images",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis/arm64-v8a-35_r09.zip",
+      "size": 1778933980,
+      "sha1": "16f5bceca236b2737008977c4aaf826e46a8de7d",
+      "license": "android-sdk-arm-dbt-license",
+      "licenseTextSha256": "0682da42e0ca119ce29503c265587f8ae17277094f9262b54c1d2bb99557c6f5",
+      "archiveRoot": "arm64-v8a",
+      "destination": "system-images/android-35/google_apis/arm64-v8a",
+      "expandedBudgetBytes": 6000000000,
+      "sha256": "d2e7c6076e5df54d3677605a324daf9edf813b2808c216bdb1687f6b2b6aed99",
+      "requiredProperties": {
+        "SystemImage.Abi": "arm64-v8a",
+        "AndroidVersion.ApiLevel": "35",
+        "SystemImage.TagId": "google_apis"
+      }
+    }
+  }
+}
