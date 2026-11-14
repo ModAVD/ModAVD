@@ -1,0 +1,176 @@
+// Copyright 2026 Ji Mao Cai
+// SPDX-License-Identifier: Apache-2.0
+#include "test_support.h"
+#include "context_helper.h"
+#include "render-utils/readback_diagnostics.h"
+#include <cstring>
+using GLuint = unsigned; using GLint = int; using GLenum = unsigned;
+using HandleType = unsigned;
+using EGLDisplay = void*; using EGLImageKHR = void*;
+constexpr EGLDisplay EGL_NO_DISPLAY = nullptr;
+constexpr GLenum GL_ARRAY_BUFFER = 1, GL_ELEMENT_ARRAY_BUFFER = 2;
+constexpr GLenum GL_PACK_ALIGNMENT = 3, GL_RGBA = 4, GL_UNSIGNED_BYTE = 5;
+static int currentContext = 2, glCalls = 0, images = 0, textures = 0, fbos = 0, memoryObjects = 0;
+static int cpuObjects = 0;
+static void checkGl() { CHECK(currentContext == 1); ++glCalls; }
+struct CpuObject { CpuObject() { ++cpuObjects; } ~CpuObject() { --cpuObjects; } };
+namespace gfxstream { namespace base { struct AutoLock { explicit AutoLock(int&) {} }; } }
+namespace gfxstream { namespace host { namespace gl {
+struct MockEgl {
+    void eglDestroyImageKHR(EGLDisplay, EGLImageKHR) { checkGl(); CHECK(images > 0); --images; }
+} s_egl;
+struct MockGl {
+    void glDeleteFramebuffers(int n, const GLuint* ids) { checkGl(); for(int i=0;i<n;++i)if(ids[i]){CHECK(fbos>0);--fbos;} }
+    void glDeleteTextures(int n, const GLuint* ids) { checkGl(); for(int i=0;i<n;++i)if(ids[i]){CHECK(textures>0);--textures;} }
+    void glDeleteMemoryObjectsEXT(int n, const GLuint*) { checkGl(); CHECK(memoryObjects >= n); memoryObjects -= n; }
+    void glDeleteBuffers(int, const GLuint*) { checkGl(); }
+    void glDeleteProgram(GLuint) { checkGl(); }
+    void glUseProgram(GLuint) { checkGl(); }
+    void glBindBuffer(GLenum, GLuint) { checkGl(); }
+    void glGetIntegerv(GLenum, GLint* out) { checkGl(); *out = 4; }
+    void glPixelStorei(GLenum, GLint) { checkGl(); }
+    void glReadPixels(int,int,int,int,GLenum,GLenum,void* pixels) { checkGl(); std::memset(pixels,0,4); }
+} s_gles2;
+static int s_postContextResources;
+static std::vector<GLuint> s_programsToRelease, s_framebuffersToRelease;
+struct TextureResize : CpuObject {
+    struct Framebuffer { GLuint texture=0, framebuffer=0, program=0; };
+    struct GenericResizer : CpuObject {
+        bool mAbandoned = false;
+        GLuint mProgram=0, mVertexBuffer=0, mIndexBuffer=0;
+        Framebuffer mFrameBuffer;
+        ~GenericResizer();
+        @GENERIC_ABANDON@
+    };
+    bool mAbandoned = false;
+    Framebuffer mFBWidth, mFBHeight;
+    GLuint mVertexBuffer = 0;
+    std::unique_ptr<GenericResizer> mGenericResizer = std::make_unique<GenericResizer>();
+    ~TextureResize();
+    @RESIZER_ABANDON@
+};
+@RESIZER_DTOR@
+@GENERIC_DTOR@
+struct YUVConverter : CpuObject {
+    bool mAbandoned = false;
+    void reset() { checkGl(); }
+    ~YUVConverter();
+    @YUV_ABANDON@
+};
+@YUV_DTOR@
+
+@CLEANUP@
+
+struct TextureDraw {};
+struct PixelReadFormats {};
+enum class GfxstreamFormat { R5G6B5_UNORM, R8G8B8_UNORM, R8G8B8A8_UNORM, UNKNOWN };
+struct FormatOpenglParams { GLenum pixelDataComponents=GL_RGBA, pixelDataType=GL_UNSIGNED_BYTE; int bpp=4; };
+static std::optional<FormatOpenglParams> GetFormatOpenglParameters(GfxstreamFormat format) {
+    if(format==GfxstreamFormat::UNKNOWN)return std::nullopt;
+    FormatOpenglParams result;
+    if(format==GfxstreamFormat::R8G8B8_UNORM)result.bpp=3;
+    if(format==GfxstreamFormat::R5G6B5_UNORM)result.bpp=2;
+    return result;
+}
+static std::string ToString(GfxstreamFormat) { return "test-format"; }
+static bool failFbo=false, supportFormat=true;
+static bool bindFbo(GLuint*,GLuint,bool) { return !failFbo; }
+static void unbindFbo() { checkGl(); }
+class ColorBufferGl {
+public:
+    ColorBufferGl(EGLDisplay,unsigned,GLuint,GLuint,ContextHelper*,TextureDraw*,PixelReadFormats&);
+    ~ColorBufferGl();
+    bool readPixels(int,int,int,int,GfxstreamFormat,void*,uint32_t);
+    bool isReadbackToFormatSupported(GfxstreamFormat) { return supportFormat; }
+    void waitSync() { checkGl(); }
+    const GLuint m_width, m_height;
+    EGLDisplay m_display;
+    ContextHelper* m_helper;
+    TextureDraw* m_textureDraw;
+    PixelReadFormats& m_pixelReadFormats;
+    unsigned mHndl;
+    EGLImageKHR m_eglImage=reinterpret_cast<void*>(1), m_blitEGLImage=reinterpret_cast<void*>(2);
+    GLuint m_tex=1, m_blitTex=2, m_fbo=1, m_yuv_conversion_fbo=2, m_scaleRotationFbo=3, m_memoryObject=1;
+    TextureResize* m_resizer = new TextureResize;
+    std::unique_ptr<YUVConverter> m_yuv_converter = std::make_unique<YUVConverter>();
+    bool m_needFboReattach=false;
+};
+@CB_CTOR@
+@CB_DTOR@
+@CONVERT@
+@READ_PIXELS@
+struct Helper : ContextHelper {
+    bool ready = true;
+    std::vector<int> previous;
+    bool setupContext() override { previous.push_back(currentContext); if(ready)currentContext=1; return ready; }
+    void teardownContext() override { currentContext=previous.back(); previous.pop_back(); }
+    bool isBound() const override { return currentContext==1; }
+};
+static std::unique_ptr<ColorBufferGl> makeBuffer(Helper* helper) {
+    static PixelReadFormats formats;
+    images+=2; textures+=2; fbos+=3; ++memoryObjects;
+    return std::make_unique<ColorBufferGl>(nullptr,42,1280,720,helper,nullptr,formats);
+}
+static void checkEmpty() { CHECK(!images && !textures && !fbos && !memoryObjects && !cpuObjects); CHECK(currentContext==2); }
+} } }
+using namespace gfxstream::host;
+using namespace gfxstream::host::gl;
+int main() {
+    {
+        Helper helper;
+        makeBuffer(&helper).reset();
+        checkEmpty();
+    }
+    std::puts("PASS ColorBuffer normal destruction frees all owned resources in its context");
+    {
+        Helper helper; helper.ready=false;
+        const auto before=glCalls;
+        makeBuffer(&helper).reset();
+        CHECK(cpuObjects==3 && images==2 && glCalls==before);
+        for(int i=0;i<3;++i){RecursiveScopedContextBind bind(&helper);CHECK(!bind.isOk());}
+        CHECK(cpuObjects==3 && glCalls==before);
+        helper.ready=true;
+        { RecursiveScopedContextBind bind(&helper); CHECK(bind.isOk()); CHECK(!images && !cpuObjects); }
+        const auto after=glCalls;
+        { RecursiveScopedContextBind bind(&helper); CHECK(bind.isOk()); }
+        CHECK(glCalls==after);
+        checkEmpty();
+    }
+    std::puts("PASS ColorBuffer repeated bind failures retain ownership, recovery deletes exactly once");
+    {
+        Helper helper; helper.ready=false;
+        const auto before=glCalls;
+        for(int i=0;i<1000;++i)makeBuffer(&helper).reset();
+        CHECK(cpuObjects==3000 && images==2000 && glCalls==before);
+        helper.ready=true;
+        { RecursiveScopedContextBind bind(&helper); CHECK(bind.isOk()); }
+        checkEmpty();
+    }
+    std::puts("PASS ColorBuffer 1000 deferred cleanups drain after the original context recovers");
+    {
+        auto helper=std::make_unique<Helper>(); helper->ready=false;
+        const auto before=glCalls;
+        makeBuffer(helper.get()).reset();
+        helper.reset();
+        CHECK(cpuObjects==0 && glCalls==before && currentContext==2);
+        CHECK(images==2 && textures==2 && fbos==3 && memoryObjects==1);
+        // Simulate native context teardown, which owns the remaining native objects.
+        images=textures=fbos=memoryObjects=0;
+    }
+    std::puts("PASS terminal context loss frees CPU owners without calling GL in another context");
+    {
+        Helper helper;
+        auto cb=makeBuffer(&helper);
+        unsigned char pixels[256]={};
+        const auto before=glCalls;
+        CHECK(!cb->readPixels(0,0,8,8,GfxstreamFormat::R8G8B8A8_UNORM,pixels,1));
+        CHECK(glCalls==before);
+        CHECK(cb->readPixels(0,0,8,8,GfxstreamFormat::R8G8B8A8_UNORM,pixels,sizeof(pixels)));
+        supportFormat=false;
+        CHECK(cb->readPixels(0,0,8,8,GfxstreamFormat::R8G8B8_UNORM,pixels,sizeof(pixels)));
+        supportFormat=true;
+        cb.reset();
+        checkEmpty();
+    }
+    std::puts("PASS actual GL readback rejects small buffers and preserves normal and RGB conversion paths");
+}

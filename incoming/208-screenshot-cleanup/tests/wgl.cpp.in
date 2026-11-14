@@ -1,0 +1,191 @@
+// Copyright 2026 Ji Mao Cai
+// SPDX-License-Identifier: Apache-2.0
+#include "test_support.h"
+using HWND = void*; using HDC = void*; using HPBUFFERARB = void*;
+using DWORD = unsigned long;
+constexpr DWORD ERROR_INVALID_HANDLE = 6;
+static DWORD lastError = 0;
+static void SetLastError(DWORD error) { lastError = error; }
+static DWORD GetLastError() { return lastError; }
+static HDC GetDC(HWND window) { return window; }
+static int ReleaseDC(HWND, HDC) { return 1; }
+namespace EglOS {
+struct PixelFormat { virtual ~PixelFormat() = default; };
+struct PbufferInfo {};
+struct Surface {
+    enum Type { WINDOW, PBUFFER };
+    explicit Surface(Type type) : mType(type) {}
+    virtual ~Surface() = default;
+    Type type() const { return mType; }
+    Type mType;
+};
+}
+namespace gfxstream { namespace base { struct AutoLock { explicit AutoLock(int&) {} }; } }
+static int sGlobalLock = 0;
+struct WinPixelFormat : EglOS::PixelFormat {
+    static const WinPixelFormat* from(const EglOS::PixelFormat* p) {
+        return static_cast<const WinPixelFormat*>(p);
+    }
+    int configId() const { return 7; }
+};
+struct WinGlobals { HDC getDummyDC(const WinPixelFormat*) { return reinterpret_cast<HDC>(1); } };
+static size_t nextId = 10, getCalls = 0, releaseCalls = 0, destroyCalls = 0;
+static bool failRelease = false, failDestroy = false, failGet = false, failCreate = false;
+static bool invalidDestroy = false;
+static std::unordered_map<HPBUFFERARB, size_t> buffers;
+static HPBUFFERARB createPb(HDC, int, int, int, const int*) {
+    if (failCreate) { SetLastError(8); return nullptr; }
+    auto pb = reinterpret_cast<HPBUFFERARB>(++nextId);
+    buffers[pb] = 0;
+    return pb;
+}
+static HDC getPb(HPBUFFERARB pb) {
+    ++getCalls;
+    if (failGet) { SetLastError(1425); return nullptr; }
+    CHECK(buffers.count(pb));
+    ++buffers[pb];
+    return pb;
+}
+static int releasePb(HPBUFFERARB pb, HDC dc) {
+    ++releaseCalls;
+    if (failRelease) { SetLastError(1425); return 0; }
+    CHECK(dc && buffers.count(pb) && buffers[pb]);
+    --buffers[pb];
+    return 1;
+}
+static int destroyPb(HPBUFFERARB pb) {
+    ++destroyCalls;
+    if (invalidDestroy) { buffers.erase(pb); SetLastError(ERROR_INVALID_HANDLE); return 0; }
+    if (failDestroy) { SetLastError(8); return 0; }
+    CHECK(buffers.erase(pb) == 1);
+    return 1;
+}
+struct WglExtensionsDispatch {
+    HPBUFFERARB (*wglCreatePbuffer)(HDC, int, int, int, const int*) = createPb;
+    HDC (*wglGetPbufferDC)(HPBUFFERARB) = getPb;
+    int (*wglReleasePbufferDC)(HPBUFFERARB, HDC) = releasePb;
+    int (*wglDestroyPbuffer)(HPBUFFERARB) = destroyPb;
+    int (*wglSwapInterval)(int) = nullptr;
+};
+#define PROFILE_SLOW(...) ((void)0)
+
+@WIN_SURFACE@
+
+struct ProbeDisplay {
+    WglExtensionsDispatch dispatch;
+    WglExtensionsDispatch* mDispatch = &dispatch;
+    WinGlobals globals;
+    WinGlobals* mGlobals = &globals;
+    std::unordered_map<const EglOS::PixelFormat*, std::vector<EglOS::Surface*>> mFreePbufs;
+    std::unordered_map<const EglOS::PixelFormat*, std::unordered_set<EglOS::Surface*>> mLivePbufs;
+    std::vector<EglOS::Surface*> mDeletePbufs;
+    uint64_t mPbuffersCreated = 0, mPbuffersDestroyed = 0, mPbufferReleaseFailures = 0;
+    uint64_t mPbufferRefreshFailures = 0, mPbuffersInvalid = 0, mPbufferDestroyFailures = 0;
+    std::chrono::steady_clock::time_point mLastPbufferLog{};
+    static constexpr int kPbufPrimingCount = 8;
+
+@CREATE_SURFACE@
+@RELEASE_SURFACE@
+@CREATE_IMPL@
+@LOG_STATS@
+
+    ~ProbeDisplay() {
+        for (auto& row : mFreePbufs) for (auto* p : row.second) {
+            buffers.erase(WinSurface::from(p)->getPbuffer()); delete p;
+        }
+        for (auto& row : mLivePbufs) for (auto* p : row.second) {
+            buffers.erase(WinSurface::from(p)->getPbuffer()); delete p;
+        }
+        for (auto* p : mDeletePbufs) { buffers.erase(WinSurface::from(p)->getPbuffer()); delete p; }
+    }
+};
+static void clearFailures() { failRelease = failDestroy = failGet = failCreate = invalidDestroy = false; }
+int main() {
+    WinPixelFormat format;
+    WglExtensionsDispatch dispatch;
+    {
+        auto pb = createPb(nullptr, 7, 1, 1, nullptr);
+        WinSurface surface(pb, &format, &dispatch);
+        auto oldDC = surface.getDC();
+        failRelease = true;
+        CHECK(!surface.releaseDC());
+        CHECK(surface.getDC() == oldDC);
+        auto before = getCalls;
+        CHECK(!surface.refreshDC());
+        CHECK(getCalls == before);
+        clearFailures();
+        before = releaseCalls;
+        CHECK(surface.releaseDC());
+        CHECK(releaseCalls == before + 1 && surface.getDC() == nullptr);
+        CHECK(destroyPb(pb));
+    }
+    std::puts("PASS WGL preserves failed DC and refresh does not overwrite it");
+    {
+        ProbeDisplay pool;
+        for (int i = 0; i < 1000; ++i) {
+            auto* pb = pool.createPbufferSurface(&format, nullptr);
+            CHECK(pb && pool.releasePbuffer(pb));
+        }
+        CHECK(pool.mPbuffersCreated == 8 && pool.mLivePbufs[&format].empty());
+        CHECK(pool.mFreePbufs[&format].size() == 8 && pool.mDeletePbufs.empty());
+    }
+    std::puts("PASS WGL normal pool remains bounded across 1000 uses");
+    {
+        ProbeDisplay pool;
+        for (int i = 0; i < 1000; ++i) {
+            auto* pb = pool.createPbufferSurface(&format, nullptr);
+            CHECK(pb);
+            failRelease = true;
+            CHECK(!pool.releasePbuffer(pb));
+            clearFailures();
+            CHECK(pool.mLivePbufs[&format].empty() && pool.mDeletePbufs.empty());
+        }
+        CHECK(pool.mPbuffersDestroyed == 1000);
+        CHECK(pool.mPbuffersCreated - pool.mPbuffersDestroyed == pool.mFreePbufs[&format].size());
+    }
+    std::puts("PASS WGL 1000 DC release failures retire instead of accumulating live pbuffers");
+    {
+        ProbeDisplay pool;
+        auto* pb = pool.createPbufferSurface(&format, nullptr);
+        failRelease = failDestroy = true;
+        CHECK(!pool.releasePbuffer(pb));
+        CHECK(pool.mLivePbufs[&format].empty() && pool.mDeletePbufs.size() == 1);
+        clearFailures();
+        auto* next = pool.createPbufferSurface(&format, nullptr);
+        CHECK(pool.mDeletePbufs.size() == 1); // preserve delayed destruction on Intel
+        CHECK(pool.releasePbuffer(next));
+        CHECK(pool.mDeletePbufs.empty() && pool.mPbuffersDestroyed == 1);
+        CHECK(pool.releasePbuffer(pool.createPbufferSurface(&format, nullptr)));
+        CHECK(pool.mPbuffersDestroyed == 1);
+    }
+    std::puts("PASS WGL failed native destruction remains owned and retries exactly once");
+    {
+        ProbeDisplay pool;
+        auto* pb = pool.createPbufferSurface(&format, nullptr);
+        failRelease = invalidDestroy = true;
+        CHECK(!pool.releasePbuffer(pb));
+        clearFailures();
+        CHECK(pool.mDeletePbufs.empty() && pool.mPbuffersInvalid == 1);
+    }
+    std::puts("PASS WGL stale native handle drops its CPU record");
+    {
+        ProbeDisplay pool;
+        failCreate = true;
+        CHECK(!pool.createPbufferSurface(&format, nullptr));
+        clearFailures();
+        CHECK(pool.createPbufferSurface(&format, nullptr));
+    }
+    std::puts("PASS WGL native creation failure does not dereference an empty pool");
+    {
+        ProbeDisplay pool;
+        failGet = true;
+        CHECK(!pool.createPbufferSurface(&format, nullptr));
+        CHECK(pool.mDeletePbufs.size() == 1);
+        clearFailures();
+        auto* pb = pool.createPbufferSurface(&format, nullptr);
+        CHECK(pb && pool.releasePbuffer(pb));
+        CHECK(pool.mDeletePbufs.empty());
+    }
+    std::puts("PASS WGL failed initial DC acquisition retains ownership until a safe release");
+    CHECK(buffers.empty());
+}

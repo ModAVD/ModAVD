@@ -1,0 +1,1005 @@
+From babda4d39d8d952c29314b62ca0eb4c7dfe04d1f Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 01:08:04 +0800
+Subject: [PATCH] =?UTF-8?q?gfxstream:=20=E4=BF=9D=E7=95=99=E9=87=8A?=
+ =?UTF-8?q?=E6=94=BE=E5=A4=B1=E8=B4=A5=E7=9A=84=E8=B5=84=E6=BA=90=E4=BB=A5?=
+ =?UTF-8?q?=E4=BE=BF=E9=87=8D=E8=AF=95=EF=BC=8C=E8=AE=B0=E5=BD=95=E6=88=AA?=
+ =?UTF-8?q?=E5=9B=BE=E8=AF=BB=E5=9B=9E?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+WGL 释放 DC 失败时保留句柄，并把退出的 pbuffer 移入待销毁队列。
+销毁失败后仍保留所有权，继续在原有安全时机重试。
+
+ColorBuffer 绑定上下文失败时保留清理对象，原 helper 恢复后再释放。
+helper 销毁时回收 CPU 对象，避免析构函数在错误上下文调用 GL。
+
+按来源汇总读回次数、字节数、耗时和失败，记录 ColorBuffer、
+RenderThread 与原生 pbuffer 的创建、释放和待清理数量。
+
+Refs: https://github.com/ModAVD/ModAVD/issues/208
+---
+ host/BUILD.bazel                              |   2 +
+ host/frame_buffer.cpp                         |  18 +-
+ host/gl/color_buffer_gl.cpp                   | 124 ++++++++---
+ host/gl/context_helper.h                      |  38 +++-
+ host/gl/display_surface_gl.cpp                |  15 +-
+ host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 124 +++++++++--
+ host/gl/texture_resize.cpp                    |   2 +
+ host/gl/texture_resize.h                      |   8 +
+ host/gl/yuv_converter.cpp                     |   2 +-
+ host/gl/yuv_converter.h                       |   2 +
+ .../render-utils/readback_diagnostics.h       | 207 ++++++++++++++++++
+ host/render_control.cpp                       |   9 +
+ host/render_thread.cpp                        |   3 +
+ 13 files changed, 486 insertions(+), 68 deletions(-)
+ create mode 100644 host/include/render-utils/readback_diagnostics.h
+
+diff --git a/host/BUILD.bazel b/host/BUILD.bazel
+index e318cdd0b..13b06d2b6 100644
+--- a/host/BUILD.bazel
++++ b/host/BUILD.bazel
+@@ -40,6 +40,7 @@ cc_library(
+         "include/render-utils/dma_device.h",
+         "include/render-utils/gralloc_enums.h",
+         "include/render-utils/logging_operations.h",
++        "include/render-utils/readback_diagnostics.h",
+         "include/render-utils/render_api.h",
+         "include/render-utils/render_api_functions.h",
+         "include/render-utils/render_api_platform_types.h",
+@@ -59,6 +60,7 @@ cc_library(
+     linkopts = GFXSTREAM_HOST_LINKOPTS,
+     visibility = ["//visibility:public"],
+     deps = [
++        "//common/logging:gfxstream_common_logging",
+         "//host/features:gfxstream_host_features",
+     ],
+ )
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index eae51be90..5cfb2e59c 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -59,6 +59,7 @@
+ #include "gfxstream/system/System.h"
+ #include "host/gl/context_helper.h"
+ #include "render-utils/MediaNative.h"
++#include "render-utils/readback_diagnostics.h"
+ #include "render_thread_info.h"
+ #include "sync_thread.h"
+ #include "vulkan/display_vk.h"
+@@ -1588,6 +1589,7 @@ FrameBuffer::Impl::~Impl() {
+         vk::VkDecoderGlobalState::reset();
+         m_emulationVk.reset();
+     }
++    ReadbackDiagnostics::get().log();
+ }
+ 
+ // Synchronously reads |cb| into |img| for a post callback when there is no ReadbackWorker, i.e.
+@@ -2806,6 +2808,8 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
+                 }
+             }
+ 
++            ReadbackScope frameTrace(ReadbackSource::HostFrame, cb->getWidth(), cb->getHeight(),
++                                     4ull * cb->getWidth() * cb->getHeight());
+             if (asyncReadbackSupported()) {
+                 ensureReadbackWorker();
+                 const auto status = m_readbackWorker->doNextReadback(
+@@ -4957,8 +4961,18 @@ bool FrameBuffer::isVulkanEnabled() const { return mImpl->isVulkanEnabled(); }
+ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsigned int* height,
+                                uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
+                                int desiredHeight, int desiredRotation, Rect rect) {
+-    return mImpl->getScreenshot(nChannels, width, height, pixels, cPixels, displayId, desiredWidth,
+-                                desiredHeight, desiredRotation, rect);
++    ReadbackScope trace(pixels ? ReadbackSource::HostScreenshot : ReadbackSource::HostQuery,
++                        desiredWidth, desiredHeight, 0);
++    const int result = mImpl->getScreenshot(nChannels, width, height, pixels, cPixels, displayId,
++                                            desiredWidth, desiredHeight, desiredRotation, rect);
++    trace.result(result == 0 || (!pixels && result == Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE));
++#ifdef CONFIG_AEMU
++    if (result == 0 || result == Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE) {
++        trace.dimensions(static_cast<int>(*width), static_cast<int>(*height));
++        trace.bytes(*cPixels);
++    }
++#endif
++    return result;
+ }
+ 
+ int FrameBuffer::getColorBufferScreenshot(
+diff --git a/host/gl/color_buffer_gl.cpp b/host/gl/color_buffer_gl.cpp
+index d09a9e7af..e97b20bd2 100644
+--- a/host/gl/color_buffer_gl.cpp
++++ b/host/gl/color_buffer_gl.cpp
+@@ -21,12 +21,14 @@
+ 
+ #include <cmath>
+ #include <glm/gtc/type_ptr.hpp>
++#include <utility>
+ 
+ #include "OpenGLESDispatch/DispatchTables.h"
+ #include "OpenGLESDispatch/EGLDispatch.h"
+ #include "common/gl_utils.h"
+ #include "debug_gl.h"
+ #include "gfxstream/host/renderer_operations.h"
++#include "render-utils/readback_diagnostics.h"
+ #include "render_thread_info_gl.h"
+ #include "texture_draw.h"
+ #include "texture_resize.h"
+@@ -39,6 +41,37 @@ namespace {
+ 
+ using gfxstream::base::ManagedDescriptor;
+ 
++// Owns resources even after the public ColorBufferGl has gone away. Cleanup must
++// run in its original helper context because framebuffer names are not shared.
++struct ColorBufferGlCleanup {
++    ColorBufferGlCleanup() = default;
++    ColorBufferGlCleanup(ColorBufferGlCleanup&&) = default;
++    ~ColorBufferGlCleanup() {
++        // Leave native reclamation to EGL teardown when the helper is destroyed.
++        // CPU helpers must still be freed without calling GL elsewhere.
++        if (resizer) resizer->abandonGlResources();
++        if (yuv) yuv->abandonGlResources();
++    }
++    void run(ContextHelper::CleanupContext context) {
++        if (context == ContextHelper::CleanupContext::Lost) return;
++        if (blitImage) s_egl.eglDestroyImageKHR(display, blitImage);
++        if (image) s_egl.eglDestroyImageKHR(display, image);
++        if (fbo) s_gles2.glDeleteFramebuffers(1, &fbo);
++        if (yuvFbo) s_gles2.glDeleteFramebuffers(1, &yuvFbo);
++        if (scaleFbo) s_gles2.glDeleteFramebuffers(1, &scaleFbo);
++        yuv.reset();
++        s_gles2.glDeleteTextures(2, textures);
++        if (memory) s_gles2.glDeleteMemoryObjectsEXT(1, &memory);
++        resizer.reset();
++    }
++    EGLDisplay display = EGL_NO_DISPLAY;
++    EGLImageKHR image = nullptr, blitImage = nullptr;
++    GLuint textures[2] = {0, 0};
++    GLuint fbo = 0, yuvFbo = 0, scaleFbo = 0, memory = 0;
++    std::unique_ptr<TextureResize> resizer;
++    std::unique_ptr<YUVConverter> yuv;
++};
++
+ // Lazily create and bind a framebuffer object to the current host context.
+ // |fbo| is the address of the framebuffer object name.
+ // |tex| is the name of a texture that is attached to the framebuffer object
+@@ -424,47 +457,52 @@ ColorBufferGl::ColorBufferGl(EGLDisplay display, HandleType hndl, GLuint width,
+       m_helper(helper),
+       m_textureDraw(textureDraw),
+       m_pixelReadFormats(pixelReadFormats),
+-      mHndl(hndl) {}
++      mHndl(hndl) {
++    ReadbackDiagnostics::get().colorBufferCreated(4ull * width * height);
++}
+ 
+ ColorBufferGl::~ColorBufferGl() {
++    const uint64_t rgbaBytes = 4ull * m_width * m_height;
++    ReadbackDiagnostics::get().colorBufferReleased(rgbaBytes);
++    ColorBufferGlCleanup cleanup;
++    cleanup.display = m_display;
++    cleanup.image = m_eglImage;
++    cleanup.blitImage = m_blitEGLImage;
++    cleanup.textures[0] = m_tex;
++    cleanup.textures[1] = m_blitTex;
++    cleanup.fbo = m_fbo;
++    cleanup.yuvFbo = m_yuv_conversion_fbo;
++    cleanup.scaleFbo = m_scaleRotationFbo;
++    cleanup.memory = m_memoryObject;
++    cleanup.resizer.reset(std::exchange(m_resizer, nullptr));
++    cleanup.yuv = std::move(m_yuv_converter);
+     RecursiveScopedContextBind context(m_helper);
+-
+-    // b/284523053
+-    // Swiftshader logspam on exit. But it doesn't happen with SwANGLE.
+     if (!context.isOk()) {
+-        GFXSTREAM_DEBUG("Failed to bind context when releasing color buffers\n");
++        auto pending = std::make_shared<ColorBufferGlCleanup>(std::move(cleanup));
++        ReadbackDiagnostics::get().cleanupDeferred(rgbaBytes);
++        const auto handle = mHndl;
++        auto retire = [pending, handle, rgbaBytes](ContextHelper::CleanupContext mode) {
++            pending->run(mode);
++            const bool recovered = mode == ContextHelper::CleanupContext::Current;
++            ReadbackDiagnostics::get().cleanupFinished(rgbaBytes, recovered);
++            if (recovered) {
++                GFXSTREAM_INFO("MAS: recovered deferred ColorBuffer GL cleanup handle=%u", handle);
++            } else {
++                GFXSTREAM_ERROR(
++                    "MAS: context lost with deferred ColorBuffer GL cleanup "
++                    "handle=%u rgbaEstimateBytes=%llu; freeing CPU ownership",
++                    handle, static_cast<unsigned long long>(rgbaBytes));
++            }
++        };
++        const size_t count = m_helper ? m_helper->deferCleanup(std::move(retire)) : 0;
++        if (!m_helper) retire(ContextHelper::CleanupContext::Lost);
++        GFXSTREAM_ERROR(
++            "MAS: deferred ColorBuffer GL cleanup handle=%u size=%ux%u "
++            "rgbaEstimateBytes=%llu pending=%zu",
++            mHndl, m_width, m_height, static_cast<unsigned long long>(rgbaBytes), count);
+         return;
+     }
+-
+-    if (m_blitEGLImage) {
+-        s_egl.eglDestroyImageKHR(m_display, m_blitEGLImage);
+-    }
+-    if (m_eglImage) {
+-        s_egl.eglDestroyImageKHR(m_display, m_eglImage);
+-    }
+-
+-    if (m_fbo) {
+-        s_gles2.glDeleteFramebuffers(1, &m_fbo);
+-    }
+-
+-    if (m_yuv_conversion_fbo) {
+-        s_gles2.glDeleteFramebuffers(1, &m_yuv_conversion_fbo);
+-    }
+-
+-    if (m_scaleRotationFbo) {
+-        s_gles2.glDeleteFramebuffers(1, &m_scaleRotationFbo);
+-    }
+-
+-    m_yuv_converter.reset();
+-
+-    GLuint tex[2] = {m_tex, m_blitTex};
+-    s_gles2.glDeleteTextures(2, tex);
+-
+-    if (m_memoryObject) {
+-        s_gles2.glDeleteMemoryObjectsEXT(1, &m_memoryObject);
+-    }
+-
+-    delete m_resizer;
++    cleanup.run(ContextHelper::CleanupContext::Current);
+ }
+ 
+ 
+@@ -526,6 +564,8 @@ bool ColorBufferGl::isReadbackToFormatSupported(GfxstreamFormat outputFormat) {
+ 
+ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFormat pixelFormat,
+                                void* pixels, uint32_t pixelsSize) {
++    ReadbackScope trace(ReadbackSource::GlPixels, width, height, 0, ReadbackOutcome::Failed);
++    trace.identity(mHndl);
+     RecursiveScopedContextBind context(m_helper);
+     if (!context.isOk()) {
+         return false;
+@@ -541,6 +581,7 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
+         return false;
+     }
+     const FormatOpenglParams& formatParams = *formatParamsOpt;
++    trace.bytes(static_cast<uint64_t>(std::max(width, 0)) * std::max(height, 0) * formatParams.bpp);
+ 
+     uint32_t sizeNeeded = width * height * formatParams.bpp;
+     if (pixelsSize < sizeNeeded) {
+@@ -581,12 +622,24 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
+     }
+     s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
+     unbindFbo();
++    trace.result(res);
+     return res;
+ }
+ 
+ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const Rect& rect,
+                                      GfxstreamFormat pixelsFormat, void* pixels,
+                                      const std::optional<std::array<float, 16>>& colorTransform) {
++    ReadbackScope trace(ReadbackSource::GlScaled, width, height, 0, ReadbackOutcome::Failed);
++    trace.identity(mHndl);
++    const auto format = GetFormatOpenglParameters(pixelsFormat);
++    if (format) {
++        const bool snipping = rect.size.w != 0 && rect.size.h != 0;
++        const int readWidth = snipping ? rect.size.w : width;
++        const int readHeight = snipping ? rect.size.h : height;
++        trace.dimensions(readWidth, readHeight);
++        trace.bytes(static_cast<uint64_t>(std::max(readWidth, 0)) * std::max(readHeight, 0) *
++                    format->bpp);
++    }
+     RecursiveScopedContextBind context(m_helper);
+     if (!context.isOk()) {
+         return false;
+@@ -691,6 +744,7 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const
+         }
+         s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
+         unbindFbo();
++        trace.result(true);
+         return true;
+     }
+ 
+diff --git a/host/gl/context_helper.h b/host/gl/context_helper.h
+index 06ca6d915..d9eec909e 100644
+--- a/host/gl/context_helper.h
++++ b/host/gl/context_helper.h
+@@ -14,6 +14,13 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++#include <cstddef>
++#include <functional>
++#include <mutex>
++#include <utility>
++#include <vector>
++
+ namespace gfxstream {
+ namespace host {
+ namespace gl {
+@@ -24,7 +31,11 @@ namespace gl {
+ class ContextHelper {
+   public:
+     ContextHelper() = default;
+-    virtual ~ContextHelper() = default;
++    // When this helper is destroyed, release CPU ownership without issuing GL
++    // calls in an unrelated context. Leave native reclamation to EGL teardown.
++    enum class CleanupContext { Current, Lost };
++    using Cleanup = std::function<void(CleanupContext)>;
++    virtual ~ContextHelper() { drainCleanup(CleanupContext::Lost); }
+     // Saves the calling thread's current context and makes the helper's
+     // context current. Returns false if the context could not be made
+     // current; GL calls must then not be made. teardownContext() restores
+@@ -32,6 +43,30 @@ class ContextHelper {
+     virtual bool setupContext() = 0;
+     virtual void teardownContext() = 0;
+     virtual bool isBound() const = 0;
++
++    size_t deferCleanup(Cleanup cleanup) {
++        std::lock_guard<std::mutex> lock(mCleanupMutex);
++        mCleanup.emplace_back(std::move(cleanup));
++        mHasCleanup.store(true, std::memory_order_release);
++        return mCleanup.size();
++    }
++
++    size_t drainCleanup(CleanupContext context) {
++        if (!mHasCleanup.load(std::memory_order_acquire)) return 0;
++        std::vector<Cleanup> cleanup;
++        {
++            std::lock_guard<std::mutex> lock(mCleanupMutex);
++            cleanup.swap(mCleanup);
++            mHasCleanup.store(false, std::memory_order_release);
++        }
++        for (auto& item : cleanup) item(context);
++        return cleanup.size();
++    }
++
++   private:
++    std::mutex mCleanupMutex;
++    std::vector<Cleanup> mCleanup;
++    std::atomic<bool> mHasCleanup{false};
+ };
+ 
+ // Helper class to use a ContextHelper for some set of operations.
+@@ -51,6 +86,7 @@ class RecursiveScopedContextBind {
+         if (helper) {
+             mIsBound = helper->setupContext();
+             mNeedsTeardown = true;
++            if (mIsBound) helper->drainCleanup(ContextHelper::CleanupContext::Current);
+         }
+     }
+ 
+diff --git a/host/gl/display_surface_gl.cpp b/host/gl/display_surface_gl.cpp
+index 204aa0e8b..33093defa 100644
+--- a/host/gl/display_surface_gl.cpp
++++ b/host/gl/display_surface_gl.cpp
+@@ -106,18 +106,18 @@ class DisplaySurfaceGlContextHelper : public ContextHelper {
+             }
+ 
+             if (!s_egl.eglMakeCurrent(mDisplay, mSurface, mSurface, mContext)) {
++                const EGLint error = s_egl.eglGetError();
+                 // b/284523053
+                 // Legacy swiftshader logspam on exit with this line.
+-                GFXSTREAM_DEBUG("Failed to make display surface context current: %d",
+-                                s_egl.eglGetError());
++                GFXSTREAM_DEBUG("Failed to make display surface context current: %d", error);
+                 // MAS local: say which thread and call site hold the context.
+                 const SiteName mine = describeSite(site);
+                 const SiteName theirs = describeSite(mOwnerSite.load());
+                 GFXSTREAM_ERROR(
+                     "MAS: thread %lu (site %s+0x%llx) could not make context %p current; "
+-                    "thread %lu holds it (site %s+0x%llx)",
++                    "thread %lu holds it (site %s+0x%llx), eglError=0x%x surface=%p",
+                     self, mine.module, mine.offset, mContext, mOwnerThread.load(),
+-                    theirs.module, theirs.offset);
++                    theirs.module, theirs.offset, error, mSurface);
+                 // Still add the previous context to the stack, so that
+                 // teardownContext() restores it, but report the failure:
+                 // GL calls made now would not reach this context.
+@@ -281,6 +281,11 @@ DisplaySurfaceGl::DisplaySurfaceGl(EGLDisplay display,
+       mContextHelper(new DisplaySurfaceGlContextHelper(display, surface, context)) {}
+ 
+ DisplaySurfaceGl::~DisplaySurfaceGl() {
++    // Drain deferred objects before destroying the context they belong to.
++    {
++        RecursiveScopedContextBind bind(mContextHelper.get());
++    }
++    mContextHelper.reset();
+     if (mDisplay != EGL_NO_DISPLAY) {
+         if (mSurface) {
+             s_egl.eglDestroySurface(mDisplay, mSurface);
+@@ -293,4 +298,4 @@ DisplaySurfaceGl::~DisplaySurfaceGl() {
+ 
+ }  // namespace gl
+ }  // namespace host
+-}  // namespace gfxstream
+\ No newline at end of file
++}  // namespace gfxstream
+diff --git a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+index 9d589b133..d713f87cc 100644
+--- a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
++++ b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
+@@ -28,15 +28,17 @@
+ #include <wingdi.h>
+ 
+ #include <algorithm>
++#include <chrono>
++#include <cstdint>
+ #include <memory>
+ #include <unordered_map>
+ #include <unordered_set>
+ 
+-#include "core_profile_configs.h"
+ #include "common/gl_library.h"
++#include "core_profile_configs.h"
++#include "gfxstream/common/logging.h"
+ #include "gfxstream/shared_library.h"
+ #include "gfxstream/synchronization/Lock.h"
+-#include "gfxstream/common/logging.h"
+ 
+ #define IS_TRUE(a) \
+         do { if (!(a)) return NULL; } while (0)
+@@ -535,22 +537,30 @@ public:
+     bool releaseDC() {
+         if (m_dcReleased) return true;
+ 
+-        bool res = false;
+-        if (m_dispatch->wglReleasePbufferDC) {
+-            res = m_dispatch->wglReleasePbufferDC(m_pb, m_hdc);
+-            m_hdc = 0;
+-            m_dcReleased = true;
++        SetLastError(0);
++        if (!m_dispatch->wglReleasePbufferDC || !m_dispatch->wglReleasePbufferDC(m_pb, m_hdc)) {
++            const DWORD error = GetLastError();
++            GFXSTREAM_ERROR("MAS: wglReleasePbufferDC(%p, %p) failed: error 0x%lx", m_pb, m_hdc,
++                            error);
++            return false;
+         }
+-        return res;
++        m_hdc = nullptr;
++        m_dcReleased = true;
++        return true;
+     }
+ 
+     bool refreshDC() {
+-        if (!m_dcReleased) releaseDC();
++        if (!releaseDC()) return false;
+         if (m_dispatch->wglGetPbufferDC) {
++            SetLastError(0);
+             m_hdc = m_dispatch->wglGetPbufferDC(m_pb);
+         }
+ 
+-        if (!m_hdc) return false;
++        if (!m_hdc) {
++            const DWORD error = GetLastError();
++            GFXSTREAM_ERROR("MAS: wglGetPbufferDC(%p) failed: error 0x%lx", m_pb, error);
++            return false;
++        }
+ 
+         m_dcReleased = false;
+ 
+@@ -1076,14 +1086,19 @@ public:
+             PROFILE_SLOW("createPbufferSurface (slow path)");
+             int toCreate = std::max((int)mLivePbufs[pixelFormat].size(), kPbufPrimingCount);
+             for (int i = 0; i < toCreate; i++) {
+-                freeElts.push_back(createPbufferSurfaceImpl(pixelFormat));
++                auto* surface = createPbufferSurfaceImpl(pixelFormat);
++                if (!surface) break;
++                freeElts.push_back(surface);
+             }
+         }
+ 
++        if (freeElts.empty()) return nullptr;
++
+         PROFILE_SLOW("createPbufferSurface (fast path)");
+         EglOS::Surface* surf = freeElts.back();
+         WinSurface* winSurface = WinSurface::from(surf);
+         if (!winSurface->refreshDC()) {
++            ++mPbufferRefreshFailures;
+             // TODO: Figure out why some Intel GPUs can hang flakily if
+             // we just destroy the pbuffer here.
+             mDeletePbufs.push_back(surf);
+@@ -1091,7 +1106,8 @@ public:
+         }
+         freeElts.pop_back();
+ 
+-        mLivePbufs[pixelFormat].insert(surf);
++        if (surf) mLivePbufs[pixelFormat].insert(surf);
++        logPbufferStatsLocked(false);
+ 
+         return surf;
+     }
+@@ -1102,25 +1118,48 @@ public:
+ 
+         WinSurface* winpb = WinSurface::from(pb);
+ 
+-        if (!winpb->releaseDC()) return false;
+-
+         const EglOS::PixelFormat* pixelFormat =
+             winpb->getPixelFormat();
+ 
+-        auto& frees = mFreePbufs[pixelFormat];
+-        frees.push_back(pb);
+-
+         mLivePbufs[pixelFormat].erase(pb);
++        const bool released = winpb->releaseDC();
++        if (released) {
++            mFreePbufs[pixelFormat].push_back(pb);
++        } else {
++            ++mPbufferReleaseFailures;
++            // The EGL surface has relinquished ownership. Never reuse a DC whose
++            // release failed. Keep the pbuffer owned until native destruction succeeds.
++            mDeletePbufs.push_back(pb);
++        }
+ 
+-        for (auto surf : mDeletePbufs) {
++        for (auto it = mDeletePbufs.begin(); it != mDeletePbufs.end();) {
++            auto* surf = *it;
+             WinSurface* winSurface = WinSurface::from(surf);
+-            mDispatch->wglDestroyPbuffer(winSurface->getPbuffer());
++            // WGL permits destroying an unbound pbuffer even if releasing its DC
++            // failed. A failed destroy remains pending for the next safe release.
++            winSurface->releaseDC();
++            SetLastError(0);
++            if (!mDispatch->wglDestroyPbuffer(winSurface->getPbuffer())) {
++                const DWORD error = GetLastError();
++                ++mPbufferDestroyFailures;
++                GFXSTREAM_ERROR(
++                    "MAS: wglDestroyPbuffer(%p) failed: error 0x%lx; "
++                    "pending=%zu",
++                    winSurface->getPbuffer(), error, mDeletePbufs.size());
++                if (error != ERROR_INVALID_HANDLE) {
++                    ++it;
++                    continue;
++                }
++                ++mPbuffersInvalid;
++            } else {
++                ++mPbuffersDestroyed;
++            }
+             delete winSurface;
++            it = mDeletePbufs.erase(it);
+         }
+ 
+-        mDeletePbufs.clear();
+-
+-        return true;
++        logPbufferStatsLocked(!released);
++        return released;
+     }
+ 
+     virtual bool makeCurrent(EglOS::Surface* read,
+@@ -1249,12 +1288,42 @@ private:
+         if (!dispatch->wglCreatePbuffer) {
+             return NULL;
+         }
++        SetLastError(0);
+         HPBUFFERARB pb = dispatch->wglCreatePbuffer(dpy, format->configId(), 1, 1, nullptr);
+         if (!pb) {
+-            GetLastError();
++            const DWORD error = GetLastError();
++            GFXSTREAM_ERROR("MAS: wglCreatePbuffer failed format=%d error=0x%lx",
++                            format->configId(), error);
+             return NULL;
+         }
+-        return new WinSurface(pb, pixelFormat, dispatch);
++        ++mPbuffersCreated;
++        auto* surface = new WinSurface(pb, pixelFormat, dispatch);
++        if (!surface->getDC()) {
++            ++mPbufferRefreshFailures;
++            mDeletePbufs.push_back(surface);
++            logPbufferStatsLocked(true);
++            return nullptr;
++        }
++        return surface;
++    }
++
++    void logPbufferStatsLocked(bool force) {
++        const auto now = std::chrono::steady_clock::now();
++        if (!force && now - mLastPbufferLog < std::chrono::minutes(1)) return;
++        mLastPbufferLog = now;
++        size_t live = 0, free = 0;
++        for (const auto& entry : mLivePbufs) live += entry.second.size();
++        for (const auto& entry : mFreePbufs) free += entry.second.size();
++        GFXSTREAM_INFO(
++            "MAS: native pbuffers created=%llu destroyed=%llu live=%zu "
++            "free=%zu pending=%zu invalid=%llu dcReleaseFailures=%llu "
++            "refreshFailures=%llu destroyFailures=%llu",
++            static_cast<unsigned long long>(mPbuffersCreated),
++            static_cast<unsigned long long>(mPbuffersDestroyed), live, free, mDeletePbufs.size(),
++            static_cast<unsigned long long>(mPbuffersInvalid),
++            static_cast<unsigned long long>(mPbufferReleaseFailures),
++            static_cast<unsigned long long>(mPbufferRefreshFailures),
++            static_cast<unsigned long long>(mPbufferDestroyFailures));
+     }
+ 
+     bool mCoreProfileSupported = false;
+@@ -1268,6 +1337,13 @@ private:
+     std::unordered_map<const EglOS::PixelFormat*, std::vector<EglOS::Surface* > > mFreePbufs;
+     std::unordered_map<const EglOS::PixelFormat*, std::unordered_set<EglOS::Surface* > > mLivePbufs;
+     std::vector<EglOS::Surface*> mDeletePbufs;
++    uint64_t mPbuffersCreated = 0;
++    uint64_t mPbuffersDestroyed = 0;
++    uint64_t mPbufferReleaseFailures = 0;
++    uint64_t mPbufferRefreshFailures = 0;
++    uint64_t mPbuffersInvalid = 0;
++    uint64_t mPbufferDestroyFailures = 0;
++    std::chrono::steady_clock::time_point mLastPbufferLog{};
+     static constexpr int kPbufPrimingCount = 8;
+ };
+ 
+diff --git a/host/gl/texture_resize.cpp b/host/gl/texture_resize.cpp
+index 002bd72bf..87f4f3886 100644
+--- a/host/gl/texture_resize.cpp
++++ b/host/gl/texture_resize.cpp
+@@ -274,6 +274,7 @@ TextureResize::TextureResize(GLuint width, GLuint height) :
+ }
+ 
+ TextureResize::~TextureResize() {
++    if (mAbandoned) return;
+     GLuint tex[2] = {mFBWidth.texture, mFBHeight.texture};
+     s_gles2.glDeleteTextures(2, tex);
+     s_gles2.glDeleteBuffers(1, &mVertexBuffer);
+@@ -615,6 +616,7 @@ GLuint TextureResize::GenericResizer::draw(GLuint texture, int width, int height
+ }
+ 
+ TextureResize::GenericResizer::~GenericResizer() {
++    if (mAbandoned) return;
+     s_gles2.glDeleteFramebuffers(1, &mFrameBuffer.framebuffer);
+     s_gles2.glDeleteTextures(1, &mFrameBuffer.texture);
+     s_gles2.glUseProgram(0);
+diff --git a/host/gl/texture_resize.h b/host/gl/texture_resize.h
+index 4bb386d8a..05e379358 100644
+--- a/host/gl/texture_resize.h
++++ b/host/gl/texture_resize.h
+@@ -27,6 +27,11 @@ class TextureResize {
+ public:
+     TextureResize(GLuint width, GLuint height);
+     ~TextureResize();
++    // Only for terminal context loss: release CPU state without making GL calls.
++    void abandonGlResources() {
++        mAbandoned = true;
++        if (mGenericResizer) mGenericResizer->abandonGlResources();
++    }
+ 
+     // Scales the given texture for the current viewport and returns the scaled
+     // texture. May return the input if no scaling is required.
+@@ -45,12 +50,14 @@ public:
+     public:
+         GenericResizer();
+         ~GenericResizer();
++        void abandonGlResources() { mAbandoned = true; }
+ 
+         // Renders the contents of 2D |input_texture| on screen
+         // |width| and |height| are the dimensions of the texture.
+         GLuint draw(GLuint texture, int width, int height, int skinRotation);
+ 
+     private:
++        bool mAbandoned = false;
+         GLuint mProgram;
+         GLuint mVertexBuffer;
+         GLuint mIndexBuffer;
+@@ -67,6 +74,7 @@ private:
+     void resize(GLuint texture);
+ 
+ private:
++    bool mAbandoned = false;
+     GLuint mWidth;
+     GLuint mHeight;
+     unsigned int mFactor;
+diff --git a/host/gl/yuv_converter.cpp b/host/gl/yuv_converter.cpp
+index 5ac4bc07f..3b2b738d5 100644
+--- a/host/gl/yuv_converter.cpp
++++ b/host/gl/yuv_converter.cpp
+@@ -1007,7 +1007,7 @@ void YUVConverter::reset() {
+ }
+ 
+ YUVConverter::~YUVConverter() {
+-    reset();
++    if (!mAbandoned) reset();
+ }
+ 
+ }  // namespace gl
+diff --git a/host/gl/yuv_converter.h b/host/gl/yuv_converter.h
+index 4accac6d5..a11806764 100644
+--- a/host/gl/yuv_converter.h
++++ b/host/gl/yuv_converter.h
+@@ -56,6 +56,7 @@ class YUVConverter {
+     YUVConverter(int width, int height, GfxstreamFormat format);
+     // destroy when ColorBuffer is destroyed
+     ~YUVConverter();
++    void abandonGlResources() { mAbandoned = true; }
+     // call when gralloc_unlock updates
+     // the host color buffer
+     // (rcUpdateColorBuffer)
+@@ -78,6 +79,7 @@ class YUVConverter {
+                                YuvPlane plane,
+                                GLuint* outTextureName);
+ private:
++    bool mAbandoned = false;
+     bool init(int w, int h, GfxstreamFormat format);
+     void reset();
+ 
+diff --git a/host/include/render-utils/readback_diagnostics.h b/host/include/render-utils/readback_diagnostics.h
+new file mode 100644
+index 000000000..e94a262fc
+--- /dev/null
++++ b/host/include/render-utils/readback_diagnostics.h
+@@ -0,0 +1,207 @@
++// Copyright 2026 Ji Mao Cai
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstddef>
++#include <cstdint>
++#include <mutex>
++
++#include "gfxstream/common/logging.h"
++
++namespace gfxstream {
++namespace host {
++
++// Counts requested/read-back bytes, never driver allocations or leaked bytes.
++// HostFrame counts callback submissions, not reads by a shared-memory consumer.
++enum class ReadbackSource {
++    Guest,
++    GuestDma,
++    HostScreenshot,
++    HostQuery,
++    HostFrame,
++    GlPixels,
++    GlScaled,
++    Count
++};
++enum class ReadbackOutcome { Returned, Failed };
++
++class ReadbackDiagnostics {
++   public:
++    using Clock = std::chrono::steady_clock;
++    static ReadbackDiagnostics& get() {
++        static ReadbackDiagnostics diagnostics;
++        return diagnostics;
++    }
++
++    void readback(ReadbackSource source, int width, int height, uint64_t bytes, uint64_t elapsedUs,
++                  ReadbackOutcome outcome, uint32_t handle = 0, uint64_t puid = 0) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        auto& row = mReadbacks[static_cast<size_t>(source)];
++        ++row.calls;
++        row.bytes += bytes;
++        row.elapsedUs += elapsedUs;
++        row.maxUs = std::max(row.maxUs, elapsedUs);
++        row.width = width;
++        row.height = height;
++        row.handle = handle;
++        row.puid = puid;
++        if (outcome == ReadbackOutcome::Failed) {
++            ++row.failures;
++            GFXSTREAM_ERROR(
++                "MAS: readback failed source=%s size=%dx%d bytes=%llu elapsedUs=%llu "
++                "cb=%u puid=%llu",
++                name(source), width, height, static_cast<unsigned long long>(bytes),
++                static_cast<unsigned long long>(elapsedUs), handle,
++                static_cast<unsigned long long>(puid));
++        }
++        logLocked();
++    }
++
++    void colorBufferCreated(uint64_t rgbaBytes) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        ++mColorBuffersCreated;
++        mLiveRgbaEstimate += rgbaBytes;
++        logLocked();
++    }
++    void colorBufferReleased(uint64_t rgbaBytes) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        ++mColorBuffersReleased;
++        mLiveRgbaEstimate -= rgbaBytes;
++    }
++    void cleanupDeferred(uint64_t rgbaBytes) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        ++mDeferred;
++        mPendingRgbaEstimate += rgbaBytes;
++    }
++    void cleanupFinished(uint64_t rgbaBytes, bool recovered) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        if (recovered)
++            ++mRecovered;
++        else
++            ++mAbandoned;
++        mPendingRgbaEstimate -= rgbaBytes;
++        logLocked();
++    }
++    void renderThreadCreated() {
++        std::lock_guard<std::mutex> lock(mMutex);
++        ++mThreadsCreated;
++    }
++    void renderThreadReleased() {
++        std::lock_guard<std::mutex> lock(mMutex);
++        ++mThreadsReleased;
++        logLocked();
++    }
++    void log() {
++        std::lock_guard<std::mutex> lock(mMutex);
++        logLocked(true);
++    }
++
++   private:
++    struct Readbacks {
++        uint64_t calls = 0, bytes = 0, elapsedUs = 0, maxUs = 0, failures = 0;
++        int width = 0, height = 0;
++        uint32_t handle = 0;
++        uint64_t puid = 0;
++    };
++    static const char* name(ReadbackSource source) {
++        switch (source) {
++            case ReadbackSource::Guest:
++                return "guest";
++            case ReadbackSource::GuestDma:
++                return "guest-dma";
++            case ReadbackSource::HostScreenshot:
++                return "host-screenshot";
++            case ReadbackSource::HostQuery:
++                return "host-size-query";
++            case ReadbackSource::HostFrame:
++                return "host-frame-submit";
++            case ReadbackSource::GlPixels:
++                return "gl-pixels";
++            case ReadbackSource::GlScaled:
++                return "gl-scaled";
++            case ReadbackSource::Count:
++                break;
++        }
++        return "invalid";
++    }
++    void logLocked(bool force = false) {
++        const auto now = Clock::now();
++        if (!force && now - mLastLog < std::chrono::minutes(1)) return;
++        mLastLog = now;
++        for (size_t i = 0; i < mReadbacks.size(); ++i) {
++            const auto& row = mReadbacks[i];
++            if (!row.calls) continue;
++            GFXSTREAM_INFO(
++                "MAS: readback source=%s calls=%llu bytes=%llu failures=%llu "
++                "totalUs=%llu maxUs=%llu lastSize=%dx%d lastCb=%u lastPuid=%llu",
++                name(static_cast<ReadbackSource>(i)), static_cast<unsigned long long>(row.calls),
++                static_cast<unsigned long long>(row.bytes),
++                static_cast<unsigned long long>(row.failures),
++                static_cast<unsigned long long>(row.elapsedUs),
++                static_cast<unsigned long long>(row.maxUs), row.width, row.height, row.handle,
++                static_cast<unsigned long long>(row.puid));
++        }
++        GFXSTREAM_INFO(
++            "MAS: readback resources cbCreated=%llu cbReleased=%llu "
++            "cbRgbaEstimateBytes=%llu cleanupDeferred=%llu cleanupRecovered=%llu "
++            "cleanupAbandoned=%llu pendingRgbaEstimateBytes=%llu "
++            "threadsCreated=%llu threadsReleased=%llu",
++            static_cast<unsigned long long>(mColorBuffersCreated),
++            static_cast<unsigned long long>(mColorBuffersReleased),
++            static_cast<unsigned long long>(mLiveRgbaEstimate),
++            static_cast<unsigned long long>(mDeferred), static_cast<unsigned long long>(mRecovered),
++            static_cast<unsigned long long>(mAbandoned),
++            static_cast<unsigned long long>(mPendingRgbaEstimate),
++            static_cast<unsigned long long>(mThreadsCreated),
++            static_cast<unsigned long long>(mThreadsReleased));
++    }
++
++    std::mutex mMutex;
++    std::array<Readbacks, static_cast<size_t>(ReadbackSource::Count)> mReadbacks{};
++    Clock::time_point mLastLog{};
++    uint64_t mColorBuffersCreated = 0, mColorBuffersReleased = 0, mLiveRgbaEstimate = 0;
++    uint64_t mDeferred = 0, mRecovered = 0, mAbandoned = 0, mPendingRgbaEstimate = 0;
++    uint64_t mThreadsCreated = 0, mThreadsReleased = 0;
++};
++
++class ReadbackScope {
++   public:
++    ReadbackScope(ReadbackSource source, int width, int height, uint64_t bytes,
++                  ReadbackOutcome outcome = ReadbackOutcome::Returned)
++        : mSource(source), mWidth(width), mHeight(height), mBytes(bytes), mOutcome(outcome) {}
++    ReadbackScope(const ReadbackScope&) = delete;
++    ReadbackScope& operator=(const ReadbackScope&) = delete;
++    ~ReadbackScope() {
++        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
++                                 ReadbackDiagnostics::Clock::now() - mStart)
++                                 .count();
++        ReadbackDiagnostics::get().readback(mSource, mWidth, mHeight, mBytes,
++                                            static_cast<uint64_t>(elapsed), mOutcome, mHandle,
++                                            mPuid);
++    }
++    void result(bool ok) { mOutcome = ok ? ReadbackOutcome::Returned : ReadbackOutcome::Failed; }
++    void bytes(uint64_t bytes) { mBytes = bytes; }
++    void dimensions(int width, int height) {
++        mWidth = width;
++        mHeight = height;
++    }
++    void identity(uint32_t handle, uint64_t puid = 0) {
++        mHandle = handle;
++        mPuid = puid;
++    }
++
++   private:
++    const ReadbackSource mSource;
++    int mWidth, mHeight;
++    uint64_t mBytes;
++    ReadbackOutcome mOutcome;
++    uint32_t mHandle = 0;
++    uint64_t mPuid = 0;
++    const ReadbackDiagnostics::Clock::time_point mStart = ReadbackDiagnostics::Clock::now();
++};
++
++}  // namespace host
++}  // namespace gfxstream
+diff --git a/host/render_control.cpp b/host/render_control.cpp
+index e6af673b1..a90274115 100644
+--- a/host/render_control.cpp
++++ b/host/render_control.cpp
+@@ -27,6 +27,7 @@
+ #include "host/gl/gles_version_detector.h"
+ #include "OpenGLESDispatch/DispatchTables.h"
+ #include "OpenGLESDispatch/EGLDispatch.h"
++#include "render-utils/readback_diagnostics.h"
+ #include "render_thread_info.h"
+ #include "host/gl/render_thread_info_gl.h"
+ #include "vulkan/render_thread_info_vk.h"
+@@ -991,8 +992,12 @@ static EGLint rcColorBufferCacheFlush(uint32_t colorBuffer,
+ 
+ static void rcReadColorBuffer(uint32_t colorBuffer, GLint x, GLint y, GLint width, GLint height,
+                               GLenum format, GLenum type, void* pixels, uint32_t pixels_size) {
++    ReadbackScope trace(ReadbackSource::Guest, width, height, pixels_size);
++    const auto* threadInfo = RenderThreadInfo::get();
++    trace.identity(colorBuffer, threadInfo ? threadInfo->m_puid : 0);
+     FrameBuffer* fb = FrameBuffer::getFB();
+     if (!fb) {
++        trace.result(false);
+         return;
+     }
+ 
+@@ -1597,8 +1602,12 @@ static int rcReadColorBufferDMA(uint32_t colorBuffer,
+                                 GLenum format, GLenum type, void* pixels,
+                                 uint32_t pixels_size)
+ {
++    ReadbackScope trace(ReadbackSource::GuestDma, width, height, pixels_size);
++    const auto* threadInfo = RenderThreadInfo::get();
++    trace.identity(colorBuffer, threadInfo ? threadInfo->m_puid : 0);
+     FrameBuffer* fb = FrameBuffer::getFB();
+     if (!fb) {
++        trace.result(false);
+         GFXSTREAM_WARNING("%s: framebuffer cannot be found!", __func__);
+         return -1;
+     }
+diff --git a/host/render_thread.cpp b/host/render_thread.cpp
+index 7be5ed3a7..03e6bb2a6 100644
+--- a/host/render_thread.cpp
++++ b/host/render_thread.cpp
+@@ -36,6 +36,7 @@
+ #include "gfxstream/synchronization/Lock.h"
+ #include "gfxstream/synchronization/MessageChannel.h"
+ #include "gfxstream/system/System.h"
++#include "render-utils/readback_diagnostics.h"
+ #include "render_thread_info.h"
+ #include "vulkan/vk_common_operations.h"
+ #include "vulkan/vk_decoder_context.h"
+@@ -74,6 +75,7 @@ static std::atomic<uint32_t> sActiveRenderThreads{0};
+ static const uint32_t kWarnMaxRenderThreads = 1000;
+ 
+ static void incrementAndCheckRenderThreadCount() {
++    ReadbackDiagnostics::get().renderThreadCreated();
+     uint32_t count = ++sActiveRenderThreads;
+     GFXSTREAM_VERBOSE("Created RenderThread. Active RenderThreads: %u", count);
+     if (count > kWarnMaxRenderThreads) {
+@@ -135,6 +137,7 @@ RenderThread::RenderThread(const AsgConsumerCreateInfo& info, Stream* load)
+ // than from RenderThread::main() so thread specific cleanup likely belongs at
+ // the end of RenderThread::main().
+ RenderThread::~RenderThread() {
++    ReadbackDiagnostics::get().renderThreadReleased();
+     decrementRenderThreadCount();
+ }
+ 
+-- 
+2.56.1.windows.1
+

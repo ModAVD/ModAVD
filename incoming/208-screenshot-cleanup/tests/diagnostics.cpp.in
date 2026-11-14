@@ -1,0 +1,111 @@
+// Copyright 2026 Ji Mao Cai
+// SPDX-License-Identifier: Apache-2.0
+#include "test_support.h"
+#include "render-utils/readback_diagnostics.h"
+#define CONFIG_AEMU 1
+using GLint = int; using GLenum = unsigned;
+namespace gfxstream { namespace host {
+struct Rect {};
+struct Renderer { static constexpr int GET_SCREENSHOT_RESULT_PIXELS_SIZE = -2; };
+struct FakeFramebuffer {
+    bool fail = false;
+    int getScreenshot(unsigned channels, unsigned* width, unsigned* height, uint8_t* pixels,
+                      size_t* count, int, int, int, int, Rect) {
+        if (fail) return -1;
+        *width = 320; *height = 240; *count = 320 * 240 * channels;
+        return pixels ? 0 : -2;
+    }
+};
+struct FrameBuffer {
+    FakeFramebuffer impl;
+    FakeFramebuffer* mImpl = &impl;
+    static bool available;
+    static size_t backendCalls;
+    static FrameBuffer* getFB() { static FrameBuffer fb; return available ? &fb : nullptr; }
+    void readColorBufferDeprecated(uint32_t, GLint, GLint, GLint, GLint, GLenum, GLenum, void*,uint32_t) {
+        ++backendCalls;
+    }
+    int getScreenshot(unsigned,unsigned*,unsigned*,uint8_t*,size_t*,int,int,int,int,Rect);
+};
+bool FrameBuffer::available=true;
+size_t FrameBuffer::backendCalls=0;
+struct RenderThreadInfo {
+    uint64_t m_puid = 73;
+    static RenderThreadInfo* get() { static RenderThreadInfo info; return &info; }
+};
+@SCREENSHOT@
+} }
+using namespace gfxstream::host;
+@GUEST@
+@DMA@
+static uint64_t field(const std::string& row, const std::string& name) {
+    auto pos=row.find(name+"="); CHECK(pos!=std::string::npos);
+    return std::stoull(row.substr(pos+name.size()+1));
+}
+static std::string row(const std::string& match) {
+    for(auto i=logs.rbegin();i!=logs.rend();++i)if(i->find(match)!=std::string::npos)return *i;
+    CHECK(false); return {};
+}
+int main() {
+    const auto start=std::chrono::steady_clock::now();
+    constexpr uint32_t bytes=1280*720*4;
+    for(int i=0;i<10000;++i) {
+        rcReadColorBuffer(63,0,0,1280,720,0,0,nullptr,bytes);
+        CHECK(rcReadColorBufferDMA(63,0,0,1280,720,0,0,nullptr,bytes)==0);
+    }
+    CHECK(FrameBuffer::backendCalls==20000);
+    FrameBuffer::available=false;
+    rcReadColorBuffer(63,0,0,1280,720,0,0,nullptr,bytes);
+    CHECK(rcReadColorBufferDMA(63,0,0,1280,720,0,0,nullptr,bytes)==-1);
+    FrameBuffer::available=true;
+    std::puts("PASS production guest and DMA entries keep separate counts and failure records");
+
+    unsigned width=0,height=0;size_t count=0;uint8_t output[4]={};
+    auto* fb=FrameBuffer::getFB();
+    for(int i=0;i<100;++i) {
+        CHECK(fb->getScreenshot(4,&width,&height,nullptr,&count,0,0,0,0,{})==-2);
+        CHECK(fb->getScreenshot(4,&width,&height,output,&count,0,0,0,0,{})==0);
+    }
+    fb->impl.fail=true;
+    CHECK(fb->getScreenshot(4,&width,&height,output,&count,0,0,0,0,{})==-1);
+    CHECK(fb->getScreenshot(4,&width,&height,nullptr,&count,0,0,0,0,{})==-1);
+    fb->impl.fail=false;
+    std::puts("PASS production host screenshot entry separates size queries and records actual dimensions");
+
+    std::vector<std::thread> threads;
+    for(int i=0;i<8;++i)threads.emplace_back([]{
+        ReadbackDiagnostics::get().renderThreadCreated();
+        for(int i=0;i<1000;++i){ReadbackScope trace(ReadbackSource::HostFrame,640,480,640*480*4);}
+        ReadbackDiagnostics::get().renderThreadReleased();
+    });
+    for(auto& thread:threads)thread.join();
+    for(int i=0;i<1000;++i)ReadbackDiagnostics::get().colorBufferCreated(256);
+    for(int i=0;i<1000;++i)ReadbackDiagnostics::get().colorBufferReleased(256);
+    for(int i=0;i<10;++i)ReadbackDiagnostics::get().cleanupDeferred(256);
+    for(int i=0;i<10;++i)ReadbackDiagnostics::get().cleanupFinished(256,i<6);
+
+    if(std::chrono::steady_clock::now()-start<std::chrono::minutes(1)) {
+        size_t summaries=0;
+        for(auto& line:logs)if(line.find("MAS: readback source=")==0)++summaries;
+        CHECK(summaries==1);
+    }
+    ReadbackDiagnostics::get().log();
+    auto guest=row("source=guest "),dma=row("source=guest-dma ");
+    CHECK(field(guest,"calls")==10001 && field(dma,"calls")==10001);
+    CHECK(field(guest,"bytes")==10001ull*bytes && field(dma,"bytes")==10001ull*bytes);
+    CHECK(field(guest,"failures")==1 && field(dma,"failures")==1);
+    CHECK(field(guest,"lastCb")==63 && field(guest,"lastPuid")==73);
+    auto host=row("source=host-screenshot "),query=row("source=host-size-query ");
+    CHECK(field(host,"calls")==101 && field(host,"failures")==1);
+    CHECK(field(query,"calls")==101 && field(query,"failures")==1);
+    CHECK(host.find("lastSize=0x0")!=std::string::npos);
+    CHECK(field(query,"bytes")==100ull*320*240*4);
+    CHECK(field(row("source=host-frame-submit "),"calls")==8000);
+    auto resources=row("MAS: readback resources ");
+    CHECK(field(resources,"cbCreated")==1000 && field(resources,"cbReleased")==1000);
+    CHECK(field(resources,"cbRgbaEstimateBytes")==0);
+    CHECK(field(resources,"cleanupDeferred")==10 && field(resources,"cleanupRecovered")==6);
+    CHECK(field(resources,"cleanupAbandoned")==4 && field(resources,"pendingRgbaEstimateBytes")==0);
+    CHECK(field(resources,"threadsCreated")==8 && field(resources,"threadsReleased")==8);
+    std::puts("PASS concurrent counters, throttled summaries, identities and deferred-cleanup totals");
+}
