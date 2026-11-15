@@ -1807,19 +1807,17 @@ class ReleaseChecks(unittest.TestCase):
         upper = text.split("<!-- modavd:github-only -->")[0].split("\n", 1)[1]
         # the announcement names the version and what the package carries; only what is new in this version is marked
         self.assertEqual(text.split("\n")[1], "ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建。"
-                         "组件：模拟器 0.40.0、管理器 0.40.2（本版更新）、截图库 0.40.0、宿主输入法 1.0.0。")
-        self.assertNotIn("mas", upper.replace("AUTO-MAS", ""))
-        # the rest of the announcement is fixed: how to update, the AUTO-MAS version, where the known issues are
-        self.assertEqual(upper.count("\n## "), 2)
-        self.assertIn("- 配合 AUTO-MAS 使用时，需要 AUTO-MAS v5.7.0 或更新。\n", upper)
-        self.assertIn("issues?q=is%3Aissue+is%3Aopen+label%3Abug", upper)
-        for gone in ["## AUTO-MAS 版本", "## 已知问题", "发布前回归"]:
+                         "组件：模拟器 0.40.0、管理器 0.40.2（本版更新）、截图库 0.40.0、宿主输入法 1.0.0。"
+                         "安装、升级和反馈见[文档站](https://modavd.github.io/)。")
+        self.assertNotIn("mas", upper)
+        # that line and 更新内容 are the whole announcement: nothing else is written for a release
+        self.assertEqual(re.findall(r"(?m)^## .*$", upper), ["## 更新内容"])
+        for gone in ["## 怎么更新", "## AUTO-MAS 版本", "## 已知问题", "发布前回归"]:
             self.assertNotIn(gone, text)
         self.assertEqual(checks.check_announcement(text, "v0.40.2", 40)["build"], 40)
         # a rebuilt emulator is new in 0.<N>.0; a component taken before its tag is new whatever its number
         self.assertEqual(release.render_components("0.41.0", 41, {"manager": {"version": "0.12.0", "tagged": False}, "ime": None}),
                          "组件：模拟器 0.41.0（本版更新）、管理器 0.12.0（本版更新）。")
-        self.assertEqual(release.render_automas(None), "对 AUTO-MAS 的版本没有要求。")
         release.notes_budget("0.40.2", 40, "37.2.10", changelog)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):

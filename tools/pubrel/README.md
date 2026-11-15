@@ -61,10 +61,10 @@ python -I tools/pubrel/release_tools.py changelog-collect --build mas41 --versio
 - 每个 issue 一条 `<文字> (#N)`。分类看标签：`bug` 进「修复」，`enhancement` 进「新增」，其余进「变更」；带 `dev-process`、`documentation` 的不列。
 - 文字默认是 issue 标题。维护者在 issue 里发一条评论，其中一行 `更新说明：<一句话>`，就用这一句；`更新说明（变更）：…` 顺便指定分类；`更新说明：无` 表示不列。有好几行时取最后一行。
 - 文字要是一行、不超过 60 字、不能有 `--`。不合的会一次全报出来：回 issue 改标题或补评论，再跑一遍，不在 `changelog.json` 里改。
-- 「说明」类用 `--note` 手写，只写这一版要用户动手的事；重新汇总时留着。`--min-automas` 不给就沿用上一版的，`none` 表示没有要求。
+- 「说明」类用 `--note` 手写，只写这一版要用户动手的事；重新汇总时留着。`--min-automas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。
 - 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`，重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
 
-公告其余部分都是模板里固定的：开头一行各组件的版本（本版重新打包的会标出来），「怎么更新」三行（更新方法、需要的 AUTO-MAS 版本、已知问题的 issue 列表链接）。回归怎么测的不写进公告。
+公告里除了「更新内容」只有开头一行：基于的上游版本、各组件的版本（本版重新打包的会标出来）和文档站的链接。怎么更新、已知问题、回归怎么测的都不写进公告；这一版有要用户动手的事，用 `--note` 写成一条「说明」。
 
 管理器、截图库、输入法这一版重新打包了，版本号就取这一版 ModAVD 的版本号，没重新打包的不动；还没打 tag 的组件版本号对不上，预检就停。它们自己仓库的 Release 说明也不手写，在组件的发版分支上生成：
 
@@ -142,7 +142,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 - 主包根目录有 `modavd-manifest.json`：版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，和包里其余每个文件的大小、SHA-256。`verify-zip` 核对主包与组包目录逐文件一致（带外层文件夹就报错）、清单与文件一一对应。
 - 源码总包 `ModAVD-0.33.0-sources.zip`（和平台无关，不带平台），用 7-Zip `-tzip -mx0 -mcu=on`，外层文件夹同名。内部源码归档保持原文件名和字节；另附内部 `SHA256SUMS.txt`。
 - 外层 `SHA256SUMS.txt` 只列主包和源码总包两个 ZIP。
-- `release-notes.md`：第一行机读注释，然后是更新公告（各组件的版本、更新内容、怎么更新），再是分隔行 `<!-- modavd:github-only -->`，以下是下载表、源码说明。分隔行以上同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不能有哈希。
+- `release-notes.md`：第一行机读注释，然后是更新公告（一行各组件的版本，和更新内容），再是分隔行 `<!-- modavd:github-only -->`，以下是下载表、源码说明。分隔行以上同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不能有哈希。
 - `release-assets.json` 记录供仓库 CI 使用的大小与哈希。
 - `patches/`：要进发版提交的补丁。`series.json`、`BASE.md` 是发版克隆（`-Repository`）里那两份加上这一版，直接覆盖仓库里的：
   - 和已发布的某个系列仓库、基准、分支头都相同的，沿用那个目录（比如 Crashpad 一直是 `crashpad/module-version22`），不加新目录；它的导出放在 `work/patches-reused/` 给回放和 incoming 核对用，不在 `patches/` 里。

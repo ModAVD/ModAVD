@@ -37,7 +37,7 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 - [ ] 「更新内容」从这一版要关的 issue 汇总，不手写：`python -I tools/pubrel/release_tools.py changelog-collect --build mas34 --version <版本>` 把带 `pending-release` 的 issue 每个写成一条，进 `tools/pubrel/config/changelog.json` 最前面本版那一条。哪条读着不顺，回 issue 改标题或发一条 `更新说明：<一句话>` 的评论，再跑一遍。用法见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版」。
 - [ ] 这一版重新打包的组件，版本号设成这一版的版本号，`release/<版本>.md` 用 `release_tools.py component-notes` 生成。
 - [ ] 汇总完看长度：`python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK根目录>]` 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 版的改动）和分隔行以上的公告（限 4000 字）各多长，超了就报错，过了 90% 会提醒。`release.ps1` 的预检也查这一项，不用等到第 7 步。
-- [ ] 已知问题不再逐条写进 Release 说明，说明里只有一个指向 issue 列表（开着的 `bug`）的链接；新发现的问题先建 issue、打上 `bug`。
+- [ ] 怎么更新、已知问题不写进 Release 说明：新发现的问题建 issue、打上 `bug`；这一版有要用户动手的事（比如更新前要先关实例），用 `changelog-collect --note` 写成一条「说明」。
 
 ## 生成和核对
 
@@ -58,7 +58,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
    输出的 `patches/series.json`、`patches/BASE.md` 是发版克隆里那两份加上这一版：和已发布的系列基准、分支头都相同的，沿用已发布的目录（导出放到 `work/patches-reused/`，不进 `patches/`）；其余的是新目录，在 `series.json` 最前面加一条，`BASE.md` 的版本表、目录表各加一行、目录表下面加一句说明。新补丁的许可证、做了什么只能人写，留成「发布前填写」，`checks.py metadata` 见到就失败。`logs/patch-dirs.json` 记每个仓库用哪个目录、是不是新的。
 5. **源码总包与清单**：没变的源码文件逐个验哈希后复用，只给变化的源项目重新归档。用 `7z a -tzip -mx0 -mcu=on` 生成和平台无关的 `ModAVD-0.34.0-sources.zip`，外层文件夹同名；包括对应源码、`SOURCES.txt`、两份 manifest 和包内的 `SHA256SUMS.txt`。清单同时同步到本仓库 `manifests/`，不再分别上传附件。
 6. **两层校验表**：包内那份只列逐个源码文件，排除自身；外层 `SHA256SUMS.txt` **只列主包和源码总包这两行**。
-7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、`changelog.json` 最前面最多 10 版的改动摘要）；接着是更新公告（各组件的版本、从 issue 汇总的更新内容、固定三行的怎么更新）；然后一行 `<!-- modavd:github-only -->`；以下是两个 ZIP 的字节数和 SHA-256、源码包的文件数和总大小。逐个源码文件的 SHA-256 不进说明，见源码包内和本仓库 `release/` 的 `<版本>.sources.SHA256SUMS.txt`。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
+7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、`changelog.json` 最前面最多 10 版的改动摘要）；接着是更新公告（一行各组件的版本，和从 issue 汇总的更新内容）；然后一行 `<!-- modavd:github-only -->`；以下是两个 ZIP 的字节数和 SHA-256、源码包的文件数和总大小。逐个源码文件的 SHA-256 不进说明，见源码包内和本仓库 `release/` 的 `<版本>.sources.SHA256SUMS.txt`。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
 8. **隐私**：主包、补丁、全部源码成员及发布元数据均须通过，用 `scripts/privacy.py` 的通用规则加上维护者仓库外的私有规则（`-PrivateRules`，没加载到就停）；通用规则也在仓库 CI 中运行。新命中要核对来源，白名单固定具体文件/内容，不按姓氏全局放行。报告必须是 0 失败。上次扫过干净、内容没变的文件按本机缓存跳过（扫描器或规则一变就全部重扫，`-NoPrivacyCache` 强制全扫）；带 `-DraftRelease` 真要上传的那一轮不读缓存、全部重扫，扫完照样写缓存。见 [tools/pubrel/README.md](tools/pubrel/README.md)「共享校验与隐私规则」。
 
 - [ ] 把输出 `patches/` 下的新目录和 `BASE.md`、`series.json`（直接覆盖仓库里的，它们就是在仓库那两份上加的）、manifest，以及生成的 Release 说明纳入待审核的发版提交；填完 `BASE.md` 里的「发布前填写」（新补丁按所改文件归许可证、写清新增了什么）；核对 `series.json` 中的基准、数量和树。

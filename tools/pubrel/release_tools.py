@@ -1715,10 +1715,6 @@ def render_components(version, number, own):
     return "组件：" + "、".join(parts) + "。"
 
 
-def render_automas(min_automas):
-    return f"配合 AUTO-MAS 使用时，需要 AUTO-MAS v{min_automas} 或更新。" if min_automas else "对 AUTO-MAS 的版本没有要求。"
-
-
 # What notes_budget measures with before the components are known: no real line is longer.
 SAMPLE_OWN = {key: {"version": "0.999.999", "tagged": False} for key, _ in COMPONENT_NAMES}
 
@@ -1729,8 +1725,7 @@ def text_fields(version, number, upstream, changelog, own=None):
     machine = {"version": "v" + version, "build": number, "upstream": upstream, "min_automas": log[0]["min_automas"],
                "changes": {e["version"]: e["changes"] for e in log[:checks.MACHINE_VERSIONS]}}
     return {"MACHINE": checks.machine_line(machine), "VERSION": version, "UPSTREAM": upstream,
-            "COMPONENTS": render_components(version, number, own), "CHANGES": render_changes(log[0]["changes"]),
-            "AUTOMAS": render_automas(log[0]["min_automas"])}
+            "COMPONENTS": render_components(version, number, own), "CHANGES": render_changes(log[0]["changes"])}
 
 
 def render_notes(fields):

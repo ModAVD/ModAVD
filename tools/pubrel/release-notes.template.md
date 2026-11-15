@@ -1,15 +1,9 @@
 {{MACHINE}}
-ModAVD {{VERSION}}，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。{{COMPONENTS}}
+ModAVD {{VERSION}}，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。{{COMPONENTS}}安装、升级和反馈见[文档站](https://modavd.github.io/)。
 
 ## 更新内容
 
 {{CHANGES}}
-
-## 怎么更新
-
-- 在管理器「设置」里点「更新」；也可以把实例都关机，用新包整个覆盖解压。两种办法都不会动到 `avd` 文件夹。第一次安装见[文档站](https://modavd.github.io/)。
-- {{AUTOMAS}}
-- 已知问题见 [issue 列表](https://github.com/ModAVD/ModAVD/issues?q=is%3Aissue+is%3Aopen+label%3Abug)。
 
 <!-- modavd:github-only -->
 
