@@ -1867,6 +1867,11 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Nothing to announce"):
             release.collect_changelog(log, "0.41.2", 41, [issues[5]])
         self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
+        # a version that is not the newest and has no entry is refused, and the file stays as it was
+        before = log.read_bytes()
+        with self.assertRaisesRegex(ValueError, "newest first"):
+            release.collect_changelog(log, "0.40.9", 40, issues[:1])
+        self.assertEqual(log.read_bytes(), before)
         # the command: the issues labelled pending-release, or the given ones, without the excluded
         asked = []
         def fake(*args):

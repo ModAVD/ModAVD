@@ -386,8 +386,14 @@ def collect_changelog(path, version, number, issues, notes=None, min_automas=...
     entry = {"version": tag, "build": number, "min_automas": min_automas,
              "changes": {c: changes[c] for c in checks.CATEGORIES if c in changes}}
     entries = [entry if e is old else e for e in entries] if old else [entry] + entries
+    # a version that does not belong first (a typo, an old one) is refused by the usual check: leave the file as it was
+    original = Path(path).read_bytes()
     save(path, entries)
-    read_changelog(path, version, number)
+    try:
+        read_changelog(path, version, number)
+    except Exception:
+        Path(path).write_bytes(original)
+        raise
     return entry, skipped
 
 
