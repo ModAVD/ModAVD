@@ -157,21 +157,16 @@ OWN_SOURCES_EXTRAS_TEXT = """\
                             另见其中的 NOTICE。用 CMake 和 MSVC 编（cmake -A x64，--config Release，/Brepro）。
                             https://github.com/ModAVD/ModAVDExtras
 """
-# changelog-collect: this version's 更新内容 comes from the ModAVD issues the release closes, one item each.
-ISSUE_REPO = "ModAVD/ModAVD"
-PENDING_LABEL = "pending-release"
-# Issues with one of these labels are not announced, unless a maintainer's 更新说明 comment says what to announce.
-UNANNOUNCED_LABELS = ("dev-process", "documentation")
-LABEL_CATEGORY = (("bug", "修复"), ("enhancement", "新增"))
-OTHER_CATEGORY = "变更"
+# changelog-collect: this version's 更新内容 comes from the changelog.d files of the public repositories (see
+# checks.fragment_item), one item each: the ones a repository has now and did not have at its previous release.
+# (argument with the checkout, GitHub repository, what goes before #N in an item's reference)
+RELEASE_REPO = "ModAVD/ModAVD"
+FRAGMENT_REPOS = (("repository", "ModAVD", ""), ("manager_repo", "ModAVDManager", "ModAVD/ModAVDManager"),
+                  ("extras_repo", "ModAVDExtras", "ModAVD/ModAVDExtras"), ("ime_repo", "ModAVDHostIME", "ModAVD/ModAVDHostIME"))
 # Written by hand (changelog-collect --note): what the user has to do for this version. Kept when collecting again.
 NOTE_CATEGORY = "说明"
-# A comment line `更新说明：<一句话>` (or `更新说明（变更）：…` to pick the category; `更新说明：无` = leave it out) from
-# someone with one of these associations replaces the issue title; the last such line wins.
-ANNOUNCE_LINE = re.compile(r"(?m)^更新说明(?:[（(](新增|变更|修复|移除)[)）])?[:：][ \t]*(.*?)[ \t]*\r?$")
-ANNOUNCE_NOTHING = "无"
-ANNOUNCERS = ("OWNER", "MEMBER", "COLLABORATOR")
-MAX_ITEM_CHARS = 60
+# A squash merge's subject ends with the pull request: the item of a fragment refers to the one that added it.
+PR_SUFFIX = re.compile(r"\(#([1-9][0-9]*)\)$")
 # The component line of the announcement, in this order; the emulator comes first, from the build number.
 COMPONENT_NAMES = (("manager", "管理器"), ("extras", "截图库"), ("ime", "宿主输入法"))
 # component-notes: the short release page of a component repository.
@@ -312,75 +307,82 @@ def sdk_upstream(sdk):
     return m[1]
 
 
-def gh_json(*args):
-    """`gh ... --json ...` parsed. gh writes UTF-8 whatever the console code page is, so the bytes are decoded here."""
-    result = subprocess.run(["gh", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode:
-        raise RuntimeError(f"gh {' '.join(args[:3])}: {result.stderr.decode('utf-8', 'replace')[-2000:]}")
-    return json.loads(result.stdout.decode("utf-8"))
+def previous_release(repo, commit):
+    """The nearest release tag (v*) that `commit` descends from, the commit's own when it is tagged; None without one."""
+    try:
+        return git(repo, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", commit)
+    except RuntimeError:
+        return None
 
 
-def fetch_issues(numbers=None):
-    """The issues this version's 更新内容 is collected from, each with number/title/labels/comments: the given ones,
-    or every issue of ISSUE_REPO labelled PENDING_LABEL (open or closed)."""
-    fields = "number,title,labels,comments"
-    if numbers:
-        return [gh_json("issue", "view", str(n), "--repo", ISSUE_REPO, "--json", fields) for n in numbers]
-    return gh_json("issue", "list", "--repo", ISSUE_REPO, "--label", PENDING_LABEL, "--state", "all", "--limit", "500",
-                   "--json", fields)
+def fragment_blobs(repo, ref):
+    """{file name: blob id} of changelog.d at `ref`, its README aside; empty when the folder is not there."""
+    try:
+        listing = git(repo, "ls-tree", "-z", f"{ref}:{checks.FRAGMENT_DIR}")
+    except RuntimeError:
+        return {}
+    blobs = {}
+    for entry in filter(None, listing.split("\0")):
+        meta, name = entry.split("\t", 1)
+        if name != checks.FRAGMENT_README:
+            blobs[name] = meta.split()[2]
+    return blobs
 
 
-def issue_item(issue):
-    """One issue's line of 更新内容: (category, text), or (None, why it is left out). The text is the issue title
-    unless a maintainer's 更新说明 comment line replaces it (ANNOUNCE_LINE); the category follows the labels."""
-    labels = {label["name"] for label in issue.get("labels") or []}
-    forced, said = None, None
-    for comment in issue.get("comments") or []:
-        if comment.get("authorAssociation") in ANNOUNCERS:
-            for m in ANNOUNCE_LINE.finditer(comment.get("body") or ""):
-                forced, said = m[1], m[2]
-    if said == ANNOUNCE_NOTHING:
-        return None, f"更新说明：{ANNOUNCE_NOTHING}"
-    if said is None:
-        hidden = sorted(labels.intersection(UNANNOUNCED_LABELS))
-        if hidden:
-            return None, "label " + ", ".join(hidden)
-    category = forced or next((c for label, c in LABEL_CATEGORY if label in labels), OTHER_CATEGORY)
-    return category, (said if said is not None else issue["title"]).strip().rstrip("。")
-
-
-def collect_changes(issues):
-    """({category: [item, ...]}, [(number, why left out), ...]) from the issues, by issue number. Every item is
-    `<text> (#N)`, one line of at most MAX_ITEM_CHARS before the number. A text that does not fit is not edited here:
-    the error names the issues, and the title or a 更新说明 comment is fixed there."""
-    changes, skipped, bad = {}, [], []
-    for issue in sorted(issues, key=lambda i: i["number"]):
-        category, text = issue_item(issue)
-        if category is None:
-            skipped.append((issue["number"], text))
-        elif not text or "\n" in text or "\r" in text or "--" in text or len(text) > MAX_ITEM_CHARS:
-            bad.append(f"#{issue['number']} ({len(text)} chars): {text!r}")
-        else:
-            changes.setdefault(category, []).append(f"{text} (#{issue['number']})")
+def new_fragments(repo, commit, prefix):
+    """([(category, item), ...] by file name, the previous release's tag or None) for the changelog.d files `commit`
+    has and the previous release (previous_release) did not have. An item is the file's line; when the line names no
+    issue or pull request itself, it gets the pull request whose squash merge added the file, as `(<prefix>#N)`.
+    A file the previous release had is not announced again, so a later change takes a new name: one that differs
+    from then is refused, like a file that is not a valid fragment."""
+    commit = git(repo, "rev-parse", "--verify", "--quiet", commit + "^{commit}")
+    since = previous_release(repo, commit)
+    now, before = fragment_blobs(repo, commit), (fragment_blobs(repo, since) if since else {})
+    items, bad = [], []
+    for name in sorted(now):
+        if name in before:
+            if before[name] != now[name]:
+                bad.append(f"{checks.FRAGMENT_DIR}/{name} differs from {since}, which already announced it: "
+                           f"a new change takes a new file name")
+            continue
+        try:
+            category, line = checks.fragment_item(name, run("git", "-C", repo, "--no-optional-locks", "cat-file", "blob", now[name]))
+        except ValueError as e:
+            bad.append(str(e))
+            continue
+        if not checks.FRAGMENT_REF.search(line):
+            subject = git(repo, "log", "-1", "--diff-filter=A", "--format=%s", commit, "--", f"{checks.FRAGMENT_DIR}/{name}")
+            added_by = PR_SUFFIX.search(subject)
+            if added_by:
+                line += f" ({prefix}#{added_by[1]})"
+        items.append((category, line))
     if bad:
-        raise ValueError(f"These issues need a one-line text of at most {MAX_ITEM_CHARS} chars without '--': retitle them, "
-                         f"or comment `更新说明：<一句话>` (`更新说明：{ANNOUNCE_NOTHING}` to leave one out): " + "; ".join(bad))
-    return changes, skipped
+        raise ValueError(f"{repo}: " + "; ".join(bad))
+    return items, since
 
 
-def collect_changelog(path, version, number, issues, notes=None, min_automas=...):
-    """Writes this version's entry of changelog.json from the issues and returns (entry, skipped). An entry that is
-    already there is replaced, except for its hand-written NOTE_CATEGORY items (unless `notes` gives new ones) and its
-    min_automas (unless given); a new entry goes first and takes the previous version's min_automas."""
+def commits_without_fragment(repo, since, commit):
+    """Subjects of the first-parent commits since the previous release that added no changelog.d file: what a person
+    looks through for a change users see that nobody wrote a line for."""
+    span = f"{since}..{commit}" if since else commit
+    announced = set(git(repo, "log", "--first-parent", "--diff-filter=A", "--format=%H", span, "--", checks.FRAGMENT_DIR).split())
+    lines = [line.split(" ", 1) for line in git(repo, "log", "--first-parent", "--format=%H %s", span).splitlines() if line]
+    return [subject for commit_id, subject in lines if commit_id not in announced]
+
+
+def collect_changelog(path, version, number, changes, notes=None, min_automas=...):
+    """Writes this version's entry of changelog.json from `changes` ({category: [item, ...]}) and returns it. An entry
+    that is already there is replaced, except for its hand-written NOTE_CATEGORY items (unless `notes` gives new ones)
+    and its min_automas (unless given); a new entry goes first and takes the previous version's min_automas."""
     entries = load(path)
     tag = "v" + version
     old = next((e for e in entries if e["version"] == tag), None)
-    changes, skipped = collect_changes(issues)
+    changes = {c: list(items) for c, items in changes.items() if items}
     kept = list(notes) if notes else (old or {}).get("changes", {}).get(NOTE_CATEGORY)
     if kept:
         changes[NOTE_CATEGORY] = kept
     if not changes:
-        raise ValueError(f"Nothing to announce for {tag}: no issue gives an item; add one with --note")
+        raise ValueError(f"Nothing to announce for {tag}: no new {checks.FRAGMENT_DIR} file anywhere; add an item with --note")
     if min_automas is ...:
         min_automas = old["min_automas"] if old else (entries[0]["min_automas"] if entries else None)
     entry = {"version": tag, "build": number, "min_automas": min_automas,
@@ -394,24 +396,46 @@ def collect_changelog(path, version, number, issues, notes=None, min_automas=...
     except Exception:
         Path(path).write_bytes(original)
         raise
-    return entry, skipped
+    return entry
+
+
+def collect_sources(args):
+    """[(GitHub repository, checkout, commit, reference prefix), ...] changelog-collect reads: the ModAVD release
+    checkout at HEAD (--repository; default: the checkout these tools are in), and each component checkout that is
+    given at the head of upstream's --release-branch. A component without that branch is not rebuilt for this release
+    and adds nothing."""
+    sources, branch = [], getattr(args, "release_branch", None)
+    for argument, name, prefix in FRAGMENT_REPOS:
+        repo = getattr(args, argument, None)
+        if argument == "repository":
+            sources.append((name, repo or str(HERE.parent.parent), "HEAD", prefix))
+        elif repo and branch:
+            try:
+                head = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/upstream/{branch}^{{commit}}")
+            except RuntimeError:
+                print(f"{name}: no upstream/{branch} in {repo}, taken as not rebuilt for this release")
+                continue
+            sources.append((name, repo, head, prefix))
+    return sources
 
 
 def collect_command(args):
-    """`changelog-collect`: this version's 更新内容 from the issues labelled PENDING_LABEL (or --issues 210,206),
-    without --exclude; --note adds a hand-written 说明 item, --min-automas sets the AUTO-MAS version."""
+    """`changelog-collect`: this version's 更新内容 from the new changelog.d files of the ModAVD checkout and of the
+    component checkouts (--manager-repo, --extras-repo, --ime-repo at upstream's --release-branch); --note adds a
+    hand-written 说明 item, --min-automas sets the AUTO-MAS version."""
     version = public_version(args)
-    def numbers(text):
-        return [int(n) for n in re.split(r"[\s,]+", text or "") if n]
-    excluded = set(numbers(args.exclude))
-    issues = [i for i in fetch_issues(numbers(args.issues)) if i["number"] not in excluded]
+    changes = {}
+    for name, repo, commit, prefix in collect_sources(args):
+        items, since = new_fragments(repo, commit, prefix)
+        for category, item in items:
+            changes.setdefault(category, []).append(item)
+        silent = commits_without_fragment(repo, since, commit)
+        print(f"{name} since {since or 'the beginning'}: {len(items)} new {checks.FRAGMENT_DIR} files, "
+              f"{len(silent)} commits without one" + "".join(f"\n    {subject}" for subject in silent[:30])
+              + (f"\n    ... {len(silent) - 30} more" if len(silent) > 30 else ""))
     known = ... if args.min_automas is None else (None if args.min_automas == "none" else args.min_automas)
-    entry, skipped = collect_changelog(args.changelog, version, build_number(args.build), issues, args.note, known)
-    print(f"{Path(args.changelog).name}: v{version} from {len(issues)} issues\n")
-    print(render_changes(entry["changes"]))
-    for number, why in skipped:
-        print(f"\nnot announced: #{number} ({why})", end="")
-    print()
+    entry = collect_changelog(args.changelog, version, build_number(args.build), changes, args.note, known)
+    print(f"\n{Path(args.changelog).name}: v{version}\n\n{render_changes(entry['changes'])}")
 
 
 def read_changelog(path, version, number):
@@ -791,7 +815,7 @@ def component_notes(component, version, sums_text):
     repo, zh, en = COMPONENT_REPOS[component]
     checks.version_key("v" + version)
     listed = parse_sums(sums_text, f"release/{version}.SHA256SUMS.txt")
-    url = f"https://github.com/{ISSUE_REPO}/releases/tag/v{version}"
+    url = f"https://github.com/{RELEASE_REPO}/releases/tag/v{version}"
     rows = "\n".join(f"| `{name}` | `{digest}` |" for name, digest in sorted(listed.items()))
     return (f"# {repo} v{version}\n\n"
             f"{repo}（{zh}）{version}，随 [ModAVD {version}]({url}) 发布。这一版改了什么，见 ModAVD 的发布说明。\n\n"
@@ -1958,9 +1982,8 @@ def main():
                                             "changelog-collect", "component-notes"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
                  "extras-dll", "mumu-shim", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache",
-                 # changelog-collect: issue numbers ("210,206"; default: every issue labelled pending-release), numbers
-                 # to leave out, and the AUTO-MAS version this release needs ("none" = no requirement)
-                 "issues", "exclude", "min-automas",
+                 # changelog-collect: the AUTO-MAS version this release needs ("none" = no requirement)
+                 "min-automas",
                  # component-notes
                  "component", "sums", "notes-output"]:
         parser.add_argument("--" + name)

@@ -1826,73 +1826,107 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs from -Build"):
             release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.40.2", sdk=None, changelog=str(changelog)))
 
-    def test_changelog_collected_from_issues(self):
-        """This version's 更新内容 is one line per issue the release closes: the title, or a maintainer's 更新说明
-        comment; the category follows the labels."""
-        def issue(number, title, labels=(), comments=()):
-            return {"number": number, "title": title, "labels": [{"name": n} for n in labels],
-                    "comments": [{"authorAssociation": who, "body": body} for who, body in comments]}
-        issues = [issue(210, "改分辨率后开机崩溃", ["bug", "P1"]),
-                  issue(185, "标题栏加回最大化 / 还原按钮。", ["enhancement"]),
-                  issue(141, "内部写法的标题", ["bug"], [("NONE", "更新说明：别人写的不算"), ("OWNER", "先看看\n更新说明：宿主时区名是中文时实例不再一律用 GMT\n"),
-                                                   ("MEMBER", "无关的评论")]),
-                  issue(196, "提供adb设备发现", [], [("COLLABORATOR", "更新说明（新增）: 命令行能列出 adb 设备")]),
-                  issue(150, "没有标签的改动"),
-                  issue(207, "两个测试在慢的 CI 机器上偶尔失败", ["bug", "dev-process"]),
-                  issue(216, "发版公告从 issue 汇总", ["enhancement", "dev-process"], [("OWNER", "更新说明（变更）：公告改短了")]),
-                  issue(110, "时钟源偶尔退回 hpet", ["bug"], [("OWNER", "更新说明：无")])]
-        changes, skipped = release.collect_changes(issues)
-        self.assertEqual(changes, {"修复": ["宿主时区名是中文时实例不再一律用 GMT (#141)", "改分辨率后开机崩溃 (#210)"],
-                                   "新增": ["标题栏加回最大化 / 还原按钮 (#185)", "命令行能列出 adb 设备 (#196)"],
-                                   "变更": ["没有标签的改动 (#150)", "公告改短了 (#216)"]})
-        self.assertEqual(skipped, [(110, "更新说明：无"), (207, "label dev-process")])
-        checks.check_changes({"v0.42.0": changes})
-        # a text that does not fit is fixed at its issue, not here: every such issue is named at once
-        with self.assertRaisesRegex(ValueError, r"#7 \(61 chars\).*#8 .*a -- b"):
-            release.collect_changes([issue(7, "长" * 61), issue(8, "a -- b"), issue(9, "长" * 60)])
-        path = self.folder()
-        log = path / "changelog.json"
+    def test_changelog_collected_from_fragments(self):
+        """This version's 更新内容 is one line per changelog.d file the repositories gained since their previous
+        release; an item refers to the pull request that added its file."""
+        root = self.folder()
+        git = release.git
+        def commit(repo, files, message, tag=None):
+            repo.mkdir(exist_ok=True)
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_bytes(text.encode("utf-8"))
+            if not (repo / ".git").exists():
+                git(repo, "init", "-q")
+            git(repo, "add", "-A")
+            git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message)
+            if tag:
+                git(repo, "tag", tag)
+            return git(repo, "rev-parse", "HEAD")
+        # one file: the type is the category, the text one line for users
+        self.assertEqual(checks.fragment_item("210-resize_crash.fix.md", "﻿调高分辨率后开机不再卡死退出。\r\n".encode("utf-8")),
+                         ("修复", "调高分辨率后开机不再卡死退出"))
+        self.assertEqual(checks.fragment_item("a.feat.md", ("长" * 60 + " (#185)").encode("utf-8")), ("新增", "长" * 60 + " (#185)"))
+        self.assertEqual(checks.fragment_item("a.remove.md", "不再带说明.txt（ModAVD/ModAVDManager#12）".encode("utf-8"))[0], "移除")
+        for name, data in [("Bad.fix.md", b"x"), ("a.docs.md", b"x"), ("a.fix.txt", b"x"), ("a.fix.md", b""), ("a.fix.md", b"a -- b"),
+                           ("a.fix.md", "长".encode("utf-8") * 61), ("a.fix.md", b"one\ntwo"), ("a.fix.md", b"\xff\xfe")]:
+            with self.assertRaises(ValueError, msg=(name, data)):
+                checks.fragment_item(name, data)
+        # a repository: what it has now and did not have at its previous release (the nearest tag below)
+        mgr = root / "manager"
+        commit(mgr, {"changelog.d/README.md": "怎么写", "changelog.d/old.fix.md": "上一版修的\n"}, "上一版 (#1)", tag="v0.41.0")
+        commit(mgr, {"changelog.d/210-resize.fix.md": "调高分辨率后开机不再卡死退出。\n"}, "开机前查出谁拿着截图共享内存 (#168)")
+        commit(mgr, {"changelog.d/tray.feat.md": "双击托盘图标隐藏或显示管理器窗口 (#188)\n", "main.go": "x"}, "托盘双击 (#170)")
+        commit(mgr, {"main_test.go": "x"}, "test: 慢的机器上不再偶尔失败 (#171)")
+        head = commit(mgr, {"changelog.d/direct.change.md": "没起名的实例显示 emu-N"}, "直接提交的改动")
+        items, since = release.new_fragments(mgr, "HEAD", "ModAVD/ModAVDManager")
+        self.assertEqual(since, "v0.41.0")
+        # by file name; the pull request that added the file, unless the line names an issue itself or there is none
+        self.assertEqual(items, [("修复", "调高分辨率后开机不再卡死退出 (ModAVD/ModAVDManager#168)"),
+                                 ("变更", "没起名的实例显示 emu-N"), ("新增", "双击托盘图标隐藏或显示管理器窗口 (#188)")])
+        self.assertEqual(release.commits_without_fragment(mgr, since, head), ["test: 慢的机器上不再偶尔失败 (#171)"])
+        self.assertEqual(checks.check_fragments(mgr), 4)
+        # without a release yet everything there is new; without the folder there is nothing
+        fresh = root / "fresh"
+        commit(fresh, {"changelog.d/a.remove.md": "不再带说明.txt"}, "x (#5)")
+        self.assertEqual(release.new_fragments(fresh, "HEAD", ""), ([("移除", "不再带说明.txt (#5)")], None))
+        bare = root / "bare"
+        commit(bare, {"a.txt": "x"}, "x")
+        self.assertEqual(release.new_fragments(bare, "HEAD", ""), ([], None))
+        self.assertEqual(checks.check_fragments(bare), 0)
+
+        # the command: the ModAVD checkout at HEAD, the components at the head of upstream's release branch
+        pub = root / "pub"
+        commit(pub, {"changelog.d/README.md": "怎么写"}, "上一版", tag="v0.41.0")
+        commit(pub, {"changelog.d/185-maximize.feat.md": "带窗口的实例：标题栏加回最大化 / 还原按钮 (#185)"}, "发版：补丁 (#211)")
+        git(mgr, "update-ref", "refs/remotes/upstream/release/0.41", head)
+        log = root / "changelog.json"
         old = {"version": "v0.41.0", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["旧版"]}}
         release.save(log, [old])
-        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[:2])
-        self.assertEqual(entry, {"version": "v0.41.1", "build": 41, "min_automas": "5.7.0",
-                                 "changes": {"新增": ["标题栏加回最大化 / 还原按钮 (#185)"], "修复": ["改分辨率后开机崩溃 (#210)"]}})
-        self.assertEqual(release.load(log), [entry, old])
+        def collect(version, **more):
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                release.collect_command(SimpleNamespace(**{"build": "mas41", "patch": 0, "version": version, "changelog": str(log),
+                                                           "repository": str(pub), "manager_repo": str(mgr), "extras_repo": str(fresh),
+                                                           "ime_repo": None, "release_branch": "release/0.41", "note": [],
+                                                           "min_automas": None, **more}))
+            return printed.getvalue()
+        said = collect("0.41.1")
+        changes = {"新增": ["带窗口的实例：标题栏加回最大化 / 还原按钮 (#185)", "双击托盘图标隐藏或显示管理器窗口 (#188)"],
+                   "变更": ["没起名的实例显示 emu-N"], "修复": ["调高分辨率后开机不再卡死退出 (ModAVD/ModAVDManager#168)"]}
+        self.assertEqual(release.load(log), [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": changes}, old])
+        self.assertEqual(list(release.load(log)[0]["changes"]), ["新增", "变更", "修复"])
+        self.assertIn("ModAVDManager since v0.41.0: 3 new changelog.d files, 1 commits without one\n    test: 慢的机器上不再偶尔失败 (#171)", said)
+        self.assertIn("ModAVDExtras: no upstream/release/0.41", said)
+        self.assertIn("- 没起名的实例显示 emu-N", said)
         # collecting again replaces the entry; the hand-written 说明 and the AUTO-MAS version stay unless given anew
-        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[:1], ["更新前先把实例都关机"], "5.8.0")
-        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {"修复": ["改分辨率后开机崩溃 (#210)"], "说明": ["更新前先把实例都关机"]}))
-        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[1:2])
-        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {"新增": ["标题栏加回最大化 / 还原按钮 (#185)"], "说明": ["更新前先把实例都关机"]}))
-        self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
-        with self.assertRaisesRegex(ValueError, "Nothing to announce"):
-            release.collect_changelog(log, "0.41.2", 41, [issues[5]])
+        collect("0.41.1", note=["更新前先把实例都关机"], min_automas="5.8.0")
+        collect("0.41.1")
+        entry = release.load(log)[0]
+        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {**changes, "说明": ["更新前先把实例都关机"]}))
+        collect("0.41.1", min_automas="none", manager_repo=None)
+        entry = release.load(log)[0]
+        self.assertEqual((entry["min_automas"], entry["changes"]), (None, {"新增": changes["新增"][:1], "说明": ["更新前先把实例都关机"]}))
         self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
         # a version that is not the newest and has no entry is refused, and the file stays as it was
         before = log.read_bytes()
         with self.assertRaisesRegex(ValueError, "newest first"):
-            release.collect_changelog(log, "0.40.9", 40, issues[:1])
+            release.collect_changelog(log, "0.40.9", 40, {"修复": ["x"]})
+        with self.assertRaisesRegex(ValueError, "Nothing to announce"):
+            release.collect_changelog(log, "0.41.2", 41, {"修复": []})
         self.assertEqual(log.read_bytes(), before)
-        # the command: the issues labelled pending-release, or the given ones, without the excluded
-        asked = []
-        def fake(*args):
-            asked.append(args)
-            return issues[:2] if args[1] == "list" else next(i for i in issues if str(i["number"]) == args[2])
-        real, release.gh_json = release.gh_json, fake
-        try:
-            printed = io.StringIO()
-            with contextlib.redirect_stdout(printed):
-                release.collect_command(SimpleNamespace(build="mas41", patch=0, version="0.41.2", changelog=str(log), issues=None,
-                                                        exclude="185", note=[], min_automas="none"))
-                release.collect_command(SimpleNamespace(build="mas41", patch=0, version="0.41.3", changelog=str(log), issues="141, 207",
-                                                        exclude=None, note=[], min_automas=None))
-        finally:
-            release.gh_json = real
-        self.assertEqual(asked[0][:6], ("issue", "list", "--repo", "ModAVD/ModAVD", "--label", "pending-release"))
-        self.assertEqual([a[:3] for a in asked[1:]], [("issue", "view", "141"), ("issue", "view", "207")])
-        self.assertIn("not announced: #207 (label dev-process)", printed.getvalue())
-        self.assertEqual([(e["version"], e["min_automas"], e["changes"]) for e in release.load(log)[:2]],
-                         [("v0.41.3", None, {"修复": ["宿主时区名是中文时实例不再一律用 GMT (#141)"]}),
-                          ("v0.41.2", None, {"修复": ["改分辨率后开机崩溃 (#210)"]})])
+
+        # once released (tagged) nothing is new; a released file that changes, or a file that is no fragment, stops it
+        git(mgr, "tag", "v0.41.1")
+        self.assertEqual(release.new_fragments(mgr, "HEAD", "p"), ([], "v0.41.1"))
+        commit(mgr, {"changelog.d/old.fix.md": "改了已经发过的", "changelog.d/notes.txt": "x", "changelog.d/long.fix.md": "长" * 61,
+                     "changelog.d/next.fix.md": "下一版修的"}, "下一版 (#9)")
+        with self.assertRaises(ValueError) as stopped:
+            release.new_fragments(mgr, "HEAD", "p")
+        for part in ["changelog.d/old.fix.md differs from v0.41.1", "changelog.d/notes.txt: the name must be", "changelog.d/long.fix.md: needs one line"]:
+            self.assertIn(part, str(stopped.exception))
+        with self.assertRaises(ValueError):
+            checks.check_fragments(mgr)
 
     def test_component_takes_the_release_version(self):
         """A component rebuilt for a release takes the release's version, and its release page only points at the

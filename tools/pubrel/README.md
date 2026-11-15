@@ -51,20 +51,21 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 
 ## 发版
 
-公告的「更新内容」不手写，从这一版要关的 issue 汇总进 `config/changelog.json`（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：
+公告的「更新内容」不手写。用户看得见的改动，各自的 PR 里带一个说明文件（`changelog.d/<名字>.<feat|fix|change|remove>.md`，一行话，写法见 [changelog.d/README.md](../../changelog.d/README.md)）；发版时把上一版以后新加的文件汇总进 `config/changelog.json`（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：
 
 ```powershell
-python -I tools/pubrel/release_tools.py changelog-collect --build mas41 --version 0.41.1 [--issues 210,206] [--exclude 110] [--note "更新前先把实例都关机"] [--min-automas 5.7.0]
+pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build mas41 -Version 0.41.1 [-Note "更新前先把实例都关机"] [-MinAutoMas 5.7.0]
 ```
 
-- 不给 `--issues` 就取所有带 `pending-release` 标签的 issue（要装好 `gh` 并登录）；`--exclude` 去掉这一版只修了一部分、还不该写的。
-- 每个 issue 一条 `<文字> (#N)`。分类看标签：`bug` 进「修复」，`enhancement` 进「新增」，其余进「变更」；带 `dev-process`、`documentation` 的不列。
-- 文字默认是 issue 标题。维护者在 issue 里发一条评论，其中一行 `更新说明：<一句话>`，就用这一句；`更新说明（变更）：…` 顺便指定分类；`更新说明：无` 表示不列。有好几行时取最后一行。
-- 文字要是一行、不超过 60 字、不能有 `--`。不合的会一次全报出来：回 issue 改标题或补评论，再跑一遍，不在 `changelog.json` 里改。
-- 「说明」类用 `--note` 手写，只写这一版要用户动手的事；重新汇总时留着。`--min-automas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。
+- 读四个仓库的 `changelog.d`：ModAVD 的发版克隆读 HEAD；管理器、截图库、输入法读各自 `upstream` 的 `release/<X>.<Y>` 头（路径取 `-ManagerRepo`、`-ExtrasRepo`、`-ImeRepo` 或本机配置，先 `git fetch upstream --tags`）。没有这条发版分支的组件算这一版没重新打包，不出条目。
+- 「新加的」指这个提交有、上一版（往回最近的那个 `v*` tag）没有的文件。已经发过的文件改了内容会报错：以后的改动另起一个文件。
+- 文件名里的类型就是分类：`feat` 新增，`fix` 修复，`change` 变更，`remove` 移除。条目是文件里那一行，末尾补上加这个文件的 PR（合并提交标题末尾的编号），写成 `(#N)` 或 `(ModAVD/ModAVDManager#N)`；那一行自己以 issue 或 PR 编号结尾的就不补。
+- 文件不合格（名字不对、不止一行、超过 60 字、有 `--`）会一次全报出来，回去改文件再跑。ModAVD 自己的 `changelog.d` 在 CI 的 `checks.py metadata` 里也查。
+- 每个仓库还会列出上一版以后没带说明文件的提交，过一眼有没有漏掉用户看得见的改动。
+- 「说明」类用 `-Note` 手写，只写这一版要用户动手的事；重新汇总时留着。`-MinAutoMas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。
 - 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`，重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
 
-公告里除了「更新内容」只有开头一行：基于的上游版本、各组件的版本（本版重新打包的会标出来）和文档站的链接。怎么更新、已知问题、回归怎么测的都不写进公告；这一版有要用户动手的事，用 `--note` 写成一条「说明」。
+公告里除了「更新内容」只有开头一行：基于的上游版本、各组件的版本（本版重新打包的会标出来）和文档站的链接。怎么更新、已知问题、回归怎么测的都不写进公告；这一版有要用户动手的事，用 `-Note` 写成一条「说明」。
 
 管理器、截图库、输入法这一版重新打包了，版本号就取这一版 ModAVD 的版本号，没重新打包的不动；还没打 tag 的组件版本号对不上，预检就停。它们自己仓库的 Release 说明也不手写，在组件的发版分支上生成：
 
@@ -211,4 +212,4 @@ python -I tools/pubrel/test_release.py --work <全新临时目录>
 ```
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
-覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、「更新内容」从 issue 汇总（按标签分类、`更新说明` 评论、不列的、太长的一次报全、重跑留着手写的「说明」）、公告里的组件版本行、组件仓库的 Release 短页、重新打包的组件版本号要等于这一版、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（APK 没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外一律不许钉，截图库和外壳也不钉；截图库和外壳要一起给、真打包时必须给）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库的版本按发版分支头的 `CMakeLists.txt` 取、旧一版的 DLL 被拒、没有发版分支时按列着它的 tag 找、和那里的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
+覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、「更新内容」从各仓库 `changelog.d` 汇总（只取上一版以后新加的、补上加文件的 PR 编号、没有发版分支的组件不出条目、发过的文件改了或文件不合格一次报全、重跑留着手写的「说明」、版本号放不进去时不动文件）、公告里的组件版本行、组件仓库的 Release 短页、重新打包的组件版本号要等于这一版、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（APK 没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外一律不许钉，截图库和外壳也不钉；截图库和外壳要一起给、真打包时必须给）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库的版本按发版分支头的 `CMakeLists.txt` 取、旧一版的 DLL 被拒、没有发版分支时按列着它的 tag 找、和那里的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
