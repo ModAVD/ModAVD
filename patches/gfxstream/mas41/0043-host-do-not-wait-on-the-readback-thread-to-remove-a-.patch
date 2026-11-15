@@ -1,0 +1,38 @@
+From 32813e91da98b992967b78496b895f69e96a4bf3 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 14 Nov 2026 19:45:26 +0100
+Subject: [PATCH 43/43] host: do not wait on the readback thread to remove a
+ display it never had
+
+setPostCallback(nullptr) always queued DelRecordDisplay and waited on
+it while holding m_lock. If the display was never recorded the readback
+thread may never have been started, so the wait never returned and the
+caller (the emulator main loop) and every thread needing m_lock hung.
+
+Return early when the display has no post callback or the readback
+thread is not running.
+
+Refs ModAVD/ModAVD#210
+
+Change-Id: I53a19c02297b5b2b6be96ebb3ed1f8f9b64d0f98
+---
+ host/frame_buffer.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index eae51be9..d3b0e799 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -1804,6 +1804,12 @@ void FrameBuffer::Impl::setPostCallback(Renderer::OnPostCallback onPost, void* o
+             {ReadbackCmd::AddRecordDisplay, displayId, nullptr, 0, w, h});
+         completeFuture.wait();
+     } else {
++        // Nothing to remove when this display was never recorded. The readback
++        // thread may not even be running then, and waiting on it here (while
++        // holding m_lock) would never return.
++        if (m_onPost.find(displayId) == m_onPost.end() || !m_readbackThreadStarted.load()) {
++            return;
++        }
+         std::future<void> completeFuture = m_readbackThread.enqueue(
+             {ReadbackCmd::DelRecordDisplay, displayId});
+         completeFuture.wait();
