@@ -1,11 +1,11 @@
 {
   "ModAVD-0.41.0-win-x64.zip": {
     "bytes": 301352263,
-    "sha256": "db484803df4d16d48af26ad8c56969cbcab09b5a5f26b17c0aa7cb100192ec86"
+    "sha256": "6c6c1309d824354b9674ccfb89fd9e6bdd22236a39419402a9a7b804a7e20c88"
   },
   "ModAVD-0.41.0-sources.zip": {
-    "bytes": 831208219,
-    "sha256": "049d8749339f3411c285c742c99cde43dd02dc2838652326396de5aa83b3186e"
+    "bytes": 831208187,
+    "sha256": "34061ebd08cd35aa51f573e75a9facc41af3e9066146f2bb86cb4a8f2de6d1f8"
   },
   "build-bazel-862d0ec34f27-glib-2.82.2.bcr.5.aemu.tar.xz": {
     "bytes": 28696,
@@ -140,8 +140,8 @@
     "sha256": "4c91359156bbcca59bda42b661c80a7703bfd13814a58366e4851a765a4b3f08"
   },
   "modavd-src.tar.xz": {
-    "bytes": 1524416,
-    "sha256": "fa29035aade853bb18f61dd856ab621bc383897b7da6ee30c7dbde13ba3bcf3a"
+    "bytes": 1524384,
+    "sha256": "5e67291e11c3f4947acabc240c47642d41d0eecdac4b30184052de0ba57b7cf7"
   },
   "pixman-0.32.4.tar.gz": {
     "bytes": 817407,
@@ -197,7 +197,7 @@
   },
   "SOURCES.txt": {
     "bytes": 8131,
-    "sha256": "82a2314d25ad57f188b01953a7d8b3d9e1acb843d6e4e6a54b449016ce27f3a9"
+    "sha256": "ea21af57073053cc875d88daf10b43a4129b0efbe323244d142e391fc4c38731"
   },
   "tools-netsim-f113660da2a5.tar.xz": {
     "bytes": 34418208,
