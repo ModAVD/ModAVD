@@ -1,27 +1,11 @@
 {{MACHINE}}
-ModAVD {{VERSION}}，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。安装、升级和反馈见[文档站](https://modavd.github.io/)。
+ModAVD {{VERSION}}，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。{{COMPONENTS}}安装、升级和反馈见[文档站](https://modavd.github.io/)。
 
 ## 更新内容
 
 {{CHANGES}}
 
-## 怎么更新
-
-{{HOW_TO_UPDATE}}
-
-## AUTO-MAS 版本
-
-{{AUTOMAS}}
-
-## 已知问题
-
-{{KNOWN}}
-
 <!-- modavd:github-only -->
-
-## 发布前回归
-
-{{REGRESSION}}
 
 ## 下载
 

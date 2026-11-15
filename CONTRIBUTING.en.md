@@ -43,6 +43,7 @@ What follows are the points that matter most before you open an issue or a PR.
 ## Credit and licensing
 
 - Open PRs from your own fork. CI for external PRs runs only after a maintainer approves it.
+- For a change that users can see, add a file `changelog.d/<name>.<feat|fix|change|remove>.md` in the same PR, with one line written for users; the release notes are collected from these files. How to write it is in [changelog.d/README.md](changelog.d/README.md). The repositories of the manager, the capture library and the host IME work the same way.
 - Use your own name or a pseudonym, and a GitHub noreply address as your e-mail (`<id>+<username>@users.noreply.github.com`); do not add `Co-authored-by`. Your authorship is kept once the change is merged, and the release notes will thank you.
 - Your change comes in under the license of the file it changes; see [Licenses and source code](README.en.md#licenses-and-source-code) in the README. Put your own name or pseudonym on the copyright line of new files. No CLA is needed, and `Signed-off-by` is optional.
 - You may use AI tools, but the person who commits is still responsible for the change. For code changes that can be built or run on an instance, verify them for real as far as you can, and say in the PR which checks you actually ran and what the known limits are. The rules for AI tools are in [AGENTS.md](AGENTS.md) (in Chinese) at the repository root; Codex, Claude Code and similar tools read it on their own.
