@@ -61,6 +61,10 @@ def replacements(repo, name):
     if name == "wgl":
         source = read("host/gl/glestranslator/egl/egl_os_api_wgl.cpp")
         return {
+            "WGL_LOG_LIMITER": ("#define HAS_WGL_FAILURE_LIMITER 1\n" + block(source, "class WglFailureLog")) if "class WglFailureLog" in source else "",
+            "PENDING_TYPE": ("#define HAS_BOUNDED_PBUFFERS 1\n" + block(source, "    struct PendingPbuffer")) if "    struct PendingPbuffer" in source else "",
+            "QUEUE_PENDING": block(source, "    void queuePbufferForDeletionLocked(", optional=True),
+            "PBUFFER_LIMITS": "\n".join(re.findall(r"    static constexpr [^;]+(?:kPbufferBacklogBudget|kPbufferRetryBatch)[^;]*;", source)),
             "WIN_SURFACE": block(source, "class WinSurface :"),
             "CREATE_SURFACE": block(source, "    virtual EglOS::Surface* createPbufferSurface("),
             "RELEASE_SURFACE": block(source, "    virtual bool releasePbuffer("),
@@ -72,6 +76,7 @@ def replacements(repo, name):
         resize = read("host/gl/texture_resize.cpp")
         yuv = read("host/gl/yuv_converter.cpp")
         return {
+            "SURFACE_DTOR": block(read("host/gl/display_surface_gl.cpp"), "DisplaySurfaceGl::~DisplaySurfaceGl()"),
             "CLEANUP": block(source, "struct ColorBufferGlCleanup"),
             "CB_CTOR": block(source, "ColorBufferGl::ColorBufferGl("),
             "CB_DTOR": block(source, "ColorBufferGl::~ColorBufferGl()"),
@@ -88,6 +93,10 @@ def replacements(repo, name):
         source = read("host/render_control.cpp")
         fb = read("host/frame_buffer.cpp")
         return {
+            "READ_IMPL": block(fb, "bool FrameBuffer::Impl::readColorBuffer("),
+            "READ_DEPRECATED_IMPL": block(fb, "bool FrameBuffer::Impl::readColorBufferDeprecated("),
+            "READ_PUBLIC": block(fb, "bool FrameBuffer::readColorBuffer("),
+            "READ_DEPRECATED_PUBLIC": block(fb, "bool FrameBuffer::readColorBufferDeprecated("),
             "GUEST": block(source, "static void rcReadColorBuffer("),
             "DMA": block(source, "static int rcReadColorBufferDMA("),
             "SCREENSHOT": block(fb, "int FrameBuffer::getScreenshot("),
@@ -142,7 +151,7 @@ def main():
         if built.returncode:
             print(built.stdout + built.stderr)
             built.check_returncode()
-        run = subprocess.run([str(exe)], cwd=work, capture_output=True, text=True, errors="replace")
+        run = subprocess.run([str(exe)], cwd=work, capture_output=True, text=True, errors="replace", timeout=30)
         print(run.stdout, end="")
         if run.returncode:
             print(run.stderr)

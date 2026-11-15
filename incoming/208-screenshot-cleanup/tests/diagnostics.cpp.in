@@ -4,31 +4,55 @@
 #include "render-utils/readback_diagnostics.h"
 #define CONFIG_AEMU 1
 using GLint = int; using GLenum = unsigned;
+using HandleType = uint32_t;
 namespace gfxstream { namespace host {
 struct Rect {};
 struct Renderer { static constexpr int GET_SCREENSHOT_RESULT_PIXELS_SIZE = -2; };
-struct FakeFramebuffer {
-    bool fail = false;
-    int getScreenshot(unsigned channels, unsigned* width, unsigned* height, uint8_t* pixels,
-                      size_t* count, int, int, int, int, Rect) {
-        if (fail) return -1;
-        *width = 320; *height = 240; *count = 320 * 240 * channels;
-        return pixels ? 0 : -2;
+enum class GfxstreamFormat { Rgba };
+struct MockColorBuffer {
+    inline static size_t calls=0;
+    bool ok=true;
+    uint64_t lastCapacity=0;
+    bool readToBytes(int,int,int width,int height,GfxstreamFormat,void*,uint64_t capacity) {
+        ++calls; lastCapacity=capacity;
+        return ok && capacity>=static_cast<uint64_t>(width)*height*4;
     }
 };
+using IColorBufferRef=std::shared_ptr<MockColorBuffer>;
+struct AutoLock { explicit AutoLock(int&) {} };
+static std::optional<GfxstreamFormat> GetGfxstreamFormat(int,GLenum format,GLenum type) {
+    if(format==99 || type==99)return std::nullopt;
+    return GfxstreamFormat::Rgba;
+}
+#define GFXSTREAM_TRACE_EVENT(...) ((void)0)
 struct FrameBuffer {
-    FakeFramebuffer impl;
-    FakeFramebuffer* mImpl = &impl;
-    static bool available;
-    static size_t backendCalls;
+    struct Impl {
+        int m_lock=0, m_features=0;
+        bool fail=false;
+        IColorBufferRef buffer=std::make_shared<MockColorBuffer>();
+        IColorBufferRef findColorBuffer(uint32_t handle) { return handle==63 ? buffer : nullptr; }
+        bool readColorBuffer(uint32_t,int,int,int,int,GfxstreamFormat,void*,uint64_t);
+        bool readColorBufferDeprecated(uint32_t,int,int,int,int,GLenum,GLenum,void*,uint64_t);
+        int getScreenshot(unsigned channels,unsigned* width,unsigned* height,uint8_t* pixels,
+                          size_t* count,int,int,int,int,Rect) {
+            if(fail)return -1;
+            *width=320;*height=240;*count=320*240*channels;
+            return pixels ? 0 : -2;
+        }
+    };
+    Impl impl;
+    Impl* mImpl=&impl;
+    inline static bool available=true;
+    inline static size_t& backendCalls=MockColorBuffer::calls;
     static FrameBuffer* getFB() { static FrameBuffer fb; return available ? &fb : nullptr; }
-    void readColorBufferDeprecated(uint32_t, GLint, GLint, GLint, GLint, GLenum, GLenum, void*,uint32_t) {
-        ++backendCalls;
-    }
+    bool readColorBuffer(uint32_t,int,int,int,int,GfxstreamFormat,void*,uint64_t);
+    bool readColorBufferDeprecated(uint32_t,int,int,int,int,GLenum,GLenum,void*,uint64_t);
     int getScreenshot(unsigned,unsigned*,unsigned*,uint8_t*,size_t*,int,int,int,int,Rect);
 };
-bool FrameBuffer::available=true;
-size_t FrameBuffer::backendCalls=0;
+@READ_IMPL@
+@READ_DEPRECATED_IMPL@
+@READ_PUBLIC@
+@READ_DEPRECATED_PUBLIC@
 struct RenderThreadInfo {
     uint64_t m_puid = 73;
     static RenderThreadInfo* get() { static RenderThreadInfo info; return &info; }
@@ -46,6 +70,8 @@ static std::string row(const std::string& match) {
     for(auto i=logs.rbegin();i!=logs.rend();++i)if(i->find(match)!=std::string::npos)return *i;
     CHECK(false); return {};
 }
+static ReadbackDiagnostics::Clock::time_point fakeNow=ReadbackDiagnostics::Clock::time_point{}+std::chrono::minutes(2);
+static ReadbackDiagnostics::Clock::time_point testNow() { return fakeNow; }
 int main() {
     const auto start=std::chrono::steady_clock::now();
     constexpr uint32_t bytes=1280*720*4;
@@ -59,6 +85,20 @@ int main() {
     CHECK(rcReadColorBufferDMA(63,0,0,1280,720,0,0,nullptr,bytes)==-1);
     FrameBuffer::available=true;
     std::puts("PASS production guest and DMA entries keep separate counts and failure records");
+    auto* backend=FrameBuffer::getFB();
+    for(int scenario=0;scenario<5;++scenario) {
+        const uint32_t handle=scenario==1 ? 99 : 63;
+        const GLenum format=scenario==0 ? 99 : 0;
+        const uint32_t capacity=scenario==2 ? 32 : bytes;
+        backend->impl.buffer->ok=scenario!=3;
+        rcReadColorBuffer(handle,0,0,1280,720,format,0,nullptr,capacity);
+        // Keep the existing DMA protocol result; diagnostics get the backend result.
+        CHECK(rcReadColorBufferDMA(handle,0,0,1280,720,format,0,nullptr,capacity)==0);
+        if(scenario==2)CHECK(backend->impl.buffer->lastCapacity==32);
+    }
+    CHECK(backend->readColorBuffer(63,0,0,1280,720,GfxstreamFormat::Rgba,nullptr,bytes));
+    CHECK(!backend->readColorBuffer(99,0,0,1280,720,GfxstreamFormat::Rgba,nullptr,bytes));
+    std::puts("PASS actual FrameBuffer chain propagates invalid format, missing handle, capacity and backend failures");
 
     unsigned width=0,height=0;size_t count=0;uint8_t output[4]={};
     auto* fb=FrameBuffer::getFB();
@@ -91,9 +131,9 @@ int main() {
     }
     ReadbackDiagnostics::get().log();
     auto guest=row("source=guest "),dma=row("source=guest-dma ");
-    CHECK(field(guest,"calls")==10001 && field(dma,"calls")==10001);
-    CHECK(field(guest,"bytes")==10001ull*bytes && field(dma,"bytes")==10001ull*bytes);
-    CHECK(field(guest,"failures")==1 && field(dma,"failures")==1);
+    CHECK(field(guest,"calls")==10006 && field(dma,"calls")==10006);
+    CHECK(field(guest,"bytes")==10005ull*bytes+32 && field(dma,"bytes")==10005ull*bytes+32);
+    CHECK(field(guest,"failures")==5 && field(dma,"failures")==5);
     CHECK(field(guest,"lastCb")==63 && field(guest,"lastPuid")==73);
     auto host=row("source=host-screenshot "),query=row("source=host-size-query ");
     CHECK(field(host,"calls")==101 && field(host,"failures")==1);
@@ -108,4 +148,43 @@ int main() {
     CHECK(field(resources,"cleanupAbandoned")==4 && field(resources,"pendingRgbaEstimateBytes")==0);
     CHECK(field(resources,"threadsCreated")==8 && field(resources,"threadsReleased")==8);
     std::puts("PASS concurrent counters, throttled summaries, identities and deferred-cleanup totals");
+    {
+        ReadbackDiagnostics local(testNow);
+        logs.clear();
+        for(int i=0;i<10000;++i) {
+            local.readback(ReadbackSource::Guest,320,240,100,1,ReadbackOutcome::Failed);
+            local.readback(ReadbackSource::GuestDma,320,240,100,1,ReadbackOutcome::Failed);
+        }
+        size_t details=0;
+        for(auto& line:logs)if(line.find("MAS: readback failed ")==0)++details;
+        CHECK(details==6);
+        local.log();
+        CHECK(field(row("source=guest "),"failures")==10000);
+        CHECK(field(row("source=guest-dma "),"failures")==10000);
+        auto before=logs.size();
+        local.log(); CHECK(logs.size()==before);
+        fakeNow+=std::chrono::minutes(1);
+        local.log(); CHECK(logs.size()==before);
+        local.readback(ReadbackSource::Guest,320,240,100,1,ReadbackOutcome::Failed);
+        CHECK(logs.size()==before+1); // next minute permits fresh failure detail
+        local.log(); CHECK(logs.size()==before+2); // only the changed guest row
+        CHECK(logs.back().find("source=guest ")!=std::string::npos);
+        CHECK(field(logs.back(),"failures")==10001);
+        before=logs.size();
+        local.colorBufferCreated(64);local.log();CHECK(logs.size()==before+1);
+        local.log();CHECK(logs.size()==before+1);
+    }
+    std::puts("PASS 20000 readback failures keep exact totals with three details per source per minute");
+    std::puts("PASS unchanged readback and resource summaries stay silent, including forced flushes");
+    {
+        ReadbackDiagnostics local(testNow);
+        bool reentered=false;
+        logHook=[&]{logHook={};reentered=true;local.renderThreadCreated();};
+        local.readback(ReadbackSource::GlPixels,1,1,4,1,ReadbackOutcome::Failed);
+        CHECK(reentered);
+        local.log();
+        CHECK(field(row("MAS: readback resources "),"threadsCreated")==1);
+    }
+    std::puts("PASS failure and summary log callbacks can reenter diagnostics without holding its mutex");
+
 }

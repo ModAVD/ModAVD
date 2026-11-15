@@ -7,6 +7,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -21,14 +22,20 @@
 
 inline std::mutex logMutex;
 inline std::vector<std::string> logs;
+inline std::function<void()> logHook;
 inline void capture_log(const char* format, ...) {
     char buffer[4096];
     va_list args;
     va_start(args, format);
     std::vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    std::lock_guard<std::mutex> lock(logMutex);
-    logs.emplace_back(buffer);
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        logs.emplace_back(buffer);
+        hook=logHook;
+    }
+    if(hook)hook();
 }
 inline void check(bool condition, const char* text, int line) {
     if (condition) return;

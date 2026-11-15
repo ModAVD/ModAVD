@@ -7,16 +7,21 @@
 using GLuint = unsigned; using GLint = int; using GLenum = unsigned;
 using HandleType = unsigned;
 using EGLDisplay = void*; using EGLImageKHR = void*;
+using EGLSurface = void*; using EGLContext = void*;
 constexpr EGLDisplay EGL_NO_DISPLAY = nullptr;
 constexpr GLenum GL_ARRAY_BUFFER = 1, GL_ELEMENT_ARRAY_BUFFER = 2;
 constexpr GLenum GL_PACK_ALIGNMENT = 3, GL_RGBA = 4, GL_UNSIGNED_BYTE = 5;
 static int currentContext = 2, glCalls = 0, images = 0, textures = 0, fbos = 0, memoryObjects = 0;
 static int cpuObjects = 0;
+static GLuint currentProgram=0, arrayBinding=0, elementBinding=0;
+static std::vector<std::string> nativeEvents;
 static void checkGl() { CHECK(currentContext == 1); ++glCalls; }
 struct CpuObject { CpuObject() { ++cpuObjects; } ~CpuObject() { --cpuObjects; } };
 namespace gfxstream { namespace base { struct AutoLock { explicit AutoLock(int&) {} }; } }
 namespace gfxstream { namespace host { namespace gl {
 struct MockEgl {
+    void eglDestroySurface(EGLDisplay, EGLSurface) { nativeEvents.push_back("surface"); }
+    void eglDestroyContext(EGLDisplay, EGLContext) { nativeEvents.push_back("context"); }
     void eglDestroyImageKHR(EGLDisplay, EGLImageKHR) { checkGl(); CHECK(images > 0); --images; }
 } s_egl;
 struct MockGl {
@@ -25,8 +30,8 @@ struct MockGl {
     void glDeleteMemoryObjectsEXT(int n, const GLuint*) { checkGl(); CHECK(memoryObjects >= n); memoryObjects -= n; }
     void glDeleteBuffers(int, const GLuint*) { checkGl(); }
     void glDeleteProgram(GLuint) { checkGl(); }
-    void glUseProgram(GLuint) { checkGl(); }
-    void glBindBuffer(GLenum, GLuint) { checkGl(); }
+    void glUseProgram(GLuint program) { checkGl(); currentProgram=program; }
+    void glBindBuffer(GLenum target, GLuint buffer) { checkGl(); if(target==GL_ARRAY_BUFFER)arrayBinding=buffer;else elementBinding=buffer; }
     void glGetIntegerv(GLenum, GLint* out) { checkGl(); *out = 4; }
     void glPixelStorei(GLenum, GLint) { checkGl(); }
     void glReadPixels(int,int,int,int,GLenum,GLenum,void* pixels) { checkGl(); std::memset(pixels,0,4); }
@@ -101,11 +106,21 @@ public:
 @READ_PIXELS@
 struct Helper : ContextHelper {
     bool ready = true;
-    std::vector<int> previous;
-    bool setupContext() override { previous.push_back(currentContext); if(ready)currentContext=1; return ready; }
-    void teardownContext() override { currentContext=previous.back(); previous.pop_back(); }
-    bool isBound() const override { return currentContext==1; }
+    inline static std::vector<int> previous;
+    inline static int setupCalls=0, teardownCalls=0;
+    bool setupContext() override { ++setupCalls; previous.push_back(currentContext); if(ready)currentContext=1; return ready; }
+    void teardownContext() override { ++teardownCalls; currentContext=previous.back(); previous.pop_back(); }
+    bool isBound() const override { return !previous.empty(); }
 };
+struct DisplaySurfaceGl {
+    EGLDisplay mDisplay=reinterpret_cast<void*>(1);
+    EGLSurface mSurface=reinterpret_cast<void*>(2);
+    EGLContext mContext=reinterpret_cast<void*>(3);
+    std::unique_ptr<ContextHelper> mContextHelper;
+    explicit DisplaySurfaceGl(std::unique_ptr<ContextHelper> helper) : mContextHelper(std::move(helper)) {}
+    ~DisplaySurfaceGl();
+};
+@SURFACE_DTOR@
 static std::unique_ptr<ColorBufferGl> makeBuffer(Helper* helper) {
     static PixelReadFormats formats;
     images+=2; textures+=2; fbos+=3; ++memoryObjects;
@@ -116,6 +131,81 @@ static void checkEmpty() { CHECK(!images && !textures && !fbos && !memoryObjects
 using namespace gfxstream::host;
 using namespace gfxstream::host::gl;
 int main() {
+    {
+        auto helper=std::make_unique<Helper>(); helper->ready=false;
+        const auto binds=Helper::setupCalls, restores=Helper::teardownCalls;
+        nativeEvents.clear();
+        { DisplaySurfaceGl surface(std::move(helper)); }
+        CHECK(Helper::setupCalls==binds && Helper::teardownCalls==restores);
+        CHECK(nativeEvents==std::vector<std::string>({"surface","context"}));
+    }
+    std::puts("PASS empty DisplaySurface destruction never attempts a context bind");
+    {
+        auto helper=std::make_unique<Helper>(); helper->ready=false;
+        makeBuffer(helper.get()).reset();
+        helper->ready=true;
+        bool cleaned=false;
+        helper->deferCleanup([&](ContextHelper::CleanupContext mode){
+            CHECK(mode==ContextHelper::CleanupContext::Current && nativeEvents.empty()); cleaned=true;
+        });
+        const auto binds=Helper::setupCalls, restores=Helper::teardownCalls;
+        nativeEvents.clear();
+        { DisplaySurfaceGl surface(std::move(helper)); }
+        CHECK(cleaned && Helper::setupCalls==binds+1 && Helper::teardownCalls==restores+1);
+        CHECK(nativeEvents==std::vector<std::string>({"surface","context"}));
+        checkEmpty();
+    }
+    std::puts("PASS pending DisplaySurface cleanup binds once before native teardown");
+    {
+        auto helper=std::make_unique<Helper>(); helper->ready=false;
+        const auto before=glCalls;
+        makeBuffer(helper.get()).reset();
+        bool abandoned=false;
+        helper->deferCleanup([&](ContextHelper::CleanupContext mode){
+            CHECK(mode==ContextHelper::CleanupContext::Lost && nativeEvents.empty()); abandoned=true;
+        });
+        const auto binds=Helper::setupCalls, restores=Helper::teardownCalls;
+        nativeEvents.clear();
+        { DisplaySurfaceGl surface(std::move(helper)); }
+        CHECK(abandoned && Helper::setupCalls==binds+1 && Helper::teardownCalls==restores+1);
+        CHECK(glCalls==before && cpuObjects==0 && currentContext==2);
+        CHECK(images==2 && textures==2 && fbos==3 && memoryObjects==1);
+        images=textures=fbos=memoryObjects=0; // native teardown is simulated
+        checkEmpty();
+    }
+    std::puts("PASS failed DisplaySurface recovery frees CPU ownership without foreign-context GL");
+    {
+        Helper helper;
+        {
+            RecursiveScopedContextBind outer(&helper); CHECK(outer.isOk());
+            currentProgram=17; arrayBinding=23; elementBinding=31;
+            helper.ready=false;
+            makeBuffer(&helper).reset();
+            helper.ready=true;
+            const auto before=glCalls;
+            { RecursiveScopedContextBind inner(&helper); CHECK(inner.isOk()); }
+            CHECK(glCalls==before && cpuObjects==3 && images==2);
+            CHECK(currentProgram==17 && arrayBinding==23 && elementBinding==31);
+        }
+        { RecursiveScopedContextBind next(&helper); CHECK(next.isOk()); }
+        checkEmpty();
+    }
+    std::puts("PASS nested binding preserves outer GL state and defers cleanup until the next outer bind");
+    {
+        Helper outerHelper, innerHelper;
+        bool cleaned=false;
+        {
+            RecursiveScopedContextBind outer(&outerHelper);
+            innerHelper.deferCleanup([&](ContextHelper::CleanupContext mode){
+                CHECK(mode==ContextHelper::CleanupContext::Current); cleaned=true;
+            });
+            { RecursiveScopedContextBind inner(&innerHelper); CHECK(inner.isOk()); }
+            CHECK(!cleaned);
+        }
+        { RecursiveScopedContextBind next(&innerHelper); CHECK(next.isOk()); }
+        CHECK(cleaned);
+    }
+    std::puts("PASS nested helper contexts also defer cleanup until the outer operation is finished");
     {
         Helper helper;
         makeBuffer(&helper).reset();
