@@ -1,5 +1,24 @@
 [
   {
+    "version": "v0.41.0",
+    "build": 41,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "带窗口的实例，标题栏加了最大化 / 还原按钮。（[#185](https://github.com/ModAVD/ModAVD/issues/185)）",
+        "截图库能按返回、主页、多任务这类按键了，客体里不用装东西；MAA、MaaFramework 还没有接入。",
+        "开机后记下安卓的时钟源；退回慢的那种时自动存下内核日志，问题包会带上。（[#110](https://github.com/ModAVD/ModAVD/issues/110)）"
+      ],
+      "变更": [
+        "模拟器重新编过；包里的管理器和命令行升到 0.12.0，详见 [ModAVDManager 的 Release](https://github.com/ModAVD/ModAVDManager/releases/tag/v0.12.0)；截图库和 MuMu 兼容外壳升到 v0.3.1。"
+      ],
+      "修复": [
+        "调高分辨率后开机，模拟器不再在开机后设置期间卡死退出；MAA 这类截图工具不用重开也能接着截图。（[#210](https://github.com/ModAVD/ModAVD/issues/210)）",
+        "新建实例时语言没设成，不再算新建失败，下次开机再设。（[#206](https://github.com/ModAVD/ModAVD/issues/206)）"
+      ]
+    }
+  },
+  {
     "version": "v0.40.3",
     "build": 40,
     "min_automas": "5.7.0",
