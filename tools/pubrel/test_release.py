@@ -1764,16 +1764,16 @@ class ReleaseChecks(unittest.TestCase):
 
     def test_notes_budget_before_packaging(self):
         """0.38.0: the machine line (9157) and the announcement (4532) were over their limits, which only step 7 said,
-        after packaging. preflight and notes-budget measure them from changes.md and changelog.json alone."""
+        after packaging. preflight and notes-budget measure them from changelog.json alone."""
         path = self.folder()
-        changes, changelog = path / "changes.md", path / "changelog.json"
-        changes.write_text("".join(f"## {t}\n\n- 内容\n\n" for t in release.UPPER_SECTIONS + release.LOWER_SECTIONS), encoding="utf-8")
+        changelog = path / "changelog.json"
         entry = lambda b, item: {"version": f"v0.{b}.0", "build": b, "min_automas": None, "changes": {"修复": [item]}}
         release.save(changelog, [entry(39, "修好一处")] + [entry(b, "旧版") for b in range(38, 29, -1)])
-        machine, upper = release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
-        fields = release.text_fields("0.39.0", 39, "37.2.10", changes, changelog)
+        machine, upper = release.notes_budget("0.39.0", 39, "37.2.10", changelog)
+        # measured with the longest component line there can be, before the components are known
+        fields = release.text_fields("0.39.0", 39, "37.2.10", changelog, release.SAMPLE_OWN)
         self.assertEqual(machine, len(fields["MACHINE"]))
-        self.assertLess(upper, 400)
+        self.assertLess(upper, 600)
         # the same numbers step 7 would measure: the asset rows only sit below the separator
         text = release.render_notes({**fields, **release.SAMPLE_ASSETS})
         self.assertEqual(checks.check_announcement(text, "v0.39.0", 39)["version"], "v0.39.0")
@@ -1784,48 +1784,141 @@ class ReleaseChecks(unittest.TestCase):
         # this version's items count in both; older ones only in the machine line
         release.save(changelog, [entry(39, "长" * 3990)] + [entry(b, "旧版") for b in range(38, 29, -1)])
         with self.assertRaisesRegex(ValueError, r"announcement above the separator would be \d+ chars, limit 4000"):
-            release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
+            release.notes_budget("0.39.0", 39, "37.2.10", changelog)
         release.save(changelog, [entry(39, "修好一处")] + [entry(b, "旧" * 900) for b in range(38, 29, -1)])
         with self.assertRaisesRegex(ValueError, r"machine-readable line would be \d+ chars, limit 8000"):
-            release.notes_budget("0.39.0", 39, "37.2.10", changes, changelog)
+            release.notes_budget("0.39.0", 39, "37.2.10", changelog)
         with self.assertRaisesRegex(ValueError, r"Machine-readable line is \d+ chars"):
-            checks.check_announcement(release.render_notes({**release.text_fields("0.39.0", 39, "37.2.10", changes, changelog),
+            checks.check_announcement(release.render_notes({**release.text_fields("0.39.0", 39, "37.2.10", changelog),
                                                             **release.SAMPLE_ASSETS}))
         # the command needs no SDK or output directory
         release.save(changelog, [entry(39, "修好一处")])
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
-            release.notes_budget_command(SimpleNamespace(build="mas39", patch=0, sdk=None, changes=str(changes), changelog=str(changelog)))
+            release.notes_budget_command(SimpleNamespace(build="mas39", patch=0, sdk=None, changelog=str(changelog)))
         self.assertRegex(printed.getvalue(), r"v0\.39\.0: machine line \d+/8000, announcement \d+/4000")
         # the version is given on its own: 0.40.2 repackages the same emulator as 0.40.0 (build 40)
-        release.save(changelog, [{**entry(40, "修好一处"), "version": "v0.40.2"}, entry(40, "旧版"), entry(39, "旧版")])
-        fields = release.text_fields("0.40.2", 40, "37.2.10", changes, changelog)
+        release.save(changelog, [{**entry(40, "修好一处"), "version": "v0.40.2", "min_automas": "5.7.0"}, entry(40, "旧版"), entry(39, "旧版")])
+        own = {"manager": {"version": "0.40.2", "tagged": False}, "extras": {"version": "0.40.0", "tagged": True},
+               "ime": {"version": "1.0.0"}}
+        fields = release.text_fields("0.40.2", 40, "37.2.10", changelog, own)
         self.assertEqual(fields["VERSION"], "0.40.2")
         text = release.render_notes({**fields, **release.SAMPLE_ASSETS})
-        # the announcement names the version only: the build number stays in the machine line and the manifest
-        self.assertTrue(text.split("\n")[1].startswith("ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建。"))
-        self.assertNotIn("mas", text.split("<!-- modavd:github-only -->")[0].split("\n", 1)[1].replace("AUTO-MAS", ""))
+        upper = text.split("<!-- modavd:github-only -->")[0].split("\n", 1)[1]
+        # the announcement names the version and what the package carries; only what is new in this version is marked
+        self.assertEqual(text.split("\n")[1], "ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建。"
+                         "组件：模拟器 0.40.0、管理器 0.40.2（本版更新）、截图库 0.40.0、宿主输入法 1.0.0。")
+        self.assertNotIn("mas", upper.replace("AUTO-MAS", ""))
+        # the rest of the announcement is fixed: how to update, the AUTO-MAS version, where the known issues are
+        self.assertEqual(upper.count("\n## "), 2)
+        self.assertIn("- 配合 AUTO-MAS 使用时，需要 AUTO-MAS v5.7.0 或更新。\n", upper)
+        self.assertIn("issues?q=is%3Aissue+is%3Aopen+label%3Abug", upper)
+        for gone in ["## AUTO-MAS 版本", "## 已知问题", "发布前回归"]:
+            self.assertNotIn(gone, text)
         self.assertEqual(checks.check_announcement(text, "v0.40.2", 40)["build"], 40)
-        release.notes_budget("0.40.2", 40, "37.2.10", changes, changelog)
+        # a rebuilt emulator is new in 0.<N>.0; a component taken before its tag is new whatever its number
+        self.assertEqual(release.render_components("0.41.0", 41, {"manager": {"version": "0.12.0", "tagged": False}, "ime": None}),
+                         "组件：模拟器 0.41.0（本版更新）、管理器 0.12.0（本版更新）。")
+        self.assertEqual(release.render_automas(None), "对 AUTO-MAS 的版本没有要求。")
+        release.notes_budget("0.40.2", 40, "37.2.10", changelog)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
-            release.notes_budget_command(SimpleNamespace(build="mas40", patch=0, version="0.40.2", sdk=None, changes=str(changes),
-                                                         changelog=str(changelog)))
+            release.notes_budget_command(SimpleNamespace(build="mas40", patch=0, version="0.40.2", sdk=None, changelog=str(changelog)))
         self.assertRegex(printed.getvalue(), r"v0\.40\.2: machine line")
         with self.assertRaisesRegex(ValueError, "differs from -Build"):
-            release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.40.2", sdk=None, changes=str(changes),
-                                                         changelog=str(changelog)))
+            release.notes_budget_command(SimpleNamespace(build="mas41", patch=0, version="0.40.2", sdk=None, changelog=str(changelog)))
+
+    def test_changelog_collected_from_issues(self):
+        """This version's 更新内容 is one line per issue the release closes: the title, or a maintainer's 更新说明
+        comment; the category follows the labels."""
+        def issue(number, title, labels=(), comments=()):
+            return {"number": number, "title": title, "labels": [{"name": n} for n in labels],
+                    "comments": [{"authorAssociation": who, "body": body} for who, body in comments]}
+        issues = [issue(210, "改分辨率后开机崩溃", ["bug", "P1"]),
+                  issue(185, "标题栏加回最大化 / 还原按钮。", ["enhancement"]),
+                  issue(141, "内部写法的标题", ["bug"], [("NONE", "更新说明：别人写的不算"), ("OWNER", "先看看\n更新说明：宿主时区名是中文时实例不再一律用 GMT\n"),
+                                                   ("MEMBER", "无关的评论")]),
+                  issue(196, "提供adb设备发现", [], [("COLLABORATOR", "更新说明（新增）: 命令行能列出 adb 设备")]),
+                  issue(150, "没有标签的改动"),
+                  issue(207, "两个测试在慢的 CI 机器上偶尔失败", ["bug", "dev-process"]),
+                  issue(216, "发版公告从 issue 汇总", ["enhancement", "dev-process"], [("OWNER", "更新说明（变更）：公告改短了")]),
+                  issue(110, "时钟源偶尔退回 hpet", ["bug"], [("OWNER", "更新说明：无")])]
+        changes, skipped = release.collect_changes(issues)
+        self.assertEqual(changes, {"修复": ["宿主时区名是中文时实例不再一律用 GMT (#141)", "改分辨率后开机崩溃 (#210)"],
+                                   "新增": ["标题栏加回最大化 / 还原按钮 (#185)", "命令行能列出 adb 设备 (#196)"],
+                                   "变更": ["没有标签的改动 (#150)", "公告改短了 (#216)"]})
+        self.assertEqual(skipped, [(110, "更新说明：无"), (207, "label dev-process")])
+        checks.check_changes({"v0.42.0": changes})
+        # a text that does not fit is fixed at its issue, not here: every such issue is named at once
+        with self.assertRaisesRegex(ValueError, r"#7 \(61 chars\).*#8 .*a -- b"):
+            release.collect_changes([issue(7, "长" * 61), issue(8, "a -- b"), issue(9, "长" * 60)])
+        path = self.folder()
+        log = path / "changelog.json"
+        old = {"version": "v0.41.0", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["旧版"]}}
+        release.save(log, [old])
+        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[:2])
+        self.assertEqual(entry, {"version": "v0.41.1", "build": 41, "min_automas": "5.7.0",
+                                 "changes": {"新增": ["标题栏加回最大化 / 还原按钮 (#185)"], "修复": ["改分辨率后开机崩溃 (#210)"]}})
+        self.assertEqual(release.load(log), [entry, old])
+        # collecting again replaces the entry; the hand-written 说明 and the AUTO-MAS version stay unless given anew
+        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[:1], ["更新前先把实例都关机"], "5.8.0")
+        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {"修复": ["改分辨率后开机崩溃 (#210)"], "说明": ["更新前先把实例都关机"]}))
+        entry, _ = release.collect_changelog(log, "0.41.1", 41, issues[1:2])
+        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {"新增": ["标题栏加回最大化 / 还原按钮 (#185)"], "说明": ["更新前先把实例都关机"]}))
+        self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
+        with self.assertRaisesRegex(ValueError, "Nothing to announce"):
+            release.collect_changelog(log, "0.41.2", 41, [issues[5]])
+        self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
+        # the command: the issues labelled pending-release, or the given ones, without the excluded
+        asked = []
+        def fake(*args):
+            asked.append(args)
+            return issues[:2] if args[1] == "list" else next(i for i in issues if str(i["number"]) == args[2])
+        real, release.gh_json = release.gh_json, fake
+        try:
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                release.collect_command(SimpleNamespace(build="mas41", patch=0, version="0.41.2", changelog=str(log), issues=None,
+                                                        exclude="185", note=[], min_automas="none"))
+                release.collect_command(SimpleNamespace(build="mas41", patch=0, version="0.41.3", changelog=str(log), issues="141, 207",
+                                                        exclude=None, note=[], min_automas=None))
+        finally:
+            release.gh_json = real
+        self.assertEqual(asked[0][:6], ("issue", "list", "--repo", "ModAVD/ModAVD", "--label", "pending-release"))
+        self.assertEqual([a[:3] for a in asked[1:]], [("issue", "view", "141"), ("issue", "view", "207")])
+        self.assertIn("not announced: #207 (label dev-process)", printed.getvalue())
+        self.assertEqual([(e["version"], e["min_automas"], e["changes"]) for e in release.load(log)[:2]],
+                         [("v0.41.3", None, {"修复": ["宿主时区名是中文时实例不再一律用 GMT (#141)"]}),
+                          ("v0.41.2", None, {"修复": ["改分辨率后开机崩溃 (#210)"]})])
+
+    def test_component_takes_the_release_version(self):
+        """A component rebuilt for a release takes the release's version, and its release page only points at the
+        ModAVD release of that version."""
+        tagged = {"version": "0.42.0", "tagged": True}
+        release.check_component_versions({"manager": {"version": "0.42.3", "tagged": False}, "extras": tagged,
+                                          "ime": {"version": "1.0.0"}, "nothing": None}, "0.42.3")
+        with self.assertRaisesRegex(ValueError, r"not at this release's version 0\.42\.3: manager 0\.13\.0, extras 0\.42\.2"):
+            release.check_component_versions({"manager": {"version": "0.13.0", "tagged": False},
+                                              "extras": {"version": "0.42.2", "tagged": False}, "ime": tagged}, "0.42.3")
+        sums = f"{'b' * 64}  tools/modavd.exe\n{'a' * 64}  ModAVD.exe\n"
+        text = release.component_notes("manager", "0.42.3", sums)
+        self.assertTrue(text.startswith("# ModAVDManager v0.42.3\n\nModAVDManager（管理器和命令行）0.42.3，随 "
+                                        "[ModAVD 0.42.3](https://github.com/ModAVD/ModAVD/releases/tag/v0.42.3) 发布。"))
+        self.assertIn("ships with [ModAVD 0.42.3](https://github.com/ModAVD/ModAVD/releases/tag/v0.42.3)", text)
+        self.assertTrue(text.endswith(f"| `ModAVD.exe` | `{'a' * 64}` |\n| `tools/modavd.exe` | `{'b' * 64}` |\n"))
+        path = self.folder()
+        (path / "sums.txt").write_text(sums, encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.component_notes_command(SimpleNamespace(component="extras", version="0.42.3", sums=str(path / "sums.txt"),
+                                                            notes_output=str(path / "0.42.3.md")))
+        self.assertIn("# ModAVDExtras v0.42.3\n", (path / "0.42.3.md").read_text(encoding="utf-8"))
+        for bad in [dict(component="other"), dict(version=None), dict(sums=None)]:
+            with self.assertRaises(ValueError):
+                release.component_notes_command(SimpleNamespace(**{"component": "ime", "version": "0.42.3", "sums": str(path / "sums.txt"),
+                                                                   "notes_output": str(path / "x.md"), **bad}))
 
     def test_changes_and_changelog(self):
         path = self.folder()
-        good = "".join(f"## {t}\n\n- 内容\n\n" for t in release.UPPER_SECTIONS + release.LOWER_SECTIONS)
-        changes = path / "changes.md"
-        changes.write_text(good, encoding="utf-8")
-        self.assertEqual(set(release.read_changes(changes)), set(release.UPPER_SECTIONS + release.LOWER_SECTIONS))
-        for bad in [good.replace("- 内容", "- （" + release.PLACEHOLDER + "）", 1), good.replace("## 已知问题", "## 其他"), "前言\n" + good]:
-            changes.write_text(bad, encoding="utf-8")
-            with self.assertRaises(ValueError):
-                release.read_changes(changes)
         log = path / "changelog.json"
         entry = lambda v, b: {"version": v, "build": b, "min_automas": None, "changes": {"修复": ["a"]}}
         release.save(log, [entry("v0.34.0", 34), entry("v0.33.0", 33), entry("v0.32.0", 32)])

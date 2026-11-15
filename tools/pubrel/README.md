@@ -51,12 +51,30 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 
 ## 发版
 
-回归跑完后填两个文件（发版时读取，不进构建快照）：
+公告的「更新内容」不手写，从这一版要关的 issue 汇总进 `config/changelog.json`（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：
 
-- `config/changes.md`：`## 怎么更新`、`## AUTO-MAS 版本`、`## 已知问题`、`## 发布前回归` 四节，一节都不能少，不能留「发布前填写」占位。
-- `config/changelog.json`：在最前面加本版一条，`{"version": "v0.41.0", "build": 40, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`。分类只用 `新增`、`变更`、`修复`、`移除`、`说明`；条目一行一句，不能有 `--`。公告的「更新内容」就是本版这条按分类排出来的；第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
+```powershell
+python -I tools/pubrel/release_tools.py changelog-collect --build mas41 --version 0.41.1 [--issues 210,206] [--exclude 110] [--note "更新前先把实例都关机"] [--min-automas 5.7.0]
+```
 
-这两个文件写完（或写的过程中）先看公告长度，不用 SDK、不打包：
+- 不给 `--issues` 就取所有带 `pending-release` 标签的 issue（要装好 `gh` 并登录）；`--exclude` 去掉这一版只修了一部分、还不该写的。
+- 每个 issue 一条 `<文字> (#N)`。分类看标签：`bug` 进「修复」，`enhancement` 进「新增」，其余进「变更」；带 `dev-process`、`documentation` 的不列。
+- 文字默认是 issue 标题。维护者在 issue 里发一条评论，其中一行 `更新说明：<一句话>`，就用这一句；`更新说明（变更）：…` 顺便指定分类；`更新说明：无` 表示不列。有好几行时取最后一行。
+- 文字要是一行、不超过 60 字、不能有 `--`。不合的会一次全报出来：回 issue 改标题或补评论，再跑一遍，不在 `changelog.json` 里改。
+- 「说明」类用 `--note` 手写，只写这一版要用户动手的事；重新汇总时留着。`--min-automas` 不给就沿用上一版的，`none` 表示没有要求。
+- 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`，重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
+
+公告其余部分都是模板里固定的：开头一行各组件的版本（本版重新打包的会标出来），「怎么更新」三行（更新方法、需要的 AUTO-MAS 版本、已知问题的 issue 列表链接）。回归怎么测的不写进公告。
+
+管理器、截图库、输入法这一版重新打包了，版本号就取这一版 ModAVD 的版本号，没重新打包的不动；还没打 tag 的组件版本号对不上，预检就停。它们自己仓库的 Release 说明也不手写，在组件的发版分支上生成：
+
+```powershell
+python -I tools/pubrel/release_tools.py component-notes --component manager --version 0.41.1 --sums release/0.41.1.SHA256SUMS.txt --notes-output release/0.41.1.md
+```
+
+`--component` 是 `manager`、`extras` 或 `ime`；生成的是中英各一句「随 ModAVD 0.41.1 发布」加校验表。
+
+汇总完先看公告长度，不用 SDK、不打包：
 
 ```powershell
 python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.41.0 [--sdk <SDK 根目录>]
@@ -64,7 +82,7 @@ python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.4
 
 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 条的改动，旧版的条目也算在里面）和分隔行以上的公告（限 4000 字）各多长；超了就报错并说该删哪里，过了 90% 会提醒。没给 `--sdk` 时上游版本按 `99.99.99` 估，比真的多一两个字。`release.ps1` 的预检用同一个算法再查一遍，超了在打包之前就停。
 
-再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果表贴进 `config/changes.md` 的「发布前回归」。
+再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果自己留着，不进公告。
 
 ```powershell
 pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll> -MumuShim <下载的 external_renderer_ipc.dll>
@@ -98,7 +116,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 | `-Build` / `-Sdk` | 必填，构建号 `masNN`（mas32 及更早的只能重新打包）、SDK 根目录；检查 `Pkg.BuildId`，`Pkg.Revision` 记为上游版本 |
 | `-Version` | 公开版本号 `X.Y.Z`，要比 `changelog.json` 里已有的都新；输出目录 `masNN-v<版本>`。给了就不再用 `-Patch` |
 | `-Patch` | 不给 `-Version` 时才用（0.40 及以前的旧规矩）：默认 0，只重新打包时加一，版本变成 `0.<N>.<P>`，输出目录 `masNN-pP` |
-| `-Changes` / `-Changelog` | 默认 `config/changes.md`、`config/changelog.json`；试运行时指向临时副本 |
+| `-Changelog` | 默认 `config/changelog.json`；试运行时指向临时副本 |
 | `-Snapshot` | 默认读 SDK 的 `build-info.json` |
 | `-EmuSrc` | 源码树（`EmuSrc`） |
 | `-Baseline` | 源码基准（`Baseline`），见「外部输入」 |
@@ -124,7 +142,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 - 主包根目录有 `modavd-manifest.json`：版本、构建号、上游版本、平台、最低 AUTO-MAS 版本，和包里其余每个文件的大小、SHA-256。`verify-zip` 核对主包与组包目录逐文件一致（带外层文件夹就报错）、清单与文件一一对应。
 - 源码总包 `ModAVD-0.33.0-sources.zip`（和平台无关，不带平台），用 7-Zip `-tzip -mx0 -mcu=on`，外层文件夹同名。内部源码归档保持原文件名和字节；另附内部 `SHA256SUMS.txt`。
 - 外层 `SHA256SUMS.txt` 只列主包和源码总包两个 ZIP。
-- `release-notes.md`：第一行机读注释，然后是更新公告（更新内容、怎么更新、AUTO-MAS 版本、已知问题），再是分隔行 `<!-- modavd:github-only -->`，以下是回归、下载表、源码说明。分隔行以上同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不能有哈希。
+- `release-notes.md`：第一行机读注释，然后是更新公告（各组件的版本、更新内容、怎么更新），再是分隔行 `<!-- modavd:github-only -->`，以下是下载表、源码说明。分隔行以上同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不能有哈希。
 - `release-assets.json` 记录供仓库 CI 使用的大小与哈希。
 - `patches/`：要进发版提交的补丁。`series.json`、`BASE.md` 是发版克隆（`-Repository`）里那两份加上这一版，直接覆盖仓库里的：
   - 和已发布的某个系列仓库、基准、分支头都相同的，沿用那个目录（比如 Crashpad 一直是 `crashpad/module-version22`），不加新目录；它的导出放在 `work/patches-reused/` 给回放和 incoming 核对用，不在 `patches/` 里。
@@ -193,4 +211,4 @@ python -I tools/pubrel/test_release.py --work <全新临时目录>
 ```
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
-覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、changes.md 的节和占位、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（APK 没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外一律不许钉，截图库和外壳也不钉；截图库和外壳要一起给、真打包时必须给）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库的版本按发版分支头的 `CMakeLists.txt` 取、旧一版的 DLL 被拒、没有发版分支时按列着它的 tag 找、和那里的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。
+覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、「更新内容」从 issue 汇总（按标签分类、`更新说明` 评论、不列的、太长的一次报全、重跑留着手写的「说明」）、公告里的组件版本行、组件仓库的 Release 短页、重新打包的组件版本号要等于这一版、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（APK 没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外一律不许钉，截图库和外壳也不钉；截图库和外壳要一起给、真打包时必须给）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库的版本按发版分支头的 `CMakeLists.txt` 取、旧一版的 DLL 被拒、没有发版分支时按列着它的 tag 找、和那里的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。

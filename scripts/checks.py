@@ -17,7 +17,7 @@ CATEGORIES = ("新增", "变更", "修复", "移除", "说明")
 MACHINE_VERSIONS = 10
 MAX_ANNOUNCEMENT_CHARS = 4000
 MAX_MACHINE_CHARS = 8000
-# What the release tools leave where only a person can fill in (changes.md, and the new rows release_tools.py adds to
+# What the release tools leave where only a person can fill in (the new rows release_tools.py adds to
 # patches/BASE.md); the metadata check refuses it, so a release commit cannot go in unfilled.
 PLACEHOLDER = "发布前填写"
 MANIFEST = "modavd-manifest.json"

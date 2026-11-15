@@ -157,9 +157,27 @@ OWN_SOURCES_EXTRAS_TEXT = """\
                             另见其中的 NOTICE。用 CMake 和 MSVC 编（cmake -A x64，--config Release，/Brepro）。
                             https://github.com/ModAVD/ModAVDExtras
 """
-# changes.md: these go above the github-only separator (in this order), the last one below it.
-UPPER_SECTIONS = ["怎么更新", "AUTO-MAS 版本", "已知问题"]
-LOWER_SECTIONS = ["发布前回归"]
+# changelog-collect: this version's 更新内容 comes from the ModAVD issues the release closes, one item each.
+ISSUE_REPO = "ModAVD/ModAVD"
+PENDING_LABEL = "pending-release"
+# Issues with one of these labels are not announced, unless a maintainer's 更新说明 comment says what to announce.
+UNANNOUNCED_LABELS = ("dev-process", "documentation")
+LABEL_CATEGORY = (("bug", "修复"), ("enhancement", "新增"))
+OTHER_CATEGORY = "变更"
+# Written by hand (changelog-collect --note): what the user has to do for this version. Kept when collecting again.
+NOTE_CATEGORY = "说明"
+# A comment line `更新说明：<一句话>` (or `更新说明（变更）：…` to pick the category; `更新说明：无` = leave it out) from
+# someone with one of these associations replaces the issue title; the last such line wins.
+ANNOUNCE_LINE = re.compile(r"(?m)^更新说明(?:[（(](新增|变更|修复|移除)[)）])?[:：][ \t]*(.*?)[ \t]*\r?$")
+ANNOUNCE_NOTHING = "无"
+ANNOUNCERS = ("OWNER", "MEMBER", "COLLABORATOR")
+MAX_ITEM_CHARS = 60
+# The component line of the announcement, in this order; the emulator comes first, from the build number.
+COMPONENT_NAMES = (("manager", "管理器"), ("extras", "截图库"), ("ime", "宿主输入法"))
+# component-notes: the short release page of a component repository.
+COMPONENT_REPOS = {"manager": ("ModAVDManager", "管理器和命令行", "manager and command line"),
+                   "extras": ("ModAVDExtras", "截图库", "capture library"),
+                   "ime": ("ModAVDHostIME", "宿主输入法", "host input method")}
 PLACEHOLDER = checks.PLACEHOLDER
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_COUNT="2",
                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false",
@@ -294,23 +312,100 @@ def sdk_upstream(sdk):
     return m[1]
 
 
-def read_changes(path):
-    """Split the hand-written changes.md into its required `## ` sections."""
-    text = Path(path).read_text(encoding="utf-8-sig")
-    if PLACEHOLDER in text:
-        raise ValueError(f"{path} still contains 「{PLACEHOLDER}」 placeholders")
-    parts = re.split(r"(?m)^## (.+?)\s*$", text)
-    if parts[0].strip():
-        raise ValueError(f"{path}: text before the first ## heading")
-    sections = {}
-    for title, body in zip(parts[1::2], parts[2::2]):
-        if title in sections:
-            raise ValueError(f"{path}: duplicate section {title}")
-        sections[title] = body.strip()
-    expected = UPPER_SECTIONS + LOWER_SECTIONS
-    if sorted(sections) != sorted(expected) or not all(sections.values()):
-        raise ValueError(f"{path}: needs exactly these non-empty sections: {expected}")
-    return sections
+def gh_json(*args):
+    """`gh ... --json ...` parsed. gh writes UTF-8 whatever the console code page is, so the bytes are decoded here."""
+    result = subprocess.run(["gh", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise RuntimeError(f"gh {' '.join(args[:3])}: {result.stderr.decode('utf-8', 'replace')[-2000:]}")
+    return json.loads(result.stdout.decode("utf-8"))
+
+
+def fetch_issues(numbers=None):
+    """The issues this version's 更新内容 is collected from, each with number/title/labels/comments: the given ones,
+    or every issue of ISSUE_REPO labelled PENDING_LABEL (open or closed)."""
+    fields = "number,title,labels,comments"
+    if numbers:
+        return [gh_json("issue", "view", str(n), "--repo", ISSUE_REPO, "--json", fields) for n in numbers]
+    return gh_json("issue", "list", "--repo", ISSUE_REPO, "--label", PENDING_LABEL, "--state", "all", "--limit", "500",
+                   "--json", fields)
+
+
+def issue_item(issue):
+    """One issue's line of 更新内容: (category, text), or (None, why it is left out). The text is the issue title
+    unless a maintainer's 更新说明 comment line replaces it (ANNOUNCE_LINE); the category follows the labels."""
+    labels = {label["name"] for label in issue.get("labels") or []}
+    forced, said = None, None
+    for comment in issue.get("comments") or []:
+        if comment.get("authorAssociation") in ANNOUNCERS:
+            for m in ANNOUNCE_LINE.finditer(comment.get("body") or ""):
+                forced, said = m[1], m[2]
+    if said == ANNOUNCE_NOTHING:
+        return None, f"更新说明：{ANNOUNCE_NOTHING}"
+    if said is None:
+        hidden = sorted(labels.intersection(UNANNOUNCED_LABELS))
+        if hidden:
+            return None, "label " + ", ".join(hidden)
+    category = forced or next((c for label, c in LABEL_CATEGORY if label in labels), OTHER_CATEGORY)
+    return category, (said if said is not None else issue["title"]).strip().rstrip("。")
+
+
+def collect_changes(issues):
+    """({category: [item, ...]}, [(number, why left out), ...]) from the issues, by issue number. Every item is
+    `<text> (#N)`, one line of at most MAX_ITEM_CHARS before the number. A text that does not fit is not edited here:
+    the error names the issues, and the title or a 更新说明 comment is fixed there."""
+    changes, skipped, bad = {}, [], []
+    for issue in sorted(issues, key=lambda i: i["number"]):
+        category, text = issue_item(issue)
+        if category is None:
+            skipped.append((issue["number"], text))
+        elif not text or "\n" in text or "\r" in text or "--" in text or len(text) > MAX_ITEM_CHARS:
+            bad.append(f"#{issue['number']} ({len(text)} chars): {text!r}")
+        else:
+            changes.setdefault(category, []).append(f"{text} (#{issue['number']})")
+    if bad:
+        raise ValueError(f"These issues need a one-line text of at most {MAX_ITEM_CHARS} chars without '--': retitle them, "
+                         f"or comment `更新说明：<一句话>` (`更新说明：{ANNOUNCE_NOTHING}` to leave one out): " + "; ".join(bad))
+    return changes, skipped
+
+
+def collect_changelog(path, version, number, issues, notes=None, min_automas=...):
+    """Writes this version's entry of changelog.json from the issues and returns (entry, skipped). An entry that is
+    already there is replaced, except for its hand-written NOTE_CATEGORY items (unless `notes` gives new ones) and its
+    min_automas (unless given); a new entry goes first and takes the previous version's min_automas."""
+    entries = load(path)
+    tag = "v" + version
+    old = next((e for e in entries if e["version"] == tag), None)
+    changes, skipped = collect_changes(issues)
+    kept = list(notes) if notes else (old or {}).get("changes", {}).get(NOTE_CATEGORY)
+    if kept:
+        changes[NOTE_CATEGORY] = kept
+    if not changes:
+        raise ValueError(f"Nothing to announce for {tag}: no issue gives an item; add one with --note")
+    if min_automas is ...:
+        min_automas = old["min_automas"] if old else (entries[0]["min_automas"] if entries else None)
+    entry = {"version": tag, "build": number, "min_automas": min_automas,
+             "changes": {c: changes[c] for c in checks.CATEGORIES if c in changes}}
+    entries = [entry if e is old else e for e in entries] if old else [entry] + entries
+    save(path, entries)
+    read_changelog(path, version, number)
+    return entry, skipped
+
+
+def collect_command(args):
+    """`changelog-collect`: this version's 更新内容 from the issues labelled PENDING_LABEL (or --issues 210,206),
+    without --exclude; --note adds a hand-written 说明 item, --min-automas sets the AUTO-MAS version."""
+    version = public_version(args)
+    def numbers(text):
+        return [int(n) for n in re.split(r"[\s,]+", text or "") if n]
+    excluded = set(numbers(args.exclude))
+    issues = [i for i in fetch_issues(numbers(args.issues)) if i["number"] not in excluded]
+    known = ... if args.min_automas is None else (None if args.min_automas == "none" else args.min_automas)
+    entry, skipped = collect_changelog(args.changelog, version, build_number(args.build), issues, args.note, known)
+    print(f"{Path(args.changelog).name}: v{version} from {len(issues)} issues\n")
+    print(render_changes(entry["changes"]))
+    for number, why in skipped:
+        print(f"\nnot announced: #{number} ({why})", end="")
+    print()
 
 
 def read_changelog(path, version, number):
@@ -485,8 +580,8 @@ def preflight(args):
     if not re.search(rf"(?m)^Pkg.BuildId=mas-{number}\s*$", props):
         raise ValueError("SDK Pkg.BuildId differs from requested release")
     upstream = sdk_upstream(args.sdk)
-    # reads and checks changes.md and changelog.json, and the release notes' length limits (step 7 checks them again)
-    budget = describe_budget(*notes_budget(version, number, upstream, args.changes, args.changelog))
+    # reads and checks changelog.json, and the release notes' length limits (step 7 checks them again)
+    budget = describe_budget(*notes_budget(version, number, upstream, args.changelog))
     baseline = Path(args.baseline)
     sums = baseline_sums(baseline)
     for name, expected in sums.items():
@@ -673,6 +768,43 @@ def extras_release(dll, repo, branch=None, shim=None):
             "tagged": is_tagged, "sha256": files[EXTRAS_DLL], "files": files}
 
 
+def check_component_versions(own, version):
+    """A component that is repackaged for a release takes that release's version; one that is not rebuilt keeps its
+    own. So a component still without its tag (new in this release, component_ref) must be at `version`, and a tagged
+    one is taken as it is."""
+    wrong = [f"{key} {part['version']}" for key, part in own.items()
+             if part and part.get("tagged") is False and part["version"] != version]
+    if wrong:
+        raise ValueError(f"Not tagged yet and not at this release's version {version}: {', '.join(wrong)}; a component "
+                         f"rebuilt for a release takes the release's version (set it in the component's release branch)")
+
+
+def component_notes(component, version, sums_text):
+    """The release page of a component repository (its release/<version>.md): it ships with the ModAVD release of the
+    same version, whose notes say what changed, so this only points there and lists the checksums."""
+    repo, zh, en = COMPONENT_REPOS[component]
+    checks.version_key("v" + version)
+    listed = parse_sums(sums_text, f"release/{version}.SHA256SUMS.txt")
+    url = f"https://github.com/{ISSUE_REPO}/releases/tag/v{version}"
+    rows = "\n".join(f"| `{name}` | `{digest}` |" for name, digest in sorted(listed.items()))
+    return (f"# {repo} v{version}\n\n"
+            f"{repo}（{zh}）{version}，随 [ModAVD {version}]({url}) 发布。这一版改了什么，见 ModAVD 的发布说明。\n\n"
+            f"{repo} ({en}) {version} ships with [ModAVD {version}]({url}); the ModAVD release notes say what changed.\n\n"
+            f"## 核对 / Checksums\n\n| 文件 / File | SHA-256 |\n| --- | --- |\n{rows}\n")
+
+
+def component_notes_command(args):
+    """`component-notes --component manager|extras|ime --version X.Y.Z --sums release/X.Y.Z.SHA256SUMS.txt
+    --notes-output release/X.Y.Z.md`, run in the component's release branch when its version is set."""
+    if args.component not in COMPONENT_REPOS:
+        raise ValueError(f"--component must be one of {', '.join(COMPONENT_REPOS)}")
+    if not (args.version and args.sums and args.notes_output):
+        raise ValueError("component-notes needs --version, --sums and --notes-output")
+    text = component_notes(args.component, args.version, Path(args.sums).read_text(encoding="utf-8-sig"))
+    Path(args.notes_output).write_text(text, encoding="utf-8", newline="\n")
+    print(f"{args.notes_output}: {COMPONENT_REPOS[args.component][0]} v{args.version}, {text.count(chr(10) + '| `')} files")
+
+
 def public_sources(args):
     """What the package takes from the public repositories, checked: the manager ZIP against the checksums at its
     tag, the IME APK against the tag that lists it, the extras DLL against the checksums of the ModAVDExtras version
@@ -686,6 +818,8 @@ def public_sources(args):
     own = {"manager": manager_release(args.manager, args.manager_repo, branch),
            "ime": ime_release(args.ime_apk, args.ime_repo) if getattr(args, "ime_apk", None) else None,
            "extras": extras_release(extras, getattr(args, "extras_repo", None), branch, shim) if extras else None}
+    if getattr(args, "build", None) or getattr(args, "version", None):
+        check_component_versions(own, public_version(args))
     repo = release_repository(args.repository, getattr(args, "protect", None))
     if changed(repo, "package", "bridge"):
         raise ValueError(f"{repo}: uncommitted changes under package/ or bridge/; the package takes both from HEAD")
@@ -1566,15 +1700,37 @@ def render_changes(changes):
     return "\n\n".join(blocks)
 
 
-def text_fields(version, number, upstream, changes, changelog):
-    """The template fields that come from changes.md and changelog.json (everything but the asset rows)."""
-    sections = read_changes(changes)
+def render_components(version, number, own):
+    """The announcement's component line: the emulator build and what `own` (the snapshot's) ships, each marked when
+    it is new in this version. A component is new when it carries this version's number (a component repackaged for
+    a release takes that release's version) or was not tagged yet when packaged; the emulator when this is 0.<N>.0."""
+    def new(part_version, also=False):
+        return "（本版更新）" if part_version == version or also else ""
+    emulator = f"0.{number}.0"
+    parts = [f"模拟器 {emulator}{new(emulator)}"]
+    for key, name in COMPONENT_NAMES:
+        part = (own or {}).get(key)
+        if part:
+            parts.append(f"{name} {part['version']}{new(part['version'], part.get('tagged') is False)}")
+    return "组件：" + "、".join(parts) + "。"
+
+
+def render_automas(min_automas):
+    return f"配合 AUTO-MAS 使用时，需要 AUTO-MAS v{min_automas} 或更新。" if min_automas else "对 AUTO-MAS 的版本没有要求。"
+
+
+# What notes_budget measures with before the components are known: no real line is longer.
+SAMPLE_OWN = {key: {"version": "0.999.999", "tagged": False} for key, _ in COMPONENT_NAMES}
+
+
+def text_fields(version, number, upstream, changelog, own=None):
+    """The template fields that come from changelog.json and the shipped components (everything but the asset rows)."""
     log = read_changelog(changelog, version, number)
     machine = {"version": "v" + version, "build": number, "upstream": upstream, "min_automas": log[0]["min_automas"],
                "changes": {e["version"]: e["changes"] for e in log[:checks.MACHINE_VERSIONS]}}
-    return {"MACHINE": checks.machine_line(machine), "VERSION": version, "BUILD_ID": f"mas-{number}", "UPSTREAM": upstream,
-            "CHANGES": render_changes(log[0]["changes"]), "HOW_TO_UPDATE": sections["怎么更新"], "AUTOMAS": sections["AUTO-MAS 版本"],
-            "KNOWN": sections["已知问题"], "REGRESSION": sections["发布前回归"]}
+    return {"MACHINE": checks.machine_line(machine), "VERSION": version, "UPSTREAM": upstream,
+            "COMPONENTS": render_components(version, number, own), "CHANGES": render_changes(log[0]["changes"]),
+            "AUTOMAS": render_automas(log[0]["min_automas"])}
 
 
 def render_notes(fields):
@@ -1591,12 +1747,12 @@ SAMPLE_ASSETS = {"MAIN_ROW": "| `ModAVD-0.0.0-win-x64.zip` | 1 字节 | `" + "0"
                  "BUNDLE_ROW": "| `ModAVD-0.0.0-sources.zip` | 1 字节 | `" + "0" * 64 + "` |", "SOURCE_COUNT": "1", "SOURCE_BYTES": "1"}
 
 
-def notes_budget(version, number, upstream, changes, changelog):
+def notes_budget(version, number, upstream, changelog):
     """How long the two limited parts of the release notes will be, from the texts alone: the machine-readable first
     line (MAX_MACHINE_CHARS) and the announcement above the separator (MAX_ANNOUNCEMENT_CHARS). Neither depends on the
     assets, so preflight and `notes-budget` tell before packaging, instead of step 7 after it (0.38.0: 9157 and 4532).
     Raises with both numbers when one is over; returns (machine, announcement)."""
-    text = render_notes({**text_fields(version, number, upstream, changes, changelog), **SAMPLE_ASSETS})
+    text = render_notes({**text_fields(version, number, upstream, changelog, SAMPLE_OWN), **SAMPLE_ASSETS})
     lines = text.splitlines()
     machine = len(lines[0])
     upper = len("\n".join(lines[1:lines.index(checks.SEPARATOR)])) if checks.SEPARATOR in lines else 0
@@ -1606,7 +1762,7 @@ def notes_budget(version, number, upstream, changes, changelog):
                     f"changelog.json items of the last {checks.MACHINE_VERSIONS} versions: shorten them)")
     if upper > checks.MAX_ANNOUNCEMENT_CHARS:
         over.append(f"the announcement above the separator would be {upper} chars, limit {checks.MAX_ANNOUNCEMENT_CHARS} "
-                    f"(this version's changelog.json items and the 怎么更新 / AUTO-MAS 版本 / 已知问题 sections of {Path(changes).name}: shorten them)")
+                    f"(this version's changelog.json items: shorten them at their issues and collect again)")
     if over:
         raise ValueError("Release notes too long: " + "; ".join(over))
     checks.check_announcement(text, "v" + version, number)
@@ -1621,10 +1777,10 @@ def describe_budget(machine, upper):
 
 
 def notes_budget_command(args):
-    """`notes-budget`: the lengths, while changelog.json and changes.md are being written (no SDK or output needed)."""
+    """`notes-budget`: the lengths, once changelog.json has this version's entry (no SDK or output needed)."""
     version = public_version(args)
     upstream =sdk_upstream(args.sdk) if args.sdk else "99.99.99"
-    machine, upper = notes_budget(version, build_number(args.build), upstream, args.changes, args.changelog)
+    machine, upper = notes_budget(version, build_number(args.build), upstream, args.changelog)
     print(f"Release notes v{version}: {describe_budget(machine, upper)}"
           + ("" if args.sdk else "; upstream version assumed 99.99.99 (pass --sdk for the real one)"))
 
@@ -1637,7 +1793,7 @@ def notes(args):
     assets = sorted(p for p in (out / "source").iterdir() if p.name != "SHA256SUMS.txt")
     def row(p):
         return f"| `{p.name}` | {p.stat().st_size:,} 字节 | `{sha(p)}` |"
-    fields = {**text_fields(version, number, data["upstream"], args.changes, args.changelog),
+    fields = {**text_fields(version, number, data["upstream"], args.changelog, data.get("own")),
               "MAIN_ROW": row(main), "BUNDLE_ROW": row(archive),
               "SOURCE_COUNT": str(len(assets)), "SOURCE_BYTES": f"{sum(p.stat().st_size for p in assets):,}"}
     text = render_notes(fields)
@@ -1797,10 +1953,18 @@ def cached_privacy_scan(privacy, files, allowlist, cache_path, write_only=False)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "notes-budget", "privacy-release"])
+    parser.add_argument("command", choices=["snapshot", "preflight", "own", "check-owned", "assemble", "verify-zip", "patches", "replay", "incoming", "sources", "bundle", "sums", "notes", "notes-budget", "privacy-release",
+                                            "changelog-collect", "component-notes"])
     for name in ["build", "sdk", "snapshot", "baseline", "package", "apk", "ime-apk", "output", "manager", "manager-repo", "ime-repo",
-                 "extras-dll", "mumu-shim", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache"]:
+                 "extras-dll", "mumu-shim", "extras-repo", "emu-src", "sevenzip", "repository", "private-rules", "privacy-cache",
+                 # changelog-collect: issue numbers ("210,206"; default: every issue labelled pending-release), numbers
+                 # to leave out, and the AUTO-MAS version this release needs ("none" = no requirement)
+                 "issues", "exclude", "min-automas",
+                 # component-notes
+                 "component", "sums", "notes-output"]:
         parser.add_argument("--" + name)
+    # changelog-collect: a hand-written 说明 item (what the user has to do for this version); repeatable
+    parser.add_argument("--note", action="append", default=[])
     # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
     # before their tags exist
     parser.add_argument("--release-branch")
@@ -1815,7 +1979,6 @@ def main():
     parser.add_argument("--protect", action="append", default=[])
     parser.add_argument("--min-free-gb", type=int, default=120)
     parser.add_argument("--patch", type=int, default=0)
-    parser.add_argument("--changes", default=str(HERE / "config/changes.md"))
     parser.add_argument("--changelog", default=str(HERE / "config/changelog.json"))
     args = parser.parse_args()
     # a real package always carries the ModAVDExtras files (see pinned_components); only unit tests build without
@@ -1823,7 +1986,8 @@ def main():
     commands = {"snapshot": snapshot_data, "preflight": preflight, "own": lambda a: owned(a, True), "check-owned": owned,
                 "assemble": assemble, "verify-zip": verify_zip, "patches": export_patches, "replay": replay, "incoming": incoming,
                 "sources": sources, "bundle": bundle, "sums": sums, "notes": notes, "notes-budget": notes_budget_command,
-                "privacy-release": privacy_release}
+                "privacy-release": privacy_release, "changelog-collect": collect_command,
+                "component-notes": component_notes_command}
     try:
         commands[args.command](args)
     except Exception as e:
