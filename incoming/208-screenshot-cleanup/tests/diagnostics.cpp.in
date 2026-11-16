@@ -84,6 +84,10 @@ int main() {
     rcReadColorBuffer(63,0,0,1280,720,0,0,nullptr,bytes);
     CHECK(rcReadColorBufferDMA(63,0,0,1280,720,0,0,nullptr,bytes)==-1);
     FrameBuffer::available=true;
+    bool missingWarning=false;
+    for(auto& line:logs)if(line.find("rcReadColorBufferDMA: framebuffer cannot be found!")!=std::string::npos)missingWarning=true;
+    CHECK(missingWarning);
+    std::puts("PASS original DMA missing-framebuffer warning is retained");
     std::puts("PASS production guest and DMA entries keep separate counts and failure records");
     auto* backend=FrameBuffer::getFB();
     for(int scenario=0;scenario<5;++scenario) {
@@ -186,5 +190,18 @@ int main() {
         CHECK(field(row("MAS: readback resources "),"threadsCreated")==1);
     }
     std::puts("PASS failure and summary log callbacks can reenter diagnostics without holding its mutex");
+
+    {
+        ReadbackDiagnostics local(testNow);
+        for(size_t i=0;i<static_cast<size_t>(DiagnosticEvent::Count);++i) {
+            const auto event=static_cast<DiagnosticEvent>(i);
+            for(int j=0;j<3;++j)CHECK(local.shouldLog(event));
+            for(int j=0;j<10000;++j)CHECK(!local.shouldLog(event));
+        }
+        fakeNow+=std::chrono::minutes(1);
+        CHECK(local.shouldLog(DiagnosticEvent::CleanupDeferred));
+        CHECK(local.shouldLog(DiagnosticEvent::DmaMissingFramebuffer));
+    }
+    std::puts("PASS deferred cleanup and missing-framebuffer events have independent bounded detail quotas");
 
 }

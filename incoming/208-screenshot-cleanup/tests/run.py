@@ -61,14 +61,18 @@ def replacements(repo, name):
     if name == "wgl":
         source = read("host/gl/glestranslator/egl/egl_os_api_wgl.cpp")
         return {
+            "WGL_FAILURE_KIND": ("#define HAS_WGL_FAILURE_KINDS 1\n" + block(source, "enum class WglFailure")) if "enum class WglFailure" in source else "",
+            "CREATE_RESULT": block(source, "    enum class PbufferCreateError", optional=True) + ("\n" + re.search(r"    using PbufferCreation[^;]+;", source)[0] if "using PbufferCreation" in source else ""),
+            "ABANDON_PBUFFER": block(source, "    void abandonPbufferLocked(", optional=True),
+            "EXPIRE_PBUFFERS": block(source, "    void expirePbuffersLocked(", optional=True),
             "WGL_LOG_LIMITER": ("#define HAS_WGL_FAILURE_LIMITER 1\n" + block(source, "class WglFailureLog")) if "class WglFailureLog" in source else "",
             "PENDING_TYPE": ("#define HAS_BOUNDED_PBUFFERS 1\n" + block(source, "    struct PendingPbuffer")) if "    struct PendingPbuffer" in source else "",
             "QUEUE_PENDING": block(source, "    void queuePbufferForDeletionLocked(", optional=True),
-            "PBUFFER_LIMITS": "\n".join(re.findall(r"    static constexpr [^;]+(?:kPbufferBacklogBudget|kPbufferRetryBatch)[^;]*;", source)),
+            "PBUFFER_LIMITS": "\n".join(re.findall(r"    static constexpr [^;]+(?:kPbufferBacklogBudget|kPbufferRetryBatch|kMaxPbufferRetries|kPbufferLifetime)[^;]*;", source)),
             "WIN_SURFACE": block(source, "class WinSurface :"),
             "CREATE_SURFACE": block(source, "    virtual EglOS::Surface* createPbufferSurface("),
             "RELEASE_SURFACE": block(source, "    virtual bool releasePbuffer("),
-            "CREATE_IMPL": block(source, "    EglOS::Surface* createPbufferSurfaceImpl("),
+            "CREATE_IMPL": block(source, "    PbufferCreation createPbufferSurfaceImpl(") if "    PbufferCreation createPbufferSurfaceImpl(" in source else block(source, "    EglOS::Surface* createPbufferSurfaceImpl("),
             "LOG_STATS": block(source, "    void logPbufferStatsLocked(", optional=True),
         }
     if name == "cleanup":
@@ -109,7 +113,10 @@ def main():
     parser.add_argument("--repo", type=Path, required=True, help="Patched gfxstream source checkout")
     parser.add_argument("--work", type=Path, help="Build output directory, outside the source checkout")
     parser.add_argument("--only", choices=["wgl", "cleanup", "diagnostics"])
+    parser.add_argument("--case", choices=["pool-fallback", "initial-dc"], help="Run one WGL creation regression")
     args = parser.parse_args()
+    if args.case and args.only != "wgl":
+        parser.error("--case requires --only wgl")
     repo = args.repo.resolve()
     work = (args.work or Path(tempfile.mkdtemp(prefix="gfxstream-208-tests-"))).resolve()
     if work.is_relative_to(repo):
@@ -151,7 +158,7 @@ def main():
         if built.returncode:
             print(built.stdout + built.stderr)
             built.check_returncode()
-        run = subprocess.run([str(exe)], cwd=work, capture_output=True, text=True, errors="replace", timeout=30)
+        run = subprocess.run([str(exe), *([args.case] if args.case else [])], cwd=work, capture_output=True, text=True, errors="replace", timeout=30)
         print(run.stdout, end="")
         if run.returncode:
             print(run.stderr)

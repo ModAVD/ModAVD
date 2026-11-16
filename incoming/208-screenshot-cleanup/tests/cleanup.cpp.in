@@ -263,4 +263,19 @@ int main() {
         checkEmpty();
     }
     std::puts("PASS actual GL readback rejects small buffers and preserves normal and RGB conversion paths");
+    {
+        size_t deferred=0,recovered=0,abandoned=0;
+        for(auto& line:logs) {
+            if(line.find("MAS: deferred ColorBuffer GL cleanup ")==0)++deferred;
+            if(line.find("MAS: recovered deferred ColorBuffer GL cleanup ")==0)++recovered;
+            if(line.find("MAS: context lost with deferred ColorBuffer GL cleanup ")==0)++abandoned;
+        }
+        CHECK(deferred<=3 && recovered<=3 && abandoned<=3);
+        ReadbackDiagnostics::get().log();
+        bool complete=false;
+        for(auto& line:logs)if(line.find("MAS: readback resources ")==0 && line.find("cleanupDeferred=1005 ")!=std::string::npos)complete=true;
+        CHECK(complete);
+    }
+    std::puts("PASS actual ColorBuffer cleanup details are rate limited while all deferred objects remain counted");
+
 }

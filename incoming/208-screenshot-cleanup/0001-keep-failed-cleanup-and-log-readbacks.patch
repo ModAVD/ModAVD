@@ -1,39 +1,41 @@
-From 5555e063879240f971d4813f1b3bccf08b24b72a Mon Sep 17 00:00:00 2001
+From e0b7fa0ff39562d00e18ae1fb34817851ff1d9f5 Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 01:08:04 +0800
-Subject: [PATCH] =?UTF-8?q?gfxstream:=20=E8=A1=A5=E9=BD=90=E9=87=8A?=
- =?UTF-8?q?=E6=94=BE=E5=A4=B1=E8=B4=A5=E5=90=8E=E7=9A=84=E6=B8=85=E7=90=86?=
- =?UTF-8?q?=EF=BC=8C=E8=AE=B0=E5=BD=95=E6=88=AA=E5=9B=BE=E8=AF=BB=E5=9B=9E?=
+Subject: [PATCH] =?UTF-8?q?gfxstream:=20=E5=9B=9E=E6=94=B6=E5=A4=B1?=
+ =?UTF-8?q?=E8=B4=A5=E5=9B=BE=E5=BD=A2=E8=B5=84=E6=BA=90=EF=BC=8C=E8=AE=B0?=
+ =?UTF-8?q?=E5=BD=95=E6=88=AA=E5=9B=BE=E8=AF=BB=E5=9B=9E?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-WGL 释放失败时保留句柄和所有权，延后分批重试。
-出现积压后冻结原生分配预算，避免持续失败耗尽宿主内存。
+保留失败 DC 的真实状态，创建时先重试其他空闲对象。
+区分原生分配失败和首次取 DC 失败，让补池能从瞬时错误恢复。
 
-ColorBuffer 等原上下文恢复后补释放。空 DisplaySurface 析构
-不额外绑定，嵌套绑定不在外层操作中途执行清理。
+只限制待销毁队列，按 HRESULT_CODE 识别失效句柄。
+每次释放分批重试，超过重试次数、等待时间或队列容量时
+回收 CPU 记录，并单独记录可能的原生泄漏。
 
-按来源记录读回次数、耗时和后端失败，传递输出缓冲区容量。
-详细失败日志限速，汇总只输出变化，日志回调在统计锁外运行。
+ColorBuffer 等原 helper 恢复后清理，空析构不切换上下文，
+嵌套绑定不打乱外层 GL 状态。读回统计保留后端结果和容量，
+恢复 DMA 旧告警，各类失败与清理日志分别限速并只汇总变化。
 
 Refs ModAVD/ModAVD#208
 ---
  host/BUILD.bazel                              |   2 +
- host/frame_buffer.cpp                         |  55 ++--
+ host/frame_buffer.cpp                         |  55 +--
  host/frame_buffer.h                           |   5 +-
- host/gl/color_buffer_gl.cpp                   | 124 +++++---
+ host/gl/color_buffer_gl.cpp                   | 128 +++++--
  host/gl/context_helper.h                      |  44 ++-
  host/gl/display_surface_gl.cpp                |  15 +-
- host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 220 ++++++++++++--
+ host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 322 ++++++++++++++----
  host/gl/texture_resize.cpp                    |   2 +
  host/gl/texture_resize.h                      |   8 +
  host/gl/yuv_converter.cpp                     |   2 +-
  host/gl/yuv_converter.h                       |   2 +
- .../render-utils/readback_diagnostics.h       | 286 ++++++++++++++++++
- host/render_control.cpp                       |  18 +-
+ .../render-utils/readback_diagnostics.h       | 303 ++++++++++++++++
+ host/render_control.cpp                       |  21 +-
  host/render_thread.cpp                        |   3 +
- 14 files changed, 688 insertions(+), 98 deletions(-)
+ 14 files changed, 780 insertions(+), 132 deletions(-)
  create mode 100644 host/include/render-utils/readback_diagnostics.h
 
 diff --git a/host/BUILD.bazel b/host/BUILD.bazel
@@ -57,7 +59,7 @@ index e318cdd0b..13b06d2b6 100644
      ],
  )
 diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
-index eae51be90..e195552d6 100644
+index d3b0e7996..d7dfd1123 100644
 --- a/host/frame_buffer.cpp
 +++ b/host/frame_buffer.cpp
 @@ -59,6 +59,7 @@
@@ -93,7 +95,7 @@ index eae51be90..e195552d6 100644
  }
  
  // Synchronously reads |cb| into |img| for a post callback when there is no ReadbackWorker, i.e.
-@@ -2574,7 +2575,7 @@ void FrameBuffer::Impl::readBuffer(HandleType handle, uint64_t offset, uint64_t
+@@ -2580,7 +2581,7 @@ void FrameBuffer::Impl::readBuffer(HandleType handle, uint64_t offset, uint64_t
      buffer->readToBytes(offset, size, bytes);
  }
  
@@ -102,7 +104,7 @@ index eae51be90..e195552d6 100644
                                          int height, GfxstreamFormat pixelsFormat, void* outPixels,
                                          uint64_t outPixelsSize) {
      GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DEFAULT_CATEGORY, "FrameBuffer::Impl::readColorBuffer()",
-@@ -2585,25 +2586,24 @@ void FrameBuffer::Impl::readColorBuffer(HandleType p_colorbuffer, int x, int y,
+@@ -2591,25 +2592,24 @@ void FrameBuffer::Impl::readColorBuffer(HandleType p_colorbuffer, int x, int y,
      IColorBufferRef colorBuffer = findColorBuffer(p_colorbuffer);
      if (!colorBuffer) {
          // bad colorbuffer handle
@@ -135,7 +137,7 @@ index eae51be90..e195552d6 100644
  }
  
  void FrameBuffer::Impl::readColorBufferYUV(HandleType p_colorbuffer, int x, int y, int width,
-@@ -2806,6 +2806,8 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
+@@ -2812,6 +2812,8 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
                  }
              }
  
@@ -144,7 +146,7 @@ index eae51be90..e195552d6 100644
              if (asyncReadbackSupported()) {
                  ensureReadbackWorker();
                  const auto status = m_readbackWorker->doNextReadback(
-@@ -4800,17 +4802,18 @@ void FrameBuffer::readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size
+@@ -4806,17 +4808,18 @@ void FrameBuffer::readBuffer(HandleType p_buffer, uint64_t offset, uint64_t size
      mImpl->readBuffer(p_buffer, offset, size, bytes);
  }
  
@@ -168,7 +170,7 @@ index eae51be90..e195552d6 100644
  }
  
  void FrameBuffer::readColorBufferYUV(HandleType p_colorbuffer, int x, int y, int width, int height,
-@@ -4957,8 +4960,18 @@ bool FrameBuffer::isVulkanEnabled() const { return mImpl->isVulkanEnabled(); }
+@@ -4963,8 +4966,18 @@ bool FrameBuffer::isVulkanEnabled() const { return mImpl->isVulkanEnabled(); }
  int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsigned int* height,
                                 uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
                                 int desiredHeight, int desiredRotation, Rect rect) {
@@ -208,7 +210,7 @@ index f80795bb6..408b28dd6 100644
                                     uint64_t outPixelsSize);
  
 diff --git a/host/gl/color_buffer_gl.cpp b/host/gl/color_buffer_gl.cpp
-index d09a9e7af..e97b20bd2 100644
+index d09a9e7af..501a979c8 100644
 --- a/host/gl/color_buffer_gl.cpp
 +++ b/host/gl/color_buffer_gl.cpp
 @@ -21,12 +21,14 @@
@@ -264,7 +266,7 @@ index d09a9e7af..e97b20bd2 100644
  // Lazily create and bind a framebuffer object to the current host context.
  // |fbo| is the address of the framebuffer object name.
  // |tex| is the name of a texture that is attached to the framebuffer object
-@@ -424,47 +457,52 @@ ColorBufferGl::ColorBufferGl(EGLDisplay display, HandleType hndl, GLuint width,
+@@ -424,47 +457,56 @@ ColorBufferGl::ColorBufferGl(EGLDisplay display, HandleType hndl, GLuint width,
        m_helper(helper),
        m_textureDraw(textureDraw),
        m_pixelReadFormats(pixelReadFormats),
@@ -301,9 +303,11 @@ index d09a9e7af..e97b20bd2 100644
 +            pending->run(mode);
 +            const bool recovered = mode == ContextHelper::CleanupContext::Current;
 +            ReadbackDiagnostics::get().cleanupFinished(rgbaBytes, recovered);
-+            if (recovered) {
++            if (recovered &&
++                ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::CleanupRecovered)) {
 +                GFXSTREAM_INFO("MAS: recovered deferred ColorBuffer GL cleanup handle=%u", handle);
-+            } else {
++            } else if (!recovered &&
++                       ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::CleanupAbandoned)) {
 +                GFXSTREAM_ERROR(
 +                    "MAS: context lost with deferred ColorBuffer GL cleanup "
 +                    "handle=%u rgbaEstimateBytes=%llu; freeing CPU ownership",
@@ -312,10 +316,12 @@ index d09a9e7af..e97b20bd2 100644
 +        };
 +        const size_t count = m_helper ? m_helper->deferCleanup(std::move(retire)) : 0;
 +        if (!m_helper) retire(ContextHelper::CleanupContext::Lost);
-+        GFXSTREAM_ERROR(
-+            "MAS: deferred ColorBuffer GL cleanup handle=%u size=%ux%u "
-+            "rgbaEstimateBytes=%llu pending=%zu",
-+            mHndl, m_width, m_height, static_cast<unsigned long long>(rgbaBytes), count);
++        if (ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::CleanupDeferred)) {
++            GFXSTREAM_ERROR(
++                "MAS: deferred ColorBuffer GL cleanup handle=%u size=%ux%u "
++                "rgbaEstimateBytes=%llu pending=%zu",
++                mHndl, m_width, m_height, static_cast<unsigned long long>(rgbaBytes), count);
++        }
          return;
      }
 -
@@ -352,7 +358,7 @@ index d09a9e7af..e97b20bd2 100644
  }
  
  
-@@ -526,6 +564,8 @@ bool ColorBufferGl::isReadbackToFormatSupported(GfxstreamFormat outputFormat) {
+@@ -526,6 +568,8 @@ bool ColorBufferGl::isReadbackToFormatSupported(GfxstreamFormat outputFormat) {
  
  bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFormat pixelFormat,
                                 void* pixels, uint32_t pixelsSize) {
@@ -361,7 +367,7 @@ index d09a9e7af..e97b20bd2 100644
      RecursiveScopedContextBind context(m_helper);
      if (!context.isOk()) {
          return false;
-@@ -541,6 +581,7 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
+@@ -541,6 +585,7 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
          return false;
      }
      const FormatOpenglParams& formatParams = *formatParamsOpt;
@@ -369,7 +375,7 @@ index d09a9e7af..e97b20bd2 100644
  
      uint32_t sizeNeeded = width * height * formatParams.bpp;
      if (pixelsSize < sizeNeeded) {
-@@ -581,12 +622,24 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
+@@ -581,12 +626,24 @@ bool ColorBufferGl::readPixels(int x, int y, int width, int height, GfxstreamFor
      }
      s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
      unbindFbo();
@@ -394,7 +400,7 @@ index d09a9e7af..e97b20bd2 100644
      RecursiveScopedContextBind context(m_helper);
      if (!context.isOk()) {
          return false;
-@@ -691,6 +744,7 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const
+@@ -691,6 +748,7 @@ bool ColorBufferGl::readPixelsScaled(int width, int height, int rotation, const
          }
          s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
          unbindFbo();
@@ -527,21 +533,22 @@ index 204aa0e8b..64e86b2db 100644
 \ No newline at end of file
 +}  // namespace gfxstream
 diff --git a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
-index 9d589b133..45694fdcb 100644
+index 9d589b133..c051f8f5b 100644
 --- a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
 +++ b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
-@@ -28,15 +28,20 @@
+@@ -28,15 +28,21 @@
  #include <wingdi.h>
  
  #include <algorithm>
++#include <array>
 +#include <chrono>
 +#include <cstdint>
-+#include <array>
 +#include <deque>
-+#include <mutex>
  #include <memory>
++#include <mutex>
  #include <unordered_map>
  #include <unordered_set>
++#include <variant>
  
 -#include "core_profile_configs.h"
  #include "common/gl_library.h"
@@ -553,37 +560,40 @@ index 9d589b133..45694fdcb 100644
  
  #define IS_TRUE(a) \
          do { if (!(a)) return NULL; } while (0)
-@@ -516,6 +521,29 @@ private:
+@@ -516,6 +522,32 @@ private:
      int mConfigId = 0;
  };
  
 +using WglClock = std::chrono::steady_clock;
 +
++enum class WglFailure { GetDc, ReleaseDc, Create, Destroy, AllocationPaused, Abandoned, Count };
++
 +class WglFailureLog {
 +   public:
-+    bool allow() {
++    bool allow(WglFailure kind) {
 +        std::lock_guard<std::mutex> lock(mMutex);
 +        const auto now = WglClock::now();
 +        if (now - mWindow >= std::chrono::minutes(1)) {
 +            mWindow = now;
-+            mReported = 0;
++            mReported.fill(0);
 +        }
-+        if (mReported == 3) return false;
-+        ++mReported;
++        auto& reported = mReported[static_cast<size_t>(kind)];
++        if (reported == 3) return false;
++        ++reported;
 +        return true;
 +    }
 +
 +   private:
 +    std::mutex mMutex;
 +    WglClock::time_point mWindow{};
-+    unsigned mReported = 0;
++    std::array<unsigned, static_cast<size_t>(WglFailure::Count)> mReported{};
 +};
 +static WglFailureLog sWglFailureLog;
 +
  class WinSurface : public EglOS::Surface {
  public:
      explicit WinSurface(HWND wnd, const WglExtensionsDispatch* dispatch) :
-@@ -535,22 +563,32 @@ public:
+@@ -535,22 +567,32 @@ public:
      bool releaseDC() {
          if (m_dcReleased) return true;
  
@@ -595,7 +605,7 @@ index 9d589b133..45694fdcb 100644
 +        SetLastError(0);
 +        if (!m_dispatch->wglReleasePbufferDC || !m_dispatch->wglReleasePbufferDC(m_pb, m_hdc)) {
 +            const DWORD error = GetLastError();
-+            if (sWglFailureLog.allow())
++            if (sWglFailureLog.allow(WglFailure::ReleaseDc))
 +                GFXSTREAM_ERROR("MAS: wglReleasePbufferDC(%p, %p) failed: error 0x%lx", m_pb, m_hdc,
 +                                error);
 +            return false;
@@ -617,46 +627,88 @@ index 9d589b133..45694fdcb 100644
 -        if (!m_hdc) return false;
 +        if (!m_hdc) {
 +            const DWORD error = GetLastError();
-+            if (sWglFailureLog.allow())
++            if (sWglFailureLog.allow(WglFailure::GetDc))
 +                GFXSTREAM_ERROR("MAS: wglGetPbufferDC(%p) failed: error 0x%lx", m_pb, error);
 +            return false;
 +        }
  
          m_dcReleased = false;
  
-@@ -1076,22 +1114,28 @@ public:
+@@ -1056,44 +1098,39 @@ public:
+         gfxstream::base::AutoLock lock(sGlobalLock);
+         (void)info;
+ 
+-        bool needPrime = false;
+-
+         auto& freeElts = mFreePbufs[pixelFormat];
+-
+-        if (freeElts.empty()) {
+-            needPrime = true;
+-        }
+-
+-        if (needPrime) {
+-            // Policy here is based on the behavior of Android UI when opening
+-            // and closing lots of apps, and to avoid frequent pauses to create
+-            // pbuffers.  We start by priming with 8 pbuffers, and then double
+-            // the current set of live pbuffers each time. This will then
+-            // require only a few primings (up to ~32 pbuffers) to make it
+-            // unnecessary to create or delete a pbuffer ever again after that.
+-            // Creating many pbuffers in a batch is faster than interrupting
+-            // the process at various times to create them one at a time.
++        // Try every existing free object before allocating a replacement. At
++        // most one bounded priming batch is attempted per caller request.
++        for (int pass = 0; pass < 2; ++pass) {
++            while (!freeElts.empty()) {
++                EglOS::Surface* surface = freeElts.back();
++                freeElts.pop_back();
++                if (WinSurface::from(surface)->refreshDC()) {
++                    mLivePbufs[pixelFormat].insert(surface);
++                    logPbufferStatsLocked();
++                    return surface;
++                }
++                ++mPbufferRefreshFailures;
++                // Some Intel drivers hang if we destroy here. Retire the bad
++                // object, then try the next healthy cached object instead.
++                queuePbufferForDeletionLocked(surface);
++            }
++            if (pass == 1) break;
              PROFILE_SLOW("createPbufferSurface (slow path)");
-             int toCreate = std::max((int)mLivePbufs[pixelFormat].size(), kPbufPrimingCount);
-             for (int i = 0; i < toCreate; i++) {
+-            int toCreate = std::max((int)mLivePbufs[pixelFormat].size(), kPbufPrimingCount);
+-            for (int i = 0; i < toCreate; i++) {
 -                freeElts.push_back(createPbufferSurfaceImpl(pixelFormat));
-+                auto* surface = createPbufferSurfaceImpl(pixelFormat);
-+                if (!surface) break;
-+                freeElts.push_back(surface);
++            const size_t toCreate =
++                std::max(mLivePbufs[pixelFormat].size(), static_cast<size_t>(kPbufPrimingCount));
++            for (size_t i = 0; i < toCreate; ++i) {
++                auto result = createPbufferSurfaceImpl(pixelFormat);
++                if (auto* surface = std::get_if<EglOS::Surface*>(&result)) {
++                    freeElts.push_back(*surface);
++                } else if (std::get<PbufferCreateError>(result) == PbufferCreateError::Allocation) {
++                    break;
++                }
++                // A transient first DC failure consumes only this priming slot.
              }
          }
- 
-+        if (freeElts.empty()) return nullptr;
-+
-         PROFILE_SLOW("createPbufferSurface (fast path)");
-         EglOS::Surface* surf = freeElts.back();
-         WinSurface* winSurface = WinSurface::from(surf);
-         if (!winSurface->refreshDC()) {
-+            ++mPbufferRefreshFailures;
-             // TODO: Figure out why some Intel GPUs can hang flakily if
-             // we just destroy the pbuffer here.
+-
+-        PROFILE_SLOW("createPbufferSurface (fast path)");
+-        EglOS::Surface* surf = freeElts.back();
+-        WinSurface* winSurface = WinSurface::from(surf);
+-        if (!winSurface->refreshDC()) {
+-            // TODO: Figure out why some Intel GPUs can hang flakily if
+-            // we just destroy the pbuffer here.
 -            mDeletePbufs.push_back(surf);
-+            queuePbufferForDeletionLocked(surf);
-             surf = createPbufferSurfaceImpl(pixelFormat);
-         }
-         freeElts.pop_back();
- 
+-            surf = createPbufferSurfaceImpl(pixelFormat);
+-        }
+-        freeElts.pop_back();
+-
 -        mLivePbufs[pixelFormat].insert(surf);
-+        if (surf) mLivePbufs[pixelFormat].insert(surf);
+-
+-        return surf;
 +        logPbufferStatsLocked();
- 
-         return surf;
++        return nullptr;
      }
-@@ -1102,25 +1146,58 @@ public:
+ 
+     virtual bool releasePbuffer(EglOS::Surface* pb) {
+@@ -1102,25 +1139,66 @@ public:
  
          WinSurface* winpb = WinSurface::from(pb);
  
@@ -689,10 +741,15 @@ index 9d589b133..45694fdcb 100644
 +        for (size_t i = 0; i < count; ++i) {
 +            auto pending = mDeletePbufs.front();
 +            mDeletePbufs.pop_front();
++            if (now - pending.queuedAt >= kPbufferLifetime) {
++                abandonPbufferLocked(pending.surface, "age-limit");
++                continue;
++            }
 +            if (pending.retryAt > now) {
 +                mDeletePbufs.push_back(pending);
 +                continue;
 +            }
++            ++pending.attempts;
 +            WinSurface* winSurface = WinSurface::from(pending.surface);
 +            // Keep the Intel workaround: only destroy on this release path.
 +            winSurface->releaseDC();
@@ -702,13 +759,17 @@ index 9d589b133..45694fdcb 100644
 +                ++mPbufferDestroyFailures;
 +                mLastPbufferDestroyError = error;
 +                mLastFailedPbuffer = winSurface->getPbuffer();
-+                if (sWglFailureLog.allow()) {
++                if (sWglFailureLog.allow(WglFailure::Destroy)) {
 +                    GFXSTREAM_ERROR("MAS: wglDestroyPbuffer(%p) failed: error 0x%lx; pending=%zu",
 +                                    winSurface->getPbuffer(), error, mDeletePbufs.size() + 1);
 +                }
-+                if (error != ERROR_INVALID_HANDLE) {
-+                    pending.retryAt = now + std::chrono::seconds(1);
-+                    mDeletePbufs.push_back(pending);
++                if (HRESULT_CODE(error) != ERROR_INVALID_HANDLE) {
++                    if (pending.attempts == kMaxPbufferRetries) {
++                        abandonPbufferLocked(pending.surface, "retry-limit");
++                    } else {
++                        pending.retryAt = now + std::chrono::seconds(1);
++                        mDeletePbufs.push_back(pending);
++                    }
 +                    continue;
 +                }
 +                ++mPbuffersInvalid;
@@ -721,65 +782,99 @@ index 9d589b133..45694fdcb 100644
 -        mDeletePbufs.clear();
 -
 -        return true;
-+        if (mDeletePbufs.empty()) mPbufferAllocationLimit = 0;
 +        logPbufferStatsLocked();
 +        return released;
      }
  
      virtual bool makeCurrent(EglOS::Surface* read,
-@@ -1240,6 +1317,20 @@ private:
+@@ -1239,7 +1317,22 @@ private:
+         }
      }
  
-     EglOS::Surface* createPbufferSurfaceImpl(const EglOS::PixelFormat* pixelFormat) {
-+        // Freeze native allocation capacity while reclamation is failing. The
-+        // budget includes already-live objects, which may all later be retired.
-+        const uint64_t owned = mPbuffersCreated - mPbuffersDestroyed - mPbuffersInvalid;
-+        if (mPbufferAllocationLimit && owned >= mPbufferAllocationLimit) {
+-    EglOS::Surface* createPbufferSurfaceImpl(const EglOS::PixelFormat* pixelFormat) {
++    enum class PbufferCreateError { Allocation, DcUnavailable };
++    using PbufferCreation = std::variant<EglOS::Surface*, PbufferCreateError>;
++
++    PbufferCreation createPbufferSurfaceImpl(const EglOS::PixelFormat* pixelFormat) {
++        // Only backlog capacity pauses allocation. Healthy live/free objects
++        // never count against this limit. Expiry needs no native GL/WGL calls.
++        expirePbuffersLocked();
++        if (mDeletePbufs.size() == kPbufferBacklogBudget) {
 +            ++mPbufferAllocationDenials;
-+            if (sWglFailureLog.allow()) {
-+                GFXSTREAM_ERROR("MAS: pbuffer allocation paused: owned=%llu limit=%llu pending=%zu",
-+                                static_cast<unsigned long long>(owned),
-+                                static_cast<unsigned long long>(mPbufferAllocationLimit),
-+                                mDeletePbufs.size());
++            if (sWglFailureLog.allow(WglFailure::AllocationPaused)) {
++                GFXSTREAM_ERROR("MAS: pbuffer allocation paused: pending=%zu limit=%zu",
++                                mDeletePbufs.size(), kPbufferBacklogBudget);
 +            }
 +            logPbufferStatsLocked();
-+            return nullptr;
++            return PbufferCreateError::Allocation;
 +        }
          // we never care about width or height, since we just use
          // opengl fbos anyway.
          const WinPixelFormat* format = WinPixelFormat::from(pixelFormat);
-@@ -1249,12 +1340,68 @@ private:
+@@ -1247,14 +1340,98 @@ private:
+ 
+         const WglExtensionsDispatch* dispatch = mDispatch;
          if (!dispatch->wglCreatePbuffer) {
-             return NULL;
+-            return NULL;
++            return PbufferCreateError::Allocation;
          }
 +        SetLastError(0);
          HPBUFFERARB pb = dispatch->wglCreatePbuffer(dpy, format->configId(), 1, 1, nullptr);
          if (!pb) {
 -            GetLastError();
+-            return NULL;
 +            const DWORD error = GetLastError();
-+            if (sWglFailureLog.allow())
++            if (sWglFailureLog.allow(WglFailure::Create))
 +                GFXSTREAM_ERROR("MAS: wglCreatePbuffer failed format=%d error=0x%lx",
 +                                format->configId(), error);
-             return NULL;
-         }
--        return new WinSurface(pb, pixelFormat, dispatch);
++            return PbufferCreateError::Allocation;
++        }
 +        ++mPbuffersCreated;
 +        auto* surface = new WinSurface(pb, pixelFormat, dispatch);
 +        if (!surface->getDC()) {
 +            ++mPbufferRefreshFailures;
 +            queuePbufferForDeletionLocked(surface);
 +            logPbufferStatsLocked();
-+            return nullptr;
++            return PbufferCreateError::DcUnavailable;
 +        }
-+        return surface;
++        return static_cast<EglOS::Surface*>(surface);
++    }
++
++    void abandonPbufferLocked(EglOS::Surface* surface, const char* reason) {
++        auto* winSurface = WinSurface::from(surface);
++        ++mPbuffersAbandoned;
++        if (sWglFailureLog.allow(WglFailure::Abandoned)) {
++            GFXSTREAM_ERROR(
++                "MAS: pbuffer cleanup abandoned handle=%p reason=%s "
++                "possibleNativeLeaks=%llu",
++                winSurface->getPbuffer(), reason,
++                static_cast<unsigned long long>(mPbuffersAbandoned));
+         }
+-        return new WinSurface(pb, pixelFormat, dispatch);
++        // Free CPU ownership only; never claim native destruction succeeded.
++        delete winSurface;
++    }
++
++    void expirePbuffersLocked() {
++        const auto now = WglClock::now();
++        for (auto it = mDeletePbufs.begin(); it != mDeletePbufs.end();) {
++            if (now - it->queuedAt < kPbufferLifetime) {
++                ++it;
++                continue;
++            }
++            abandonPbufferLocked(it->surface, "age-limit");
++            it = mDeletePbufs.erase(it);
++        }
 +    }
 +
 +    void queuePbufferForDeletionLocked(EglOS::Surface* surface) {
-+        if (mDeletePbufs.empty()) {
-+            const uint64_t owned = mPbuffersCreated - mPbuffersDestroyed - mPbuffersInvalid;
-+            mPbufferAllocationLimit = std::max(owned, kPbufferBacklogBudget);
++        expirePbuffersLocked();
++        if (mDeletePbufs.size() == kPbufferBacklogBudget) {
++            abandonPbufferLocked(mDeletePbufs.front().surface, "queue-limit");
++            mDeletePbufs.pop_front();
 +        }
-+        mDeletePbufs.push_back({surface, {}});
++        const auto now = WglClock::now();
++        mDeletePbufs.push_back({surface, now, now, 0});
 +    }
 +
 +    void logPbufferStatsLocked() {
@@ -798,7 +893,7 @@ index 9d589b133..45694fdcb 100644
 +                                                mPbufferRefreshFailures,
 +                                                mPbufferDestroyFailures,
 +                                                mPbufferAllocationDenials,
-+                                                mPbufferAllocationLimit};
++                                                mPbuffersAbandoned};
 +        mLastPbufferLog = now;
 +        if (stats == mLastPbufferStats) return;
 +        mLastPbufferStats = stats;
@@ -806,7 +901,7 @@ index 9d589b133..45694fdcb 100644
 +            "MAS: native pbuffers created=%llu destroyed=%llu live=%zu "
 +            "free=%zu pending=%zu invalid=%llu dcReleaseFailures=%llu "
 +            "refreshFailures=%llu destroyFailures=%llu allocationDenials=%llu "
-+            "allocationLimit=%llu lastDestroyError=0x%lx lastFailed=%p",
++            "abandoned=%llu pendingLimit=%zu lastDestroyError=0x%lx lastFailed=%p",
 +            static_cast<unsigned long long>(mPbuffersCreated),
 +            static_cast<unsigned long long>(mPbuffersDestroyed), live, free, mDeletePbufs.size(),
 +            static_cast<unsigned long long>(mPbuffersInvalid),
@@ -814,12 +909,12 @@ index 9d589b133..45694fdcb 100644
 +            static_cast<unsigned long long>(mPbufferRefreshFailures),
 +            static_cast<unsigned long long>(mPbufferDestroyFailures),
 +            static_cast<unsigned long long>(mPbufferAllocationDenials),
-+            static_cast<unsigned long long>(mPbufferAllocationLimit), mLastPbufferDestroyError,
-+            mLastFailedPbuffer);
++            static_cast<unsigned long long>(mPbuffersAbandoned), kPbufferBacklogBudget,
++            mLastPbufferDestroyError, mLastFailedPbuffer);
      }
  
      bool mCoreProfileSupported = false;
-@@ -1267,7 +1414,24 @@ private:
+@@ -1267,7 +1444,28 @@ private:
  
      std::unordered_map<const EglOS::PixelFormat*, std::vector<EglOS::Surface* > > mFreePbufs;
      std::unordered_map<const EglOS::PixelFormat*, std::unordered_set<EglOS::Surface* > > mLivePbufs;
@@ -827,6 +922,8 @@ index 9d589b133..45694fdcb 100644
 +    struct PendingPbuffer {
 +        EglOS::Surface* surface;
 +        WglClock::time_point retryAt;
++        WglClock::time_point queuedAt;
++        unsigned attempts;
 +    };
 +    std::deque<PendingPbuffer> mDeletePbufs;
 +    uint64_t mPbuffersCreated = 0;
@@ -835,12 +932,14 @@ index 9d589b133..45694fdcb 100644
 +    uint64_t mPbufferRefreshFailures = 0;
 +    uint64_t mPbuffersInvalid = 0;
 +    uint64_t mPbufferDestroyFailures = 0;
-+    uint64_t mPbufferAllocationLimit = 0, mPbufferAllocationDenials = 0;
++    uint64_t mPbuffersAbandoned = 0, mPbufferAllocationDenials = 0;
 +    DWORD mLastPbufferDestroyError = 0;
 +    HPBUFFERARB mLastFailedPbuffer = nullptr;
 +    WglClock::time_point mLastPbufferLog{};
 +    std::array<uint64_t, 11> mLastPbufferStats{};
-+    static constexpr uint64_t kPbufferBacklogBudget = 64;
++    static constexpr size_t kPbufferBacklogBudget = 64;
++    static constexpr unsigned kMaxPbufferRetries = 8;
++    static constexpr std::chrono::seconds kPbufferLifetime{60};
 +    static constexpr size_t kPbufferRetryBatch = 8;
      static constexpr int kPbufPrimingCount = 8;
  };
@@ -939,10 +1038,10 @@ index 4accac6d5..a11806764 100644
  
 diff --git a/host/include/render-utils/readback_diagnostics.h b/host/include/render-utils/readback_diagnostics.h
 new file mode 100644
-index 000000000..0359b202c
+index 000000000..e4f2613ab
 --- /dev/null
 +++ b/host/include/render-utils/readback_diagnostics.h
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,303 @@
 +// Copyright 2026 Ji Mao Cai
 +// SPDX-License-Identifier: Apache-2.0
 +#pragma once
@@ -973,6 +1072,13 @@ index 000000000..0359b202c
 +    Count
 +};
 +enum class ReadbackOutcome { Returned, Failed };
++enum class DiagnosticEvent {
++    CleanupDeferred,
++    CleanupRecovered,
++    CleanupAbandoned,
++    DmaMissingFramebuffer,
++    Count
++};
 +
 +class ReadbackDiagnostics {
 +   public:
@@ -1004,15 +1110,7 @@ index 000000000..0359b202c
 +            row.puid = puid;
 +            if (outcome == ReadbackOutcome::Failed) {
 +                failures = ++row.failures;
-+                const auto now = mNow();
-+                if (now - row.failureWindow >= std::chrono::minutes(1)) {
-+                    row.failureWindow = now;
-+                    row.failureLogs = 0;
-+                }
-+                if (row.failureLogs < 3) {
-+                    ++row.failureLogs;
-+                    logFailure = true;
-+                }
++                logFailure = row.failureDetails.take(mNow());
 +            }
 +            summary = snapshotLocked();
 +        }
@@ -1027,6 +1125,11 @@ index 000000000..0359b202c
 +                static_cast<unsigned long long>(puid), static_cast<unsigned long long>(failures));
 +        }
 +        logSummary(summary);
++    }
++
++    bool shouldLog(DiagnosticEvent event) {
++        std::lock_guard<std::mutex> lock(mMutex);
++        return mEventLogs[static_cast<size_t>(event)].take(mNow());
 +    }
 +
 +    void colorBufferCreated(uint64_t rgbaBytes) {
@@ -1092,14 +1195,26 @@ index 000000000..0359b202c
 +
 +   private:
 +    static constexpr size_t kSourceCount = static_cast<size_t>(ReadbackSource::Count);
++    struct LogBudget {
++        Clock::time_point window{};
++        unsigned reported = 0;
++        bool take(Clock::time_point now) {
++            if (now - window >= std::chrono::minutes(1)) {
++                window = now;
++                reported = 0;
++            }
++            if (reported == 3) return false;
++            ++reported;
++            return true;
++        }
++    };
 +    struct Readbacks {
 +        uint64_t calls = 0, bytes = 0, elapsedUs = 0, maxUs = 0, failures = 0;
 +        uint64_t loggedCalls = 0;
 +        int width = 0, height = 0;
 +        uint32_t handle = 0;
 +        uint64_t puid = 0;
-+        Clock::time_point failureWindow{};
-+        unsigned failureLogs = 0;
++        LogBudget failureDetails;
 +    };
 +    struct Resources {
 +        uint64_t created = 0, released = 0, liveRgba = 0;
@@ -1185,6 +1300,7 @@ index 000000000..0359b202c
 +
 +    std::mutex mMutex;
 +    Now mNow;
++    std::array<LogBudget, static_cast<size_t>(DiagnosticEvent::Count)> mEventLogs{};
 +    std::array<Readbacks, kSourceCount> mReadbacks{};
 +    Clock::time_point mLastLog;
 +    Resources mResources;
@@ -1230,7 +1346,7 @@ index 000000000..0359b202c
 +}  // namespace host
 +}  // namespace gfxstream
 diff --git a/host/render_control.cpp b/host/render_control.cpp
-index e6af673b1..dafab4e8e 100644
+index e6af673b1..f0364a6c3 100644
 --- a/host/render_control.cpp
 +++ b/host/render_control.cpp
 @@ -27,6 +27,7 @@
@@ -1261,7 +1377,7 @@ index e6af673b1..dafab4e8e 100644
  }
  
  static int rcUpdateColorBuffer(uint32_t colorBuffer,
-@@ -1597,14 +1602,17 @@ static int rcReadColorBufferDMA(uint32_t colorBuffer,
+@@ -1597,14 +1602,20 @@ static int rcReadColorBufferDMA(uint32_t colorBuffer,
                                  GLenum format, GLenum type, void* pixels,
                                  uint32_t pixels_size)
  {
@@ -1272,6 +1388,9 @@ index e6af673b1..dafab4e8e 100644
      if (!fb) {
 -        GFXSTREAM_WARNING("%s: framebuffer cannot be found!", __func__);
 +        trace.result(false);
++        if (ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::DmaMissingFramebuffer)) {
++            GFXSTREAM_WARNING("%s: framebuffer cannot be found!", __func__);
++        }
          return -1;
      }
  
