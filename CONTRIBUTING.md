@@ -43,6 +43,7 @@ issue、PR、评论和提交说明用中文或英文都可以。
 ## 署名与许可
 
 - 从自己的 fork 开 PR。外部 PR 的 CI 要维护者批准后才会跑。
+- 用户看得见的改动，在同一个 PR 里加一个说明文件 `changelog.d/<名字>.<feat|fix|change|remove>.md`，写一行给用户看的话；发版公告的「更新内容」就是从这些文件汇总的。写法见 [changelog.d/README.md](changelog.d/README.md)。管理器、截图库、宿主输入法的仓库里也是这样。
 - 署你自己的名字或化名，邮箱用 GitHub 的 noreply 地址（`<编号>+<登录名>@users.noreply.github.com`）；不写 `Co-authored-by`。收进来后保留你的署名，发版说明里会致谢。
 - 你的改动按所改文件的许可证进来，见 README 的[许可证与源码](README.md#许可证与源码)；新文件的版权行写你的名字或化名。不用签 CLA，`Signed-off-by` 可加可不加。
 - 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。给 AI 工具看的规矩在仓库根目录的 [AGENTS.md](AGENTS.md)，Codex、Claude Code 等会自己读。

@@ -1,0 +1,973 @@
+From 60c619f9ecfe01ccde23907b04d92bdb3fb7643e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sun, 15 Nov 2026 04:48:10 +0100
+Subject: [PATCH 105/105] MAS local: give the lean title bar a maximize /
+ restore button
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ModAVD#161 lets the system maximize and snap the lean window, but only a
+double click on the title bar, Win+Up, a drag to the top of the screen or
+the system menu did it, and nothing showed that it could be done. The title
+bar now has a button between minimize and close: the maximize icon and the
+tool tip 最大化 while the window is not maximized, the restore icon and 还原
+while it is. The button follows the window however it gets there: it asks
+the system (IsZoomed) whenever the window's state or size changes. A
+snapped window is not maximized and shows maximize, as the system's own
+button does. Its accessible name follows the tool tip, so UI Automation
+sees which one it is.
+
+A click posts SC_MAXIMIZE or SC_RESTORE, the system command a double click
+on the title bar gives, so it goes the same way. Off Windows, where the
+lean title bar is not shown, the container falls back on Qt's
+showMaximized() / showNormal().
+
+To Windows the button is the window's maximize button: WM_NCHITTEST answers
+HTMAXBUTTON over it, and Windows 11 shows its snap layouts there. The mouse
+over it is then non-client and Qt gets none of its events, so the window
+works out the button's highlight and click from WM_NCMOUSEMOVE (tracking
+WM_NCMOUSELEAVE), WM_NCLBUTTONDOWN / WM_NCLBUTTONDBLCLK and WM_NCLBUTTONUP
+for HTMAXBUTTON, and none of these go on to DefWindowProc, which would
+track the press itself and draw the system's caption button over the title
+bar. A click there clicks the widget, so a disabled button still does
+nothing; the button shows its tool tip itself after the usual delay. Right
+clicks on it are swallowed. Messages for any other part of the window go on
+as before. While the button is disabled (the safe shutdown) or hidden,
+leanFrameGeometry() passes no range for it and it is an ordinary client
+button again.
+
+The arithmetic is in lean-window-frame, tested in
+aemu-ui-lean-window_unittests: Hit::MaxButton (HTMAXBUTTON) from hitTest()
+for the button's range, which reaches the top edge like the other buttons
+but leaves the corner and right edge bands alone; maxButtonFace() and
+maxButtonCommand() for the state; MaxButtonTracker for the non-client
+mouse messages, where a press that leaves the button is given up, since
+the mouse is not captured.
+
+Refs ModAVD/ModAVD#185
+
+Change-Id: Id841773cdf03e2d964d8d46c4a92edb4c9b6672e
+---
+ .../android/skin/qt/emulator-container.cpp    |  51 ++++++
+ .../src/android/skin/qt/emulator-container.h  |   6 +
+ .../dark/ic_window_maximize_white_48dp.svg    |   4 +
+ .../dark/ic_window_restore_white_48dp.svg     |   5 +
+ .../src/android/skin/qt/lean-title-bar.cpp    |  93 ++++++++++-
+ .../src/android/skin/qt/lean-title-bar.h      |  29 +++-
+ .../src/android/skin/qt/resources.qrc         |   3 +
+ .../src/android/skin/qt/tool-window.cpp       |   7 +
+ .../android/skin/qt/windows-lean-frame.cpp    | 109 +++++++++++--
+ .../src/android/skin/qt/windows-lean-frame.h  |  31 +++-
+ .../include/android/lean-window-frame.h       |  46 +++++-
+ .../src/android/lean-window-frame.cpp         |  47 +++++-
+ .../android/lean-window-frame_unittest.cpp    | 153 ++++++++++++++++++
+ 13 files changed, 564 insertions(+), 20 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_maximize_white_48dp.svg
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_restore_white_48dp.svg
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index a1b682bab..917f3141a 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -64,6 +64,8 @@ class QStyle;
+ #endif
+ 
+ #if defined(_WIN32)
++#include <QPushButton>
++
+ #include "android/skin/qt/lean-title-bar.h"
+ #include "android/skin/qt/windows-lean-frame.h"
+ #include "android/skin/qt/windows-native-window.h"
+@@ -103,6 +105,14 @@ static WindowsLeanFrame::Geometry leanFrameGeometry(
+             window->toolWindow() ? window->toolWindow()->leanTitleBar() : nullptr;
+     g.buttonsLeft = device(titleBar ? titleBar->buttonsLeft()
+                                     : container->width());
++    // The maximize / restore button is the system's maximize button to
++    // Windows (ModAVD#185), while it can be clicked; disabled, during the
++    // safe shutdown, it is an ordinary client button again.
++    const QPushButton* maximize = titleBar ? titleBar->maximizeButton() : nullptr;
++    if (maximize && maximize->isVisible() && maximize->isEnabled()) {
++        g.maxButtonLeft = device(maximize->x());
++        g.maxButtonRight = device(maximize->x() + maximize->width());
++    }
+     // The guest screen widget has the guest's shape, scaled.
+     if (window->width() > 0 && window->height() > 0) {
+         g.guestAspect = static_cast<double>(window->width()) / window->height();
+@@ -156,6 +166,24 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+                     // guest screen into it, once Qt has passed the last
+                     // geometry change on to the widget.
+                     mResizeTimer.start(0);
++                },
++                [this](bool hot, bool down, bool clicked) {
++                    // The mouse over the maximize / restore button, which Qt
++                    // does not see (ModAVD#185).
++                    LeanTitleBar* titleBar =
++                            mEmulatorWindow->toolWindow()
++                                    ? mEmulatorWindow->toolWindow()->leanTitleBar()
++                                    : nullptr;
++                    if (!titleBar) {
++                        return;
++                    }
++                    titleBar->setMaximizeButtonMouse(hot, down);
++                    if (clicked) {
++                        // As if Qt had seen the click: nothing while the
++                        // button is disabled, and the same path as a click
++                        // from UI Automation.
++                        titleBar->maximizeButton()->click();
++                    }
+                 });
+ #endif
+     } else {
+@@ -723,6 +751,29 @@ bool EmulatorContainer::heldBySystem() const {
+ #endif
+ }
+ 
++bool EmulatorContainer::isWindowMaximized() const {
++#ifdef _WIN32
++    if (mLeanFrame && internalWinId()) {
++        return WindowsLeanFrame::isMaximized(internalWinId());
++    }
++#endif
++    return isMaximized();
++}
++
++void EmulatorContainer::toggleMaximized() {
++#ifdef _WIN32
++    if (mLeanFrame && internalWinId()) {
++        WindowsLeanFrame::toggleMaximized(internalWinId());
++        return;
++    }
++#endif
++    if (isMaximized()) {
++        showNormal();
++    } else {
++        showMaximized();
++    }
++}
++
+ bool EmulatorContainer::nativeEvent(const QByteArray& eventType,
+                                     void* message,
+                                     qintptr* result) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+index a3bd6aac4..a1fad6645 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.h
+@@ -98,6 +98,12 @@ public:
+     // Whether the system holds the window at a size of its own choosing:
+     // maximized or snapped.
+     bool heldBySystem() const;
++    // Whether the window is maximized, as the system has it; snapped is not.
++    bool isWindowMaximized() const;
++    // The lean title bar's maximize / restore button (ModAVD#185): maximizes
++    // the window, or restores it when it is maximized. On Windows that is the
++    // system command a double click on the title bar gives.
++    void toggleMaximized();
+ 
+ protected:
+     bool nativeEvent(const QByteArray& eventType,
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_maximize_white_48dp.svg b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_maximize_white_48dp.svg
+new file mode 100644
+index 000000000..286469239
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_maximize_white_48dp.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="48px" height="48px" viewBox="0 0 48 48" fill="#FFFFFF">
++    <path fill-rule="evenodd" d="M11 11h26v26H11z M14 14v20h20V14z"/>
++    <path d="M0 0h48v48H0z" fill="none"/>
++</svg>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_restore_white_48dp.svg b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_restore_white_48dp.svg
+new file mode 100644
+index 000000000..0ee45a414
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_window_restore_white_48dp.svg
+@@ -0,0 +1,5 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="48px" height="48px" viewBox="0 0 48 48" fill="#FFFFFF">
++    <path fill-rule="evenodd" d="M11 17h20v20H11z M14 20v14h14V20z"/>
++    <path d="M17 11h20v20h-6v-3h3V14H20v3h-3z"/>
++    <path d="M0 0h48v48H0z" fill="none"/>
++</svg>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+index 288a7bc20..5ca34ea19 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -14,6 +14,7 @@
+ #include "android/skin/qt/lean-title-bar.h"
+ 
+ #include <QApplication>
++#include <QCursor>
+ #include <QEvent>
+ #include <QFontMetrics>
+ #include <QFrame>
+@@ -23,17 +24,25 @@
+ #include <QPushButton>
+ #include <QResizeEvent>
+ #include <QSize>
++#include <QStyle>
++#include <QToolTip>
+ 
+ #include <algorithm>
++#include <utility>
++
++#include "android/lean-window-frame.h"
+ 
+ namespace {
+ 
+ // The palette of the lean window, the same as its navigation buttons had.
++// leanHot is the maximize / restore button's highlight while the window, not
++// Qt, sees the mouse over it.
+ constexpr char kStyle[] =
+         "#leanTitleBar { background: #20212D; }"
+         "#leanTitleBar QLabel { color: #E8E8EC; background: transparent; }"
+         "#leanTitleBar QPushButton { background: #20212D; border: 0; }"
+         "#leanTitleBar QPushButton:hover { background: #303142; }"
++        "#leanTitleBar QPushButton[leanHot=\"true\"] { background: #303142; }"
+         "#leanTitleBar QPushButton:pressed { background: #3B3D52; }"
+         "#leanTitleBar QPushButton:disabled { background: #20212D; }"
+         "#leanTitleBarDivider { background: #3B3D52; border: 0; }";
+@@ -72,6 +81,8 @@ LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
+     mDivider->setObjectName(QStringLiteral("leanTitleBarDivider"));
+     mDivider->setFixedSize(1, 16);
+     mMinimize = addButton("minimize", QString::fromUtf8("最小化"), kWindowIconSize);
++    mMaximize = addButton("window_maximize", QString::fromUtf8("最大化"),
++                          kWindowIconSize);
+     mClose = addButton("close", QString::fromUtf8("关机"), kWindowIconSize);
+ 
+     layout->addWidget(mBack);
+@@ -80,11 +91,20 @@ LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
+     layout->addWidget(mDivider, 0, Qt::AlignVCenter);
+     layout->addSpacing(4);
+     layout->addWidget(mMinimize);
++    layout->addWidget(mMaximize);
+     layout->addWidget(mClose);
+ 
++    // The tool tip of the maximize / restore button while the window sees
++    // the mouse over it: Qt shows none for a widget it gets no mouse events
++    // for.
++    mMaximizeTipTimer.setSingleShot(true);
++    connect(&mMaximizeTipTimer, &QTimer::timeout, this,
++            &LeanTitleBar::showMaximizeToolTip);
++
+     mWindow->installEventFilter(this);
+     updateTitle();
+     updateIcon();
++    updateMaximizeButton();
+ }
+ 
+ QPushButton* LeanTitleBar::addButton(const char* icon,
+@@ -115,13 +135,84 @@ int LeanTitleBar::buttonsLeft() const {
+ }
+ 
+ void LeanTitleBar::setButtonsEnabled(bool enabled) {
+-    for (QPushButton* button : {mBack, mHome, mMinimize, mClose}) {
++    for (QPushButton* button : {mBack, mHome, mMinimize, mMaximize, mClose}) {
+         button->setEnabled(enabled);
+     }
++    if (!enabled) {
++        setMaximizeButtonMouse(false, false);
++    }
++}
++
++void LeanTitleBar::setMaximizedQuery(std::function<bool()> query) {
++    mMaximizedQuery = std::move(query);
++    updateMaximizeButton();
++}
++
++void LeanTitleBar::updateMaximizeButton() {
++    const bool maximized =
++            mMaximizedQuery ? mMaximizedQuery() : mWindow->isMaximized();
++    const bool restore = android::lean_window::maxButtonFace(maximized) ==
++                         android::lean_window::MaxButtonFace::Restore;
++    if (restore == mShowsRestore) {
++        // addButton() gave it the maximize face.
++        return;
++    }
++    mShowsRestore = restore;
++    const QString tip = restore ? QString::fromUtf8("还原")
++                                : QString::fromUtf8("最大化");
++    // The dark theme's icons are drawn light, as in addButton().
++    mMaximize->setIcon(QIcon(restore ? QStringLiteral(":/dark/window_restore")
++                                     : QStringLiteral(":/dark/window_maximize")));
++    mMaximize->setToolTip(tip);
++    // Screen readers and UI Automation hear of the new name.
++    mMaximize->setAccessibleName(tip);
++    if (QToolTip::isVisible() && mMaximizeHot) {
++        showMaximizeToolTip();
++    }
++}
++
++void LeanTitleBar::setMaximizeButtonMouse(bool hot, bool down) {
++    if (!mMaximize->isEnabled()) {
++        hot = false;
++        down = false;
++    }
++    if (hot != mMaximizeHot) {
++        mMaximizeHot = hot;
++        mMaximize->setProperty("leanHot", hot);
++        // A style sheet reads a dynamic property only when polished again.
++        mMaximize->style()->unpolish(mMaximize);
++        mMaximize->style()->polish(mMaximize);
++        if (hot) {
++            mMaximizeTipTimer.start(
++                    style()->styleHint(QStyle::SH_ToolTip_WakeUpDelay));
++        } else {
++            mMaximizeTipTimer.stop();
++            if (QToolTip::isVisible() && QToolTip::text() == mMaximize->toolTip()) {
++                QToolTip::hideText();
++            }
++        }
++    }
++    if (down != mMaximize->isDown()) {
++        mMaximize->setDown(down);
++    }
++    mMaximize->update();
++}
++
++void LeanTitleBar::showMaximizeToolTip() {
++    if (mMaximizeHot) {
++        QToolTip::showText(QCursor::pos(), mMaximize->toolTip(), mMaximize);
++    }
+ }
+ 
+ bool LeanTitleBar::eventFilter(QObject* watched, QEvent* event) {
+     if (watched == mWindow) {
++        if (event->type() == QEvent::WindowStateChange ||
++            event->type() == QEvent::Resize || event->type() == QEvent::Show) {
++            // Maximized or restored by the button, a double click on the
++            // title bar, Win+Up / Win+Down, a drag to the top of the screen
++            // or the system menu (ModAVD#185).
++            updateMaximizeButton();
++        }
+         if (event->type() == QEvent::WindowTitleChange) {
+             updateTitle();
+         } else if (event->type() == QEvent::WindowIconChange ||
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+index 30b8f3486..e90c89df7 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -14,8 +14,11 @@
+ #pragma once
+ 
+ #include <QString>
++#include <QTimer>
+ #include <QWidget>
+ 
++#include <functional>
++
+ class QEvent;
+ class QFrame;
+ class QLabel;
+@@ -24,9 +27,10 @@ class QResizeEvent;
+ 
+ // The title bar the lean window draws itself (ModAVD#58), at the top of the
+ // emulator window: the window's icon and title on the left, then back, home,
+-// a divider, minimize and close on the right. It shows the title and icon of
+-// the window it sits in. Moving the window by the title bar, and the system
+-// menu, are the window's (WindowsLeanFrame); this only has the buttons.
++// a divider, minimize, maximize / restore (ModAVD#185) and close on the
++// right. It shows the title and icon of the window it sits in. Moving the
++// window by the title bar, and the system menu, are the window's
++// (WindowsLeanFrame); this only has the buttons.
+ class LeanTitleBar : public QWidget {
+     Q_OBJECT
+ 
+@@ -43,8 +47,20 @@ public:
+     QPushButton* backButton() const { return mBack; }
+     QPushButton* homeButton() const { return mHome; }
+     QPushButton* minimizeButton() const { return mMinimize; }
++    QPushButton* maximizeButton() const { return mMaximize; }
+     QPushButton* closeButton() const { return mClose; }
+ 
++    // Where the maximize / restore button learns whether the window is
++    // maximized; it asks whenever the window's state or size changes.
++    // Without it the button takes the window to be maximized as Qt has it.
++    void setMaximizedQuery(std::function<bool()> query);
++    // Shows maximize or restore on the button, as the window is now.
++    void updateMaximizeButton();
++    // The mouse over the maximize / restore button when the window, not Qt,
++    // sees it (WindowsLeanFrame): highlighted while |hot|, pressed while
++    // |down|, with its tool tip after a while.
++    void setMaximizeButtonMouse(bool hot, bool down);
++
+ protected:
+     bool eventFilter(QObject* watched, QEvent* event) override;
+     void resizeEvent(QResizeEvent* event) override;
+@@ -53,6 +69,7 @@ private:
+     QPushButton* addButton(const char* icon, const QString& tip, int iconSize);
+     void updateTitle();
+     void updateIcon();
++    void showMaximizeToolTip();
+ 
+     QWidget* mWindow;
+     QLabel* mIcon = nullptr;
+@@ -61,5 +78,11 @@ private:
+     QPushButton* mHome = nullptr;
+     QFrame* mDivider = nullptr;
+     QPushButton* mMinimize = nullptr;
++    QPushButton* mMaximize = nullptr;
+     QPushButton* mClose = nullptr;
++    std::function<bool()> mMaximizedQuery;
++    // Whether the button shows restore.
++    bool mShowsRestore = false;
++    bool mMaximizeHot = false;
++    QTimer mMaximizeTipTimer;
+ };
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+index d3cbe52dc..d97a46c31 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+@@ -286,6 +286,9 @@
+         <file alias="home">images/dark/System_Home_white.svg</file>
+         <file alias="laptop_mode">images/dark/laptop_mode_dark.svg</file>
+         <file alias="minimize">images/dark/ic_remove_white_48dp.svg</file>
++        <!-- The lean title bar's maximize / restore button (ModAVD#185) -->
++        <file alias="window_maximize">images/dark/ic_window_maximize_white_48dp.svg</file>
++        <file alias="window_restore">images/dark/ic_window_restore_white_48dp.svg</file>
+         <file alias="more">images/dark/ic_more_horiz_white_48dp.svg</file>
+         <file alias="overview">images/dark/System_Overview_white.svg</file>
+         <file alias="meta">images/dark/meta.svg</file>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 2878a1a83..a1acd646f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -1003,6 +1003,13 @@ void ToolWindow::createLeanTitleBar() {
+ 
+     QObject::connect(mLeanTitleBar->minimizeButton(), &QPushButton::clicked,
+                      this, [this] { mEmulatorWindow->showMinimized(); });
++    // Maximize and restore go the way of a double click on the title bar
++    // (ModAVD#185); the button follows the window however it gets there.
++    EmulatorContainer* container = mEmulatorWindow->containerWindow();
++    mLeanTitleBar->setMaximizedQuery(
++            [container] { return container->isWindowMaximized(); });
++    QObject::connect(mLeanTitleBar->maximizeButton(), &QPushButton::clicked,
++                     this, [container] { container->toggleMaximized(); });
+     QObject::connect(mLeanTitleBar->closeButton(), &QPushButton::clicked, this,
+                      [this] { on_close_button_clicked(); });
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+index f04a76659..b66750385 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -74,8 +74,11 @@ lw::Rect visibleRect(HWND hwnd, const RECT& window) {
+ }  // namespace
+ 
+ WindowsLeanFrame::WindowsLeanFrame(std::function<Geometry()> geometry,
+-                                   std::function<void()> sizeMoveDone)
+-    : mGeometry(std::move(geometry)), mSizeMoveDone(std::move(sizeMoveDone)) {}
++                                   std::function<void()> sizeMoveDone,
++                                   MaxButtonFn maxButton)
++    : mGeometry(std::move(geometry)),
++      mSizeMoveDone(std::move(sizeMoveDone)),
++      mMaxButton(std::move(maxButton)) {}
+ 
+ // static
+ void WindowsLeanFrame::apply(WId wid) {
+@@ -189,6 +192,32 @@ bool WindowsLeanFrame::heldBySystem(WId wid) {
+     return isWindowArranged && isWindowArranged(hwnd);
+ }
+ 
++// static
++bool WindowsLeanFrame::isMaximized(WId wid) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    return hwnd && IsZoomed(hwnd);
++}
++
++// static
++void WindowsLeanFrame::toggleMaximized(WId wid) {
++    HWND hwnd = reinterpret_cast<HWND>(wid);
++    if (!hwnd || IsIconic(hwnd)) {
++        return;
++    }
++    // Posted, like the system menu's commands: the button's click is still
++    // on the stack.
++    PostMessageW(hwnd, WM_SYSCOMMAND,
++                 static_cast<WPARAM>(lw::maxButtonCommand(IsZoomed(hwnd))), 0);
++}
++
++void WindowsLeanFrame::reportMaxButton(const lw::MaxButtonTracker& before,
++                                       bool clicked) {
++    if (mMaxButton && (clicked || before.hot != mMaxButtonTracker.hot ||
++                       before.down != mMaxButtonTracker.down)) {
++        mMaxButton(mMaxButtonTracker.hot, mMaxButtonTracker.down, clicked);
++    }
++}
++
+ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+     MSG* msg = static_cast<MSG*>(message);
+     HWND hwnd = msg->hwnd;
+@@ -223,7 +252,9 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+                     g.buttonsLeft,
+                     maximized ? 0 : devicePixels(g.scale, kBorder),
+                     maximized ? 0 : devicePixels(g.scale, kTopBorder),
+-                    maximized ? 0 : devicePixels(g.scale, kCorner)};
++                    maximized ? 0 : devicePixels(g.scale, kCorner),
++                    g.maxButtonLeft,
++                    g.maxButtonRight};
+             const lw::Hit hit =
+                     lw::hitTest(layout, GET_X_LPARAM(msg->lParam) - visible.left,
+                                 GET_Y_LPARAM(msg->lParam) - visible.top);
+@@ -242,20 +273,80 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             return true;
+         }
+ 
+-        // WM_NCLBUTTONDOWN and WM_NCLBUTTONDBLCLK go on to DefWindowProc: on
+-        // the title bar it activates the window, moves it in the system's
+-        // move loop (which snaps it at the edges of the screen and maximizes
+-        // it at the top) and maximizes or restores it on a double click; on a
+-        // resize band it starts the system's size loop.
++        // The maximize / restore button is HTMAXBUTTON, so the mouse over it
++        // is non-client and the widget gets none of its events: its
++        // highlight and its click are worked out here. None of these go on
++        // to DefWindowProc, which would track the press itself and draw the
++        // system's own caption button over the title bar.
++        case WM_NCMOUSEMOVE: {
++            const lw::MaxButtonTracker before = mMaxButtonTracker;
++            const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
++            mMaxButtonTracker.move(hit);
++            reportMaxButton(before, false);
++            if (hit != lw::Hit::MaxButton) {
++                return false;
++            }
++            // WM_NCMOUSELEAVE once the mouse leaves the non-client part,
++            // onto the other buttons, the guest screen or another window.
++            TRACKMOUSEEVENT track = {};
++            track.cbSize = sizeof(track);
++            track.dwFlags = TME_LEAVE | TME_NONCLIENT;
++            track.hwndTrack = hwnd;
++            TrackMouseEvent(&track);
++            *result = 0;
++            return true;
++        }
++
++        case WM_NCMOUSELEAVE: {
++            const lw::MaxButtonTracker before = mMaxButtonTracker;
++            mMaxButtonTracker.leave();
++            reportMaxButton(before, false);
++            return false;
++        }
++
++        // Otherwise WM_NCLBUTTONDOWN and WM_NCLBUTTONDBLCLK go on to
++        // DefWindowProc: on the title bar it activates the window, moves it
++        // in the system's move loop (which snaps it at the edges of the
++        // screen and maximizes it at the top) and maximizes or restores it on
++        // a double click; on a resize band it starts the system's size loop.
++        case WM_NCLBUTTONDOWN:
++        case WM_NCLBUTTONDBLCLK: {
++            const lw::MaxButtonTracker before = mMaxButtonTracker;
++            const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
++            mMaxButtonTracker.press(hit);
++            reportMaxButton(before, false);
++            if (hit != lw::Hit::MaxButton) {
++                return false;
++            }
++            *result = 0;
++            return true;
++        }
++
++        case WM_NCLBUTTONUP: {
++            const lw::MaxButtonTracker before = mMaxButtonTracker;
++            const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
++            const bool clicked = mMaxButtonTracker.release(hit);
++            reportMaxButton(before, clicked);
++            if (hit != lw::Hit::MaxButton) {
++                return false;
++            }
++            *result = 0;
++            return true;
++        }
+ 
+         case WM_NCRBUTTONDOWN:
+-            if (msg->wParam != HTCAPTION) {
++            if (msg->wParam != HTCAPTION && msg->wParam != HTMAXBUTTON) {
+                 return false;
+             }
+             *result = 0;
+             return true;
+ 
+         case WM_NCRBUTTONUP:
++            if (msg->wParam == HTMAXBUTTON) {
++                // No menu on the button, as on the system's.
++                *result = 0;
++                return true;
++            }
+             if (msg->wParam != HTCAPTION) {
+                 return false;
+             }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+index f089bae23..c4b75bef1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+@@ -29,7 +29,8 @@
+ // bar and which the resize bands, and the system's move and size loops do the
+ // rest. Dragging an edge keeps the guest screen's shape. Maximized or snapped
+ // the window has another shape than the guest screen, which the container
+-// then centers in it.
++// then centers in it. The title bar's maximize / restore button is the
++// system's maximize button to Windows (ModAVD#185).
+ class WindowsLeanFrame {
+ public:
+     struct Geometry {
+@@ -39,6 +40,11 @@ public:
+         // pixels from the top-left corner of the window's visible part.
+         int titleHeight = 0;
+         int buttonsLeft = 0;
++        // The maximize / restore button takes [maxButtonLeft,
++        // maxButtonRight) of the title bar, the same way; none, and the
++        // button is an ordinary client one, while the two are equal.
++        int maxButtonLeft = 0;
++        int maxButtonRight = 0;
+         // The guest screen's width / height; 0 while it is not known.
+         double guestAspect = 0;
+         // The smallest guest screen, in device pixels.
+@@ -57,8 +63,16 @@ public:
+ 
+     // |sizeMoveDone| is called when the system's move or size loop ends: the
+     // window may have been resized, maximized or snapped.
++    //
++    // The maximize / restore button (ModAVD#185) is HTMAXBUTTON to Windows,
++    // so that Windows 11 shows its snap layouts over it, and the mouse over
++    // it is non-client: |maxButton| is called with what the non-client
++    // mouse messages make of it, whether the mouse is over it (|hot|), held
++    // down on it (|down|), and whether it was just clicked (|clicked|).
++    using MaxButtonFn = std::function<void(bool hot, bool down, bool clicked)>;
+     WindowsLeanFrame(std::function<Geometry()> geometry,
+-                     std::function<void()> sizeMoveDone);
++                     std::function<void()> sizeMoveDone,
++                     MaxButtonFn maxButton);
+ 
+     // Gives the native window |wid| its frame: the caption, resizable frame
+     // and maximize box styles, the frame extended into the client area for
+@@ -79,6 +93,13 @@ public:
+     // maximized, or snapped to a part of the screen.
+     static bool heldBySystem(WId wid);
+ 
++    // Whether the window |wid| is maximized; snapped is not.
++    static bool isMaximized(WId wid);
++
++    // Maximizes the window |wid|, or restores it when it is maximized, with
++    // the system command a double click on the title bar gives it.
++    static void toggleMaximized(WId wid);
++
+     // Handles a message (MSG*) of the window. Returns true, with the window
+     // procedure's |result|, when it handled it.
+     bool handleMessage(void* message, qintptr* result);
+@@ -87,7 +108,13 @@ public:
+     bool inSizeMove() const { return mInSizeMove; }
+ 
+ private:
++    // Passes the maximize button's state on, if |clicked| or if it changed.
++    void reportMaxButton(const android::lean_window::MaxButtonTracker& before,
++                         bool clicked);
++
+     std::function<Geometry()> mGeometry;
+     std::function<void()> mSizeMoveDone;
++    MaxButtonFn mMaxButton;
++    android::lean_window::MaxButtonTracker mMaxButtonTracker;
+     bool mInSizeMove = false;
+ };
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index 46081aba6..6479aebca 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -27,6 +27,9 @@ enum class Hit : int {
+     Nowhere = 0,
+     Client = 1,
+     Caption = 2,
++    // The title bar's maximize / restore button (ModAVD#185): Windows 11
++    // shows its snap layouts over it.
++    MaxButton = 9,
+     Left = 10,
+     Right = 11,
+     Top = 12,
+@@ -66,14 +69,51 @@ struct Layout {
+     // How far from a corner, along either edge, the corner's diagonal resize
+     // reaches.
+     int corner;
++    // The maximize / restore button takes [maxButtonLeft, maxButtonRight) of
++    // the title bar, inside the buttons; none while the two are equal.
++    int maxButtonLeft = 0;
++    int maxButtonRight = 0;
+ };
+ 
+ // What is under the point (x, y) of the window: a resize band, the part of the
+-// title bar that moves the window, or the client (the buttons, the guest
+-// screen). The buttons stay clickable except in the bands of the corners and
+-// along the right edge.
++// title bar that moves the window, the maximize / restore button, or the
++// client (the other buttons, the guest screen). The buttons stay clickable
++// except in the bands of the corners and along the right edge.
+ Hit hitTest(const Layout& layout, int x, int y);
+ 
++// The maximize / restore button (ModAVD#185) shows what a click does: maximize
++// the window, or restore a maximized one. A snapped window is not maximized.
++enum class MaxButtonFace { Maximize, Restore };
++MaxButtonFace maxButtonFace(bool maximized);
++
++// The system command a click on the button gives the window, the one a double
++// click on the title bar gives too: SC_RESTORE for a maximized window,
++// SC_MAXIMIZE for any other.
++unsigned maxButtonCommand(bool maximized);
++
++// The button as the window's non-client mouse messages leave it. While the
++// window answers WM_NCHITTEST with HTMAXBUTTON for the button, the mouse over
++// it is non-client to Windows: the widget gets no mouse events, so its
++// highlight and its click come from WM_NCMOUSEMOVE, WM_NCLBUTTONDOWN,
++// WM_NCLBUTTONUP and WM_NCMOUSELEAVE here, each with the hit-test code of
++// the point. Without the mouse captured, a press that leaves the button is
++// given up: a release elsewhere never comes here.
++struct MaxButtonTracker {
++    // The mouse is over the button.
++    bool hot = false;
++    // The left button went down on it and has not been released.
++    bool down = false;
++
++    // WM_NCMOUSEMOVE.
++    void move(Hit hit);
++    // WM_NCLBUTTONDOWN or WM_NCLBUTTONDBLCLK.
++    void press(Hit hit);
++    // WM_NCLBUTTONUP; true when that completes a click on the button.
++    bool release(Hit hit);
++    // WM_NCMOUSELEAVE: the mouse left the non-client part of the window.
++    void leave();
++};
++
+ // Whether |hit| resizes the window.
+ bool isResize(Hit hit);
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index 8da9e6c62..c16a0aaa3 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -19,6 +19,16 @@
+ namespace android {
+ namespace lean_window {
+ 
++namespace {
++
++// A point of the buttons: the maximize / restore button or another one.
++Hit buttonAt(const Layout& l, int x) {
++    return x >= l.maxButtonLeft && x < l.maxButtonRight ? Hit::MaxButton
++                                                        : Hit::Client;
++}
++
++}  // namespace
++
+ Hit hitTest(const Layout& l, int x, int y) {
+     if (x < 0 || y < 0 || x >= l.width || y >= l.height) {
+         return Hit::Nowhere;
+@@ -44,7 +54,7 @@ Hit hitTest(const Layout& l, int x, int y) {
+             return Hit::TopRight;
+         }
+         // The buttons reach up to the top edge.
+-        return x >= l.buttonsLeft ? Hit::Client : Hit::Top;
++        return x >= l.buttonsLeft ? buttonAt(l, x) : Hit::Top;
+     }
+     if (left) {
+         return nearTop ? Hit::TopLeft
+@@ -55,11 +65,44 @@ Hit hitTest(const Layout& l, int x, int y) {
+                        : (nearBottom ? Hit::BottomRight : Hit::Right);
+     }
+     if (y < l.titleHeight) {
+-        return x >= l.buttonsLeft ? Hit::Client : Hit::Caption;
++        return x >= l.buttonsLeft ? buttonAt(l, x) : Hit::Caption;
+     }
+     return Hit::Client;
+ }
+ 
++MaxButtonFace maxButtonFace(bool maximized) {
++    return maximized ? MaxButtonFace::Restore : MaxButtonFace::Maximize;
++}
++
++unsigned maxButtonCommand(bool maximized) {
++    // SC_RESTORE and SC_MAXIMIZE.
++    return maximized ? 0xF120u : 0xF030u;
++}
++
++void MaxButtonTracker::move(Hit hit) {
++    hot = hit == Hit::MaxButton;
++    if (!hot) {
++        down = false;
++    }
++}
++
++void MaxButtonTracker::press(Hit hit) {
++    hot = hit == Hit::MaxButton;
++    down = hot;
++}
++
++bool MaxButtonTracker::release(Hit hit) {
++    const bool clicked = down && hit == Hit::MaxButton;
++    hot = hit == Hit::MaxButton;
++    down = false;
++    return clicked;
++}
++
++void MaxButtonTracker::leave() {
++    hot = false;
++    down = false;
++}
++
+ bool isResize(Hit hit) {
+     return static_cast<int>(hit) >= static_cast<int>(Hit::Left) &&
+            static_cast<int>(hit) <= static_cast<int>(Hit::BottomRight);
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index 88a0ada44..e585f6810 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -289,3 +289,156 @@ TEST(LeanWindowFrame, VisiblePartOfAMaximizedWindow) {
+     EXPECT_EQ(u.left, 3000);
+     EXPECT_EQ(u.right, 3400);
+ }
++
++namespace {
++
++// The title bar with the maximize / restore button (ModAVD#185): back, home,
++// a divider, minimize, maximize and close, 5 x 40 + 9 px; the maximize button
++// takes [640, 680), close [680, 720).
++const lw::Layout kMaxLayout = {/*width=*/720,     /*height=*/1312,
++                               /*titleHeight=*/32, /*buttonsLeft=*/511,
++                               /*border=*/5,       /*topBorder=*/4,
++                               /*corner=*/16,      /*maxButtonLeft=*/640,
++                               /*maxButtonRight=*/680};
++
++Hit maxAt(int x, int y) {
++    return lw::hitTest(kMaxLayout, x, y);
++}
++
++}  // namespace
++
++TEST(LeanWindowFrame, HitTestMaxButton) {
++    EXPECT_EQ(maxAt(640, 16), Hit::MaxButton);  // first pixel
++    EXPECT_EQ(maxAt(679, 16), Hit::MaxButton);  // last pixel
++    EXPECT_EQ(maxAt(639, 16), Hit::Client);     // minimize
++    EXPECT_EQ(maxAt(680, 16), Hit::Client);     // close
++    EXPECT_EQ(maxAt(660, 31), Hit::MaxButton);  // bottom row of the title bar
++    EXPECT_EQ(maxAt(660, 32), Hit::Client);     // guest screen below
++    EXPECT_EQ(maxAt(510, 16), Hit::Caption);
++    EXPECT_EQ(maxAt(511, 16), Hit::Client);     // back
++}
++
++TEST(LeanWindowFrame, HitTestMaxButtonUpToTheTopEdge) {
++    // Like the other buttons it reaches the top edge, over the top band.
++    EXPECT_EQ(maxAt(660, 0), Hit::MaxButton);
++    EXPECT_EQ(maxAt(660, 3), Hit::MaxButton);
++    EXPECT_EQ(maxAt(600, 0), Hit::Client);
++    EXPECT_EQ(maxAt(100, 0), Hit::Top);
++}
++
++TEST(LeanWindowFrame, HitTestMaxButtonKeepsTheBands) {
++    // A narrow window whose button runs into the right corner: the corner
++    // and the right edge still resize.
++    lw::Layout l = kMaxLayout;
++    l.maxButtonLeft = 690;
++    l.maxButtonRight = 720;
++    EXPECT_EQ(lw::hitTest(l, 719, 16), Hit::Right);
++    EXPECT_EQ(lw::hitTest(l, 710, 2), Hit::TopRight);
++    EXPECT_EQ(lw::hitTest(l, 700, 2), Hit::MaxButton);
++    EXPECT_EQ(lw::hitTest(l, 700, 20), Hit::MaxButton);
++}
++
++TEST(LeanWindowFrame, HitTestWithoutMaxButton) {
++    // An empty range (the button disabled or hidden): all of the buttons are
++    // client, as before.
++    lw::Layout l = kMaxLayout;
++    l.maxButtonLeft = 0;
++    l.maxButtonRight = 0;
++    for (int x : {511, 600, 640, 660, 679, 700}) {
++        EXPECT_EQ(lw::hitTest(l, x, 16), Hit::Client) << x;
++    }
++    EXPECT_EQ(lw::hitTest(l, 0, 16), Hit::Left);
++    EXPECT_EQ(lw::hitTest(l, 100, 16), Hit::Caption);
++    // A layout without the two fields has no button either.
++    EXPECT_EQ(at(660, 16), Hit::Client);
++}
++
++TEST(LeanWindowFrame, HitTestMaxButtonMaximized) {
++    // Maximized at 150%: no bands, the button reaches the top edge and the
++    // range is in device pixels like the rest.
++    const lw::Layout l = {1920, 1032, 48, 1607, 0, 0, 0, 1800, 1860};
++    EXPECT_EQ(lw::hitTest(l, 1800, 0), Hit::MaxButton);
++    EXPECT_EQ(lw::hitTest(l, 1859, 47), Hit::MaxButton);
++    EXPECT_EQ(lw::hitTest(l, 1860, 0), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 1799, 0), Hit::Client);
++    EXPECT_EQ(lw::hitTest(l, 1830, 48), Hit::Client);
++}
++
++TEST(LeanWindowFrame, MaxButtonIsNotAResize) {
++    EXPECT_FALSE(lw::isResize(Hit::MaxButton));
++    EXPECT_EQ(static_cast<int>(Hit::MaxButton), 9);  // HTMAXBUTTON
++}
++
++TEST(LeanWindowFrame, MaxButtonFace) {
++    EXPECT_EQ(lw::maxButtonFace(false), lw::MaxButtonFace::Maximize);
++    EXPECT_EQ(lw::maxButtonFace(true), lw::MaxButtonFace::Restore);
++}
++
++TEST(LeanWindowFrame, MaxButtonCommand) {
++    EXPECT_EQ(lw::maxButtonCommand(false), 0xF030u);  // SC_MAXIMIZE
++    EXPECT_EQ(lw::maxButtonCommand(true), 0xF120u);   // SC_RESTORE
++}
++
++TEST(LeanWindowFrame, MaxButtonTrackerClick) {
++    lw::MaxButtonTracker t;
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(t.down);
++    t.move(Hit::MaxButton);
++    EXPECT_TRUE(t.hot);
++    EXPECT_FALSE(t.down);
++    t.press(Hit::MaxButton);
++    EXPECT_TRUE(t.hot);
++    EXPECT_TRUE(t.down);
++    EXPECT_TRUE(t.release(Hit::MaxButton));
++    EXPECT_TRUE(t.hot);  // still over it
++    EXPECT_FALSE(t.down);
++    // A second release is no second click.
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++}
++
++TEST(LeanWindowFrame, MaxButtonTrackerReleaseWithoutPress) {
++    lw::MaxButtonTracker t;
++    t.move(Hit::MaxButton);
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++    // Pressed on the title bar, released over the button.
++    t.press(Hit::Caption);
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(t.down);
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++}
++
++TEST(LeanWindowFrame, MaxButtonTrackerPressLeavesTheButton) {
++    // Moved off the button while pressed: the press is given up, also when
++    // the mouse comes back before the release.
++    lw::MaxButtonTracker t;
++    t.press(Hit::MaxButton);
++    t.move(Hit::Caption);
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(t.down);
++    t.move(Hit::MaxButton);
++    EXPECT_TRUE(t.hot);
++    EXPECT_FALSE(t.down);
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++
++    t.press(Hit::MaxButton);
++    t.leave();  // onto another button, which is client area
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(t.down);
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++
++    t.press(Hit::MaxButton);
++    EXPECT_FALSE(t.release(Hit::Caption));
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(t.down);
++}
++
++TEST(LeanWindowFrame, MaxButtonTrackerDoubleClick) {
++    // The second press of a double click comes as WM_NCLBUTTONDBLCLK, also a
++    // press: two clicks, maximized and restored again, as with the system's
++    // button.
++    lw::MaxButtonTracker t;
++    t.press(Hit::MaxButton);
++    EXPECT_TRUE(t.release(Hit::MaxButton));
++    t.press(Hit::MaxButton);
++    EXPECT_TRUE(t.release(Hit::MaxButton));
++}

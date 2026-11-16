@@ -4,6 +4,7 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 版本 | qemu | gfxstream | Crashpad |
 | --- | --- | --- | --- |
+| 0.41.0（`Pkg.BuildId=mas-41`） | qemu/mas41 | gfxstream/mas41 | crashpad/module-version22 |
 | 0.40.0（`Pkg.BuildId=mas-40`） | qemu/mas40 | gfxstream/mas38 | crashpad/module-version22 |
 | 0.39.0（`Pkg.BuildId=mas-39`；0.39.1 相同） | qemu/mas39 | gfxstream/mas38 | crashpad/module-version22 |
 | 0.38.0（`Pkg.BuildId=mas-38`；0.38.1、0.38.2 相同） | qemu/mas38 | gfxstream/mas38 | crashpad/module-version22 |
@@ -15,6 +16,7 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 目录 | AOSP 仓库 | 基准（AOSP 公开提交） | 补丁数 | 回放后的树 = 编译时分支头 | 许可证 |
 | --- | --- | --- | --- | --- | --- |
+| `qemu/mas41` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 105 | `60c619f9ecfe01ccde23907b04d92bdb3fb7643e` | 按所改文件，见下文：73 个 GPL-2.0，20 个 Apache-2.0，12 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas40` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 101 | `5d99d72b2b08f35249d66d929ee4277accd533f7` | 按所改文件，见下文：71 个 GPL-2.0，19 个 Apache-2.0，11 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas39` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 98 | `ac8b73bd8bb327cf875f4570d0c644825bc16eef` | 按所改文件，见下文：71 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas38` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 95 | `caab5653c46bdf480a5eb1dac15816bd00014711` | 按所改文件，见下文：68 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
@@ -23,12 +25,16 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 | `qemu/mas35` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 60 | `a1e36334f096ce5268a7df2b750f1a4a09b83c52` | 按所改文件，见下文：43 个 GPL-2.0，11 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
 | `qemu/mas32` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 57 | `bc694d86d778732785a75364479fc03fad0250bc` | 按所改文件，见下文：42 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
 | `qemu/fixq30` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 55 | `5aedc70819651ef386cef810afa6c2be3c028467` | 按所改文件，见下文：40 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
+| `gfxstream/mas41` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 43 | `32813e91da98b992967b78496b895f69e96a4bf3` | Apache-2.0 |
 | `gfxstream/mas38` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 42 | `eb1565574a7ab64457ae0f6794ad0cb6a8b76726` | Apache-2.0 |
 | `gfxstream/mas37` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 25 | `2afcb7b95a3011a3858ce0b813b215e0be21c1be` | Apache-2.0 |
 | `gfxstream/mas35` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 23 | `28437bb6c4b3fdef705d1919813467af465a718d` | Apache-2.0 |
 | `gfxstream/fixq28` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 22 | `d027890c4799a8537ce1e981fec784a99a269ade` | Apache-2.0 |
 | `crashpad/module-version22` | `platform/external/crashpad` | `dd7db6790d73210abaef36a04f2a2bd52cf22b89` | 1 | `377d2d398368c38d43f4ecbca084c89a68c10530` | Apache-2.0 |
 
+- `qemu/mas41` 的 0001–0101 与 `qemu/mas40` 是同一批提交（补丁文件头里的序号不同），0102–0105 是 mas-41 新增的：控制台命令 `event key <linux 键码> <0|1>`，按下、抬起模拟器键盘上的一个键（0102），截图共享没开起来时不再去注销没登记过的回调（0103），`screenrecord webrtc start` 失败时控制台回 KO、不让调用方空等（0104），精简窗口的标题栏加最大化 / 还原按钮（0105）。
+- `gfxstream/mas41` 的 0001–0042 与 `gfxstream/mas38` 是同一批提交（补丁文件头里的序号不同），0043 是 mas-41 新增的：去掉一个 display 的回读回调时，这个 display 没登记过回调或回读线程没起来就直接返回，不再等一个不会来的应答（0043）。
+- 0.41.0 的 Crashpad 补丁和已发布的 `crashpad/module-version22` 是同一批提交（基准、分支头都相同），沿用这个目录；mas-41 清单注释里写的也是这个目录。
 - `qemu/mas40` 的 0001–0098 与 `qemu/mas39` 是同一批提交（补丁文件头里的序号不同），0099–0101 是 mas-40 新增的：带窗口的实例点标题栏就激活窗口、回到最前（0099），放开系统的最大化和贴边吸附、比例对不上时画面居中留黑边（0100），无头实例在 Windows 注销、重启、关机时先 sync、再让安卓关机，带窗口和无头共用抽出来的安全关机流程（0101）。
 - 0.40.0 的 gfxstream 补丁和已发布的 `gfxstream/mas38` 是同一批提交（基准、分支头都相同），沿用这个目录；mas-40 清单注释里写的也是这个目录。
 - 0.40.0 的 Crashpad 补丁和已发布的 `crashpad/module-version22` 是同一批提交（基准、分支头都相同），沿用这个目录；mas-40 清单注释里写的也是这个目录。
@@ -61,19 +67,19 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 
 | 许可证 | 补丁 |
 | --- | --- |
-| Apache-2.0 | 0002、0003、0008、0012、0036、0038、0042、0043、0050、0051、0052；mas36–mas40：0061、0064（只改 `android/third_party/ext4_utils/src/` 下的 `make_ext4fs.c`、`indirect.c`）；mas37–mas40：0068（只改 `ModavdImePipe.h`、`ModavdImePipe.cpp`）；mas38–mas40：0092–0095（只改 `android/emu/media/src/android/emulation/` 下的 `MediaVpxDecoderGeneric`、`MediaH264Decoder*`、`MediaHevcDecoderDefault`、`MediaTexturePool`、`MediaVpxDecoder`、`MediaSnapshotState`）；mas40：0099（只改 `windows-lean-frame.cpp`） |
-| 两者都有，按文件分 | 0005、0014（`EmulatorService.cpp` 为 Apache-2.0，`SharedMemory_win32.cpp` 为 GPL-2.0）；0016（`android-qemu2-glue/netsim/libslirp_driver.cpp` 为 Apache-2.0，`util/main-loop.c` 为 GPL-2.0）；0039（`CrashSytemInit.cpp` 为 Apache-2.0，`CrashUploadTool.cpp`、`CrashUploader.cpp` 为 GPL-2.0）；mas35–mas40：0058（新文件 `ModavdImePipe.h`、`ModavdImePipe.cpp` 为 Apache-2.0，`qemu-setup.cpp` 为 GPL-2.0，`android/emu/hardware/CMakeLists.txt` 没有文件头），0060（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`shortcut-key-store` 为 GPL-2.0）；mas38–mas40：0083（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`tool-window` 为 GPL-2.0），0086（新文件 `lean-title-bar`、`windows-lean-frame`、`instance-window-title`、`lean-window-frame` 及其单元测试为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`windows-native-window`、`winsys-qt.cpp`、`winsys-headless.cpp`、`emulator-window.c`、`skin/window.c`、`skin/winsys.h` 为 GPL-2.0，两个 `CMakeLists.txt` 没有文件头），0088（`emulator-container.cpp` 为 GPL-2.0，`windows-lean-frame`、`lean-window-frame` 及其单元测试为 Apache-2.0）；mas40：0100（`emulator-container`、`emulator-qt-window`、`tool-window.cpp` 为 GPL-2.0，`windows-lean-frame`、`lean-window-frame` 及其单元测试为 Apache-2.0），0101（新文件 `emulator-safe-shutdown`、`headless-session-end.cpp`、`safe-shutdown` 及其单元测试为 Apache-2.0，`winsys-headless.cpp`、`emulator-qt-window` 为 GPL-2.0，三个 `CMakeLists.txt` 没有文件头） |
-| GPL-2.0 | 其余的：qemu/fixq30 有 40 个，qemu/mas32 有 42 个（含 0055 的代码部分，见下；0056、0057 只改 `block/file-win32.c`），qemu/mas35 有 43 个（多出的 0059 只改 `console.cpp`），qemu/mas36 有 46 个（又多出 0062 `main-common.c`、0063 `android-qemu2-glue/main.cpp`、0065 `util/aio-win32.c`），qemu/mas37 有 60 个（又多出 0066 `block/file-win32.c`、0067 `android-qemu2-glue/main.cpp`，以及 0069–0080，只改 `android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/` 下带 GPL-2.0 文件头的 `emulator-qt-window`、`emulator-container`、`tool-window`、`windows-native-window`），qemu/mas38 有 68 个（又多出 0081、0082、0084、0087 只改 `skin/qt/` 下带 GPL-2.0 文件头的 `emulator-qt-window`、`emulator-container`，0085 `emulator-window.c`，0089、0090 `android/android-emu/android/opengles.cpp`，0091 `android-qemu2-glue/main.cpp`），qemu/mas39 有 71 个（又多出 0096 只改 `android-qemu2-glue/main.cpp` 和带 GPL-2.0 文件头的 `android/android-emu-base/android/utils/tempfile.c`、`tempfile.h`，0097、0098 只改 `block/file-win32.c`），qemu/mas40 也是 71 个（新增的 0099–0101 都不只改 GPL-2.0 文件） |
+| Apache-2.0 | 0002、0003、0008、0012、0036、0038、0042、0043、0050、0051、0052；mas36–mas41：0061、0064（只改 `android/third_party/ext4_utils/src/` 下的 `make_ext4fs.c`、`indirect.c`）；mas37–mas41：0068（只改 `ModavdImePipe.h`、`ModavdImePipe.cpp`）；mas38–mas41：0092–0095（只改 `android/emu/media/src/android/emulation/` 下的 `MediaVpxDecoderGeneric`、`MediaH264Decoder*`、`MediaHevcDecoderDefault`、`MediaTexturePool`、`MediaVpxDecoder`、`MediaSnapshotState`）；mas40–mas41：0099（只改 `windows-lean-frame.cpp`）；mas41：0103（只改 `VideoFrameSharer.cpp`、`VideoFrameSharer.h`） |
+| 两者都有，按文件分 | 0005、0014（`EmulatorService.cpp` 为 Apache-2.0，`SharedMemory_win32.cpp` 为 GPL-2.0）；0016（`android-qemu2-glue/netsim/libslirp_driver.cpp` 为 Apache-2.0，`util/main-loop.c` 为 GPL-2.0）；0039（`CrashSytemInit.cpp` 为 Apache-2.0，`CrashUploadTool.cpp`、`CrashUploader.cpp` 为 GPL-2.0）；mas35–mas41：0058（新文件 `ModavdImePipe.h`、`ModavdImePipe.cpp` 为 Apache-2.0，`qemu-setup.cpp` 为 GPL-2.0，`android/emu/hardware/CMakeLists.txt` 没有文件头），0060（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`shortcut-key-store` 为 GPL-2.0）；mas38–mas41：0083（`native-event-filter-factory.cpp` 为 Apache-2.0，`emulator-qt-window`、`tool-window` 为 GPL-2.0），0086（新文件 `lean-title-bar`、`windows-lean-frame`、`instance-window-title`、`lean-window-frame` 及其单元测试为 Apache-2.0，`emulator-qt-window`、`emulator-container`、`tool-window`、`windows-native-window`、`winsys-qt.cpp`、`winsys-headless.cpp`、`emulator-window.c`、`skin/window.c`、`skin/winsys.h` 为 GPL-2.0，两个 `CMakeLists.txt` 没有文件头），0088（`emulator-container.cpp` 为 GPL-2.0，`windows-lean-frame`、`lean-window-frame` 及其单元测试为 Apache-2.0）；mas40–mas41：0100（`emulator-container`、`emulator-qt-window`、`tool-window.cpp` 为 GPL-2.0，`windows-lean-frame`、`lean-window-frame` 及其单元测试为 Apache-2.0），0101（新文件 `emulator-safe-shutdown`、`headless-session-end.cpp`、`safe-shutdown` 及其单元测试为 Apache-2.0，`winsys-headless.cpp`、`emulator-qt-window` 为 GPL-2.0，三个 `CMakeLists.txt` 没有文件头）；mas41：0105（`emulator-container`、`tool-window.cpp`、`resources.qrc` 为 GPL-2.0，`lean-title-bar`、`windows-lean-frame`、`lean-window-frame` 及其单元测试为 Apache-2.0，两个新图标 `ic_window_maximize_white_48dp.svg`、`ic_window_restore_white_48dp.svg` 没有文件头） |
+| GPL-2.0 | 其余的：qemu/fixq30 有 40 个，qemu/mas32 有 42 个（含 0055 的代码部分，见下；0056、0057 只改 `block/file-win32.c`），qemu/mas35 有 43 个（多出的 0059 只改 `console.cpp`），qemu/mas36 有 46 个（又多出 0062 `main-common.c`、0063 `android-qemu2-glue/main.cpp`、0065 `util/aio-win32.c`），qemu/mas37 有 60 个（又多出 0066 `block/file-win32.c`、0067 `android-qemu2-glue/main.cpp`，以及 0069–0080，只改 `android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/` 下带 GPL-2.0 文件头的 `emulator-qt-window`、`emulator-container`、`tool-window`、`windows-native-window`），qemu/mas38 有 68 个（又多出 0081、0082、0084、0087 只改 `skin/qt/` 下带 GPL-2.0 文件头的 `emulator-qt-window`、`emulator-container`，0085 `emulator-window.c`，0089、0090 `android/android-emu/android/opengles.cpp`，0091 `android-qemu2-glue/main.cpp`），qemu/mas39 有 71 个（又多出 0096 只改 `android-qemu2-glue/main.cpp` 和带 GPL-2.0 文件头的 `android/android-emu-base/android/utils/tempfile.c`、`tempfile.h`，0097、0098 只改 `block/file-win32.c`），qemu/mas40 也是 71 个（新增的 0099–0101 都不只改 GPL-2.0 文件），qemu/mas41 有 73 个（又多出 0102、0104，只改 `android/android-emu/android/console.cpp`） |
 
-这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0054 按 `fac53907`，0055 按 `5aedc708`，0056–0057 按 `bc694d86`，0058–0060 按 `a1e36334`，0061–0065 按 `a46fc099`，0066–0080 按 `3419edeb`，0081–0095 按 `caab5653`，0096–0098 按 `ac8b73bd`，0099–0101 按 `5d99d72b`）。
+这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0054 按 `fac53907`，0055 按 `5aedc708`，0056–0057 按 `bc694d86`，0058–0060 按 `a1e36334`，0061–0065 按 `a46fc099`，0066–0080 按 `3419edeb`，0081–0095 按 `caab5653`，0096–0098 按 `ac8b73bd`，0099–0101 按 `5d99d72b`，0102–0105 按 `60c619f9`）。
 
 **0055（换成 ModAVD 图标）**：改的是顶层 `CMakeLists.txt`（没有文件头，按仓库 `LICENSE` 属 GPL-2.0 或更新版本）和 `android/android-ui/modules/aemu-ui-window/include/android/icons.h`（GPL-2.0 文件头），这些代码改动按 GPL-2.0。补丁里的图片——`android/images/emulator_icon.ico`、`emulator_icon_32/128/256.png`，以及 `icons.h` 里由这些图片转成的数据——是 ModAVD 自己的图标；**这些图片不随 GPL-2.0 或 Apache-2.0 授权**，见仓库 README 的「图标与美术」。
 
-回放示例（以 mas-40 的 qemu 为例）：
+回放示例（以 mas-41 的 qemu 为例）：
 
 ```sh
 git clone https://android.googlesource.com/platform/external/qemu
 cd qemu
-git checkout -b mas40 f0c183f1cc7456ecd6f3607f2f47893768ae4334
-git am --keep-cr ../patches/qemu/mas40/*.patch
+git checkout -b mas41 f0c183f1cc7456ecd6f3607f2f47893768ae4334
+git am --keep-cr ../patches/qemu/mas41/*.patch
 ```

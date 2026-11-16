@@ -1,0 +1,62 @@
+From a82b8002e001e32034a1d79e67862574aaf95c1e Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 14 Nov 2026 19:45:26 +0100
+Subject: [PATCH 103/105] recording: do not stop a frame sharer that never
+ started
+
+When the shared memory for frame sharing cannot be created (on Windows,
+for example, because another process still holds a smaller mapping of
+the same name from an earlier session at a lower resolution),
+start_shared_memory_module destroys the sharer right away. Its
+destructor called stop(), which unregistered a callback that was never
+registered: the record counter dropped to -1 and the renderer was asked
+to remove a recording that never existed. The renderer waited for its
+readback thread, which had never been started, so the console command
+hung the main loop forever and the hang detector killed the emulator.
+
+Only undo what start() did.
+
+Refs ModAVD/ModAVD#210
+
+Change-Id: I7df29ea0a3133782122aae3fa89bfd81c6999c1e
+---
+ .../src/android/recording/video/VideoFrameSharer.cpp     | 9 +++++++++
+ .../src/android/recording/video/VideoFrameSharer.h       | 2 ++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.cpp b/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.cpp
+index 6ac482829..c648d66e5 100644
+--- a/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.cpp
++++ b/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.cpp
+@@ -87,9 +87,18 @@ void VideoFrameSharer::frameCallbackForwarder(void* opaque) {
+ 
+ void VideoFrameSharer::start() {
+     gpu_register_shared_memory_callback(&VideoFrameSharer::frameCallbackForwarder, this);
++    mStarted = true;
+ }
+ 
+ void VideoFrameSharer::stop() {
++    // A sharer whose initialize() failed is destroyed without ever starting.
++    // Unregistering then would drop the record counter below zero and ask the
++    // renderer to tear down a recording that never existed, which blocks the
++    // caller (the main loop) forever.
++    if (!mStarted) {
++        return;
++    }
++    mStarted = false;
+     gpu_unregister_shared_memory_callback(this);
+ }
+ 
+diff --git a/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.h b/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.h
+index 8c3dccaa9..19fd59c24 100644
+--- a/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.h
++++ b/android/android-ui/modules/aemu-recording/src/android/recording/video/VideoFrameSharer.h
+@@ -78,6 +78,8 @@ private:
+     ReadPixelsFunc mReadPixels;
+     std::unique_ptr<Producer> mVideoProducer;
+     size_t mPixelBufferSize;
++    // start() registered the frame callback; stop() only undoes a real start.
++    bool mStarted = false;
+ 
+     static std::atomic<uint64_t> sFrameCounter;
+ };
