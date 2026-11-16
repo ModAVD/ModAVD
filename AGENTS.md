@@ -13,6 +13,7 @@
 - 管理器、命令行在 ModAVDManager，宿主输入法在 ModAVDHostIME，发版前回归在 ModAVDE2E，改那些去对应的仓库；issue 不分组件，都开在本仓库。
 - workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner；`mirrorchyan_*.yml` 照原样保留。
 - 本机路径不写进仓库，用参数或本机配置（见 `tools/README.md`）。
+- 用户看得见的改动，同一个 PR 里加一个 `changelog.d/<名字>.<feat|fix|change|remove>.md`，一行给用户看的话（见 `changelog.d/README.md`）；只动开发、测试、CI、文档的不加。
 
 ## 交之前自己测
 

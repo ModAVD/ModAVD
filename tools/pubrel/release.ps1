@@ -50,7 +50,6 @@ param(
     # the same release/<version>.SHA256SUMS.txt must list both.
     [string]$MumuShim = '',
     [string]$ExtrasRepo,
-    [string]$Changes = (Join-Path $PSScriptRoot 'config\changes.md'),
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
     [string]$Snapshot,
     # privacy-private-rules.json, kept outside this repository (PrivateRules, else MODAVD_PRIVATE_RULES): the release
@@ -146,7 +145,7 @@ function Step([int]$StepNumber, [string]$Title, [scriptblock]$Action) {
 # preflight validates the SDK, version, release texts, immutable baseline assets, the license package (AGPL-3.0 full text),
 # disk budget and snapshot before any deletion.
 if (-not $Snapshot) { $Snapshot = Join-Path $Sdk 'build-info.json' }
-$texts = @('--patch', $Patch) + $versionArgs + @('--changes', $Changes, '--changelog', $Changelog)
+$texts = @('--patch', $Patch) + $versionArgs + @('--changelog', $Changelog)
 $componentArgs = @(if ($ImeApk) { '--ime-apk', $ImeApk, '--ime-repo', $ImeRepo })
 if ($ExtrasDll) { $componentArgs += @('--extras-dll', $ExtrasDll, '--extras-repo', $ExtrasRepo) }
 if ($MumuShim) { $componentArgs += @('--mumu-shim', $MumuShim) }
