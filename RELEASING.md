@@ -6,9 +6,10 @@
 ## 版本号
 
 版本号 `0.<N>.<P>` 用 `release.ps1 -Version` 给：0 表示内测阶段；模拟器本体重新编译才加 N，模拟器没重编（只换管理器、截图库、输入法等，或只重新打包）只加 P，比如 0.40.1 之后只换了管理器和截图库就发 0.40.2。
+管理器、截图库、输入法从 0.41.0 的下一版起跟整包走（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：这一版重新打包了，版本号就取这一版的版本号；没重新打包的不动。比如 0.42.3 只重新编译了管理器，管理器就是 0.42.3，截图库还是 0.42.0。
 模拟器构建号照旧是 mas-N（`source.properties` 的 `Pkg.BuildId=mas-N`），不要求等于 N，只记在 `modavd-manifest.json` 和公告机读行的 `build` 里；公告、标题和 PR 里不写构建号。
 0.40.0 带的管理器 0.8.0 装包时还要求版本中间那位等于构建号，所以 0.40.0 之后先发 0.40.1（mas-40，带不再要这个对应的管理器 0.9.0）；装了 0.40.1 以后的根目录才能用「更新」装上版本号和构建号对不上的包。
-tag 是 `v0.<N>.<P>`，标题是 `ModAVD 0.<N>.<P>`；Release 说明第一句写明构建号和基于的 Google AOSP Android Emulator 版本。
+tag 是 `v0.<N>.<P>`，标题是 `ModAVD 0.<N>.<P>`；Release 说明第一句写明基于的 Google AOSP Android Emulator 版本和包里各组件的版本。
 0.32.1 到 0.40 是旧规矩：N 就是构建号，P 是不重编、只重新打包的次数，标题 `ModAVD mas-<N>（0.<N>.<P>）`。
 mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.32.1` 是 mas32 原样重新打包成新格式。
 
@@ -32,10 +33,11 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 - [ ] 确定构建号、已提交的待编译源码、对应 manifest、补丁基准及第三方组件来源。更新许可证声明。
 - [ ] 先预览构建命令，再另行安排实际构建：`pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build mas34 -WhatIf`。实际构建去掉 `-WhatIf`，并行度最多 16；目标 SDK 已存在时停止。
 - [ ] 确认 SDK 中 `source.properties` 的 `Pkg.BuildId=mas-34`，并保留构建入口生成的 `build-info.json`。
-- [ ] **在测试机上跑回归**：启动/关机、WHPX、GLES/GuestAngle、MAA/MaaFW 共享内存截图与点击、已有游戏及相关修复；记录结果。运行器和套件在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)，改了什么跑什么（`-Scope`），先 `-DryRun` 看会跑哪些项；结果表 `results.md` 直接贴进 `changes.md` 的「发布前回归」。计划内关闭实例先执行 `adb -P <独立端口> -s emulator-<实例端口> shell sync`，再 `emu kill`。
-- [ ] 回归跑完后填写 `tools/pubrel/config/changes.md`（怎么更新、AUTO-MAS 版本、已知问题、发布前回归四节）和 `tools/pubrel/config/changelog.json`（最前面加本版一条：最低 AUTO-MAS 版本和按分类的一句话改动）。
-- [ ] 写的时候就看长度：`python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK根目录>]` 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 版的改动）和分隔行以上的公告（限 4000 字）各多长，超了就报错，过了 90% 会提醒。`release.ps1` 的预检也查这一项，不用等到第 7 步。
-- [ ] Release 说明的「已知问题」**每条对应一个本仓库 issue，并在说明中链接过去**；新增问题先建 issue。mas30 已对应 [#1](https://github.com/ModAVD/ModAVD/issues/1)、[#2](https://github.com/ModAVD/ModAVD/issues/2)、[#3](https://github.com/ModAVD/ModAVD/issues/3)、[#4](https://github.com/ModAVD/ModAVD/issues/4)。
+- [ ] **在测试机上跑回归**：启动/关机、WHPX、GLES/GuestAngle、MAA/MaaFW 共享内存截图与点击、已有游戏及相关修复；记录结果。运行器和套件在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)，改了什么跑什么（`-Scope`），先 `-DryRun` 看会跑哪些项；结果表 `results.md` 自己留着，不进 Release 说明。计划内关闭实例先执行 `adb -P <独立端口> -s emulator-<实例端口> shell sync`，再 `emu kill`。
+- [ ] 「更新内容」不手写，从各 PR 带的说明文件汇总：`pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build mas34 -Version <版本>` 把四个仓库 `changelog.d` 里上一版以后新加的文件每个写成一条，进 `tools/pubrel/config/changelog.json` 最前面本版那一条。它同时列出没带说明文件的提交，过一眼有没有漏的；漏了就补一个文件再跑。用法见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版」。
+- [ ] 这一版重新打包的组件，版本号设成这一版的版本号，`release/<版本>.md` 用 `release_tools.py component-notes` 生成。
+- [ ] 汇总完看长度：`python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK根目录>]` 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 版的改动）和分隔行以上的公告（限 4000 字）各多长，超了就报错，过了 90% 会提醒。`release.ps1` 的预检也查这一项，不用等到第 7 步。
+- [ ] 怎么更新、已知问题不写进 Release 说明：新发现的问题建 issue、打上 `bug`；这一版有要用户动手的事（比如更新前要先关实例），用 `collect-changelog.ps1 -Note` 写成一条「说明」。
 
 ## 生成和核对
 
@@ -56,7 +58,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
    输出的 `patches/series.json`、`patches/BASE.md` 是发版克隆里那两份加上这一版：和已发布的系列基准、分支头都相同的，沿用已发布的目录（导出放到 `work/patches-reused/`，不进 `patches/`）；其余的是新目录，在 `series.json` 最前面加一条，`BASE.md` 的版本表、目录表各加一行、目录表下面加一句说明。新补丁的许可证、做了什么只能人写，留成「发布前填写」，`checks.py metadata` 见到就失败。`logs/patch-dirs.json` 记每个仓库用哪个目录、是不是新的。
 5. **源码总包与清单**：没变的源码文件逐个验哈希后复用，只给变化的源项目重新归档。用 `7z a -tzip -mx0 -mcu=on` 生成和平台无关的 `ModAVD-0.34.0-sources.zip`，外层文件夹同名；包括对应源码、`SOURCES.txt`、两份 manifest 和包内的 `SHA256SUMS.txt`。清单同时同步到本仓库 `manifests/`，不再分别上传附件。
 6. **两层校验表**：包内那份只列逐个源码文件，排除自身；外层 `SHA256SUMS.txt` **只列主包和源码总包这两行**。
-7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、`changelog.json` 最前面最多 10 版的改动摘要）；接着是更新公告（更新内容、怎么更新、AUTO-MAS 版本、已知问题）；然后一行 `<!-- modavd:github-only -->`；以下是回归结果、两个 ZIP 的字节数和 SHA-256、源码包的文件数和总大小。逐个源码文件的 SHA-256 不进说明，见源码包内和本仓库 `release/` 的 `<版本>.sources.SHA256SUMS.txt`。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
+7. **Release 说明**：第一行是机读注释（版本、构建号、上游版本、最低 AUTO-MAS 版本、`changelog.json` 最前面最多 10 版的改动摘要）；接着是更新公告（一行各组件的版本，和从各 PR 的说明文件汇总的更新内容）；然后一行 `<!-- modavd:github-only -->`；以下是两个 ZIP 的字节数和 SHA-256、源码包的文件数和总大小。逐个源码文件的 SHA-256 不进说明，见源码包内和本仓库 `release/` 的 `<版本>.sources.SHA256SUMS.txt`。分隔行以上会同步到 Mirror 酱、在 AUTO-MAS 里显示，限 4000 字，不放哈希。
 8. **隐私**：主包、补丁、全部源码成员及发布元数据均须通过，用 `scripts/privacy.py` 的通用规则加上维护者仓库外的私有规则（`-PrivateRules`，没加载到就停）；通用规则也在仓库 CI 中运行。新命中要核对来源，白名单固定具体文件/内容，不按姓氏全局放行。报告必须是 0 失败。上次扫过干净、内容没变的文件按本机缓存跳过（扫描器或规则一变就全部重扫，`-NoPrivacyCache` 强制全扫）；带 `-DraftRelease` 真要上传的那一轮不读缓存、全部重扫，扫完照样写缓存。见 [tools/pubrel/README.md](tools/pubrel/README.md)「共享校验与隐私规则」。
 
 - [ ] 把输出 `patches/` 下的新目录和 `BASE.md`、`series.json`（直接覆盖仓库里的，它们就是在仓库那两份上加的）、manifest，以及生成的 Release 说明纳入待审核的发版提交；填完 `BASE.md` 里的「发布前填写」（新补丁按所改文件归许可证、写清新增了什么）；核对 `series.json` 中的基准、数量和树。

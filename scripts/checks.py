@@ -17,7 +17,7 @@ CATEGORIES = ("新增", "变更", "修复", "移除", "说明")
 MACHINE_VERSIONS = 10
 MAX_ANNOUNCEMENT_CHARS = 4000
 MAX_MACHINE_CHARS = 8000
-# What the release tools leave where only a person can fill in (changes.md, and the new rows release_tools.py adds to
+# What the release tools leave where only a person can fill in (the new rows release_tools.py adds to
 # patches/BASE.md); the metadata check refuses it, so a release commit cannot go in unfilled.
 PLACEHOLDER = "发布前填写"
 MANIFEST = "modavd-manifest.json"
@@ -129,6 +129,49 @@ def check_changes(changes):
             for item in items:
                 if not isinstance(item, str) or not item.strip() or "\n" in item or "\r" in item or "--" in item:
                     raise ValueError(f"{version}: items must be non-empty single lines without '--': {item!r}")
+
+
+# changelog.d/<name>.<type>.md: one line that tells users what a pull request changes, added by that pull request.
+# The release tools collect the files added since the previous release into the release's 更新内容
+# (tools/pubrel/release_tools.py changelog-collect); the type is the category.
+FRAGMENT_DIR = "changelog.d"
+FRAGMENT_README = "README.md"
+FRAGMENT_TYPES = {"feat": "新增", "fix": "修复", "change": "变更", "remove": "移除"}
+FRAGMENT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\.(" + "|".join(FRAGMENT_TYPES) + r")\.md")
+# An issue or pull request the line names itself, at its end: (#185), (ModAVD/ModAVDManager#168).
+FRAGMENT_REF = re.compile(r"\s*[（(](?:ModAVD/[A-Za-z0-9]+)?#[1-9][0-9]*[)）]$")
+MAX_FRAGMENT_CHARS = 60
+
+
+def fragment_item(name, data):
+    """(category, line) of the changelog.d file `name` with the bytes `data`: UTF-8, one line of at most
+    MAX_FRAGMENT_CHARS (a reference at its end not counted) that cannot end an HTML comment."""
+    where = f"{FRAGMENT_DIR}/{name}"
+    m = FRAGMENT_NAME.fullmatch(name)
+    if not m:
+        raise ValueError(f"{where}: the name must be <lowercase-name>.<{'|'.join(FRAGMENT_TYPES)}>.md")
+    try:
+        line = data.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        raise ValueError(f"{where}: not UTF-8") from None
+    if not FRAGMENT_REF.search(line):
+        line = line.rstrip("。")
+    text = FRAGMENT_REF.sub("", line)
+    if not text or "\n" in line or "\r" in line or "--" in line or len(text) > MAX_FRAGMENT_CHARS:
+        raise ValueError(f"{where}: needs one line of at most {MAX_FRAGMENT_CHARS} chars without '--' "
+                         f"(it has {len(text)}): {line!r}")
+    return FRAGMENT_TYPES[m[1]], line
+
+
+def check_fragments(root):
+    """Every file of changelog.d (its README aside) is a valid fragment; returns how many there are."""
+    folder = Path(root) / FRAGMENT_DIR
+    count = 0
+    for path in sorted(folder.iterdir()) if folder.is_dir() else []:
+        if path.name != FRAGMENT_README:
+            fragment_item(path.name, path.read_bytes())
+            count += 1
+    return count
 
 
 def machine_line(data):
@@ -265,6 +308,8 @@ def metadata(root):
         if hashes != {name: a["sha256"] for name, a in assets.items()}:
             raise ValueError("Size manifest hashes differ from checksum files")
     check_base(root)
+    if count := check_fragments(root):
+        print(f"Changelog fragments OK: {count}")
     if count := check_incoming(root):
         print(f"Incoming patches OK: {count}")
 
