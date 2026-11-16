@@ -1,4 +1,4 @@
-From e0b7fa0ff39562d00e18ae1fb34817851ff1d9f5 Mon Sep 17 00:00:00 2001
+From 095f0399c25b61d3a1b6e5c4aa07ad9689feb67e Mon Sep 17 00:00:00 2001
 From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
 Date: Sun, 15 Nov 2026 01:08:04 +0800
 Subject: [PATCH] =?UTF-8?q?gfxstream:=20=E5=9B=9E=E6=94=B6=E5=A4=B1?=
@@ -27,15 +27,15 @@ Refs ModAVD/ModAVD#208
  host/gl/color_buffer_gl.cpp                   | 128 +++++--
  host/gl/context_helper.h                      |  44 ++-
  host/gl/display_surface_gl.cpp                |  15 +-
- host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 322 ++++++++++++++----
+ host/gl/glestranslator/egl/egl_os_api_wgl.cpp | 320 ++++++++++++++----
  host/gl/texture_resize.cpp                    |   2 +
  host/gl/texture_resize.h                      |   8 +
  host/gl/yuv_converter.cpp                     |   2 +-
  host/gl/yuv_converter.h                       |   2 +
- .../render-utils/readback_diagnostics.h       | 303 ++++++++++++++++
+ .../render-utils/readback_diagnostics.h       | 303 +++++++++++++++++
  host/render_control.cpp                       |  21 +-
  host/render_thread.cpp                        |   3 +
- 14 files changed, 780 insertions(+), 132 deletions(-)
+ 14 files changed, 778 insertions(+), 132 deletions(-)
  create mode 100644 host/include/render-utils/readback_diagnostics.h
 
 diff --git a/host/BUILD.bazel b/host/BUILD.bazel
@@ -533,7 +533,7 @@ index 204aa0e8b..64e86b2db 100644
 \ No newline at end of file
 +}  // namespace gfxstream
 diff --git a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
-index 9d589b133..c051f8f5b 100644
+index 9d589b133..c1b258a3f 100644
 --- a/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
 +++ b/host/gl/glestranslator/egl/egl_os_api_wgl.cpp
 @@ -28,15 +28,21 @@
@@ -566,7 +566,7 @@ index 9d589b133..c051f8f5b 100644
  
 +using WglClock = std::chrono::steady_clock;
 +
-+enum class WglFailure { GetDc, ReleaseDc, Create, Destroy, AllocationPaused, Abandoned, Count };
++enum class WglFailure { GetDc, ReleaseDc, Create, Destroy, QueueFull, Abandoned, Count };
 +
 +class WglFailureLog {
 +   public:
@@ -787,7 +787,7 @@ index 9d589b133..c051f8f5b 100644
      }
  
      virtual bool makeCurrent(EglOS::Surface* read,
-@@ -1239,7 +1317,22 @@ private:
+@@ -1239,7 +1317,13 @@ private:
          }
      }
  
@@ -796,22 +796,13 @@ index 9d589b133..c051f8f5b 100644
 +    using PbufferCreation = std::variant<EglOS::Surface*, PbufferCreateError>;
 +
 +    PbufferCreation createPbufferSurfaceImpl(const EglOS::PixelFormat* pixelFormat) {
-+        // Only backlog capacity pauses allocation. Healthy live/free objects
-+        // never count against this limit. Expiry needs no native GL/WGL calls.
++        // A backlog may contain stale driver handles. It must never deny a
++        // healthy native allocation. Its CPU records are bounded separately.
 +        expirePbuffersLocked();
-+        if (mDeletePbufs.size() == kPbufferBacklogBudget) {
-+            ++mPbufferAllocationDenials;
-+            if (sWglFailureLog.allow(WglFailure::AllocationPaused)) {
-+                GFXSTREAM_ERROR("MAS: pbuffer allocation paused: pending=%zu limit=%zu",
-+                                mDeletePbufs.size(), kPbufferBacklogBudget);
-+            }
-+            logPbufferStatsLocked();
-+            return PbufferCreateError::Allocation;
-+        }
          // we never care about width or height, since we just use
          // opengl fbos anyway.
          const WinPixelFormat* format = WinPixelFormat::from(pixelFormat);
-@@ -1247,14 +1340,98 @@ private:
+@@ -1247,14 +1331,105 @@ private:
  
          const WglExtensionsDispatch* dispatch = mDispatch;
          if (!dispatch->wglCreatePbuffer) {
@@ -849,8 +840,7 @@ index 9d589b133..c051f8f5b 100644
 +                "possibleNativeLeaks=%llu",
 +                winSurface->getPbuffer(), reason,
 +                static_cast<unsigned long long>(mPbuffersAbandoned));
-         }
--        return new WinSurface(pb, pixelFormat, dispatch);
++        }
 +        // Free CPU ownership only; never claim native destruction succeeded.
 +        delete winSurface;
 +    }
@@ -864,12 +854,20 @@ index 9d589b133..c051f8f5b 100644
 +            }
 +            abandonPbufferLocked(it->surface, "age-limit");
 +            it = mDeletePbufs.erase(it);
-+        }
+         }
+-        return new WinSurface(pb, pixelFormat, dispatch);
 +    }
 +
 +    void queuePbufferForDeletionLocked(EglOS::Surface* surface) {
 +        expirePbuffersLocked();
 +        if (mDeletePbufs.size() == kPbufferBacklogBudget) {
++            ++mPbufferQueueEvictions;
++            if (sWglFailureLog.allow(WglFailure::QueueFull)) {
++                GFXSTREAM_ERROR(
++                    "MAS: pbuffer backlog full: pending=%zu limit=%zu; "
++                    "retiring an unconfirmed CPU record",
++                    mDeletePbufs.size(), kPbufferBacklogBudget);
++            }
 +            abandonPbufferLocked(mDeletePbufs.front().surface, "queue-limit");
 +            mDeletePbufs.pop_front();
 +        }
@@ -892,7 +890,7 @@ index 9d589b133..c051f8f5b 100644
 +                                                mPbufferReleaseFailures,
 +                                                mPbufferRefreshFailures,
 +                                                mPbufferDestroyFailures,
-+                                                mPbufferAllocationDenials,
++                                                mPbufferQueueEvictions,
 +                                                mPbuffersAbandoned};
 +        mLastPbufferLog = now;
 +        if (stats == mLastPbufferStats) return;
@@ -900,7 +898,7 @@ index 9d589b133..c051f8f5b 100644
 +        GFXSTREAM_INFO(
 +            "MAS: native pbuffers created=%llu destroyed=%llu live=%zu "
 +            "free=%zu pending=%zu invalid=%llu dcReleaseFailures=%llu "
-+            "refreshFailures=%llu destroyFailures=%llu allocationDenials=%llu "
++            "refreshFailures=%llu destroyFailures=%llu queueEvictions=%llu "
 +            "abandoned=%llu pendingLimit=%zu lastDestroyError=0x%lx lastFailed=%p",
 +            static_cast<unsigned long long>(mPbuffersCreated),
 +            static_cast<unsigned long long>(mPbuffersDestroyed), live, free, mDeletePbufs.size(),
@@ -908,13 +906,13 @@ index 9d589b133..c051f8f5b 100644
 +            static_cast<unsigned long long>(mPbufferReleaseFailures),
 +            static_cast<unsigned long long>(mPbufferRefreshFailures),
 +            static_cast<unsigned long long>(mPbufferDestroyFailures),
-+            static_cast<unsigned long long>(mPbufferAllocationDenials),
++            static_cast<unsigned long long>(mPbufferQueueEvictions),
 +            static_cast<unsigned long long>(mPbuffersAbandoned), kPbufferBacklogBudget,
 +            mLastPbufferDestroyError, mLastFailedPbuffer);
      }
  
      bool mCoreProfileSupported = false;
-@@ -1267,7 +1444,28 @@ private:
+@@ -1267,7 +1442,28 @@ private:
  
      std::unordered_map<const EglOS::PixelFormat*, std::vector<EglOS::Surface* > > mFreePbufs;
      std::unordered_map<const EglOS::PixelFormat*, std::unordered_set<EglOS::Surface* > > mLivePbufs;
@@ -932,7 +930,7 @@ index 9d589b133..c051f8f5b 100644
 +    uint64_t mPbufferRefreshFailures = 0;
 +    uint64_t mPbuffersInvalid = 0;
 +    uint64_t mPbufferDestroyFailures = 0;
-+    uint64_t mPbuffersAbandoned = 0, mPbufferAllocationDenials = 0;
++    uint64_t mPbuffersAbandoned = 0, mPbufferQueueEvictions = 0;
 +    DWORD mLastPbufferDestroyError = 0;
 +    HPBUFFERARB mLastFailedPbuffer = nullptr;
 +    WglClock::time_point mLastPbufferLog{};

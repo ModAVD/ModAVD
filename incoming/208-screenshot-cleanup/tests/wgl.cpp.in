@@ -104,7 +104,7 @@ struct ProbeDisplay {
     std::vector<EglOS::Surface*> mDeletePbufs;
 #endif
     static EglOS::Surface* pendingSurface(EglOS::Surface* pending) { return pending; }
-    uint64_t mPbufferAllocationLimit=0, mPbuffersAbandoned=0, mPbufferAllocationDenials=0;
+    uint64_t mPbufferAllocationLimit=0, mPbuffersAbandoned=0, mPbufferAllocationDenials=0, mPbufferQueueEvictions=0;
     DWORD mLastPbufferDestroyError=0;
     HPBUFFERARB mLastFailedPbuffer=nullptr;
     std::array<uint64_t,11> mLastPbufferStats{};
@@ -162,11 +162,26 @@ static void testInitialDcFailure() {
     CHECK(pool.mDeletePbufs.empty());
     std::puts("PASS one initial DC acquisition failure continues priming and returns a surface");
 }
+static void testFullQueueRecovery() {
+    WinPixelFormat format;
+    ProbeDisplay pool;
+    failGet=true;
+    for(int i=0;i<8;++i)CHECK(!pool.createPbufferSurface(&format,nullptr));
+    CHECK(pool.mDeletePbufs.size()==64);
+    clearFailures();
+    auto* pb=pool.createPbufferSurface(&format,nullptr);
+    CHECK(pb); // recovery cannot wait for a software backlog deadline
+    CHECK(pool.releasePbuffer(pb));
+    for(int i=0;i<8 && !pool.mDeletePbufs.empty();++i){auto* next=pool.createPbufferSurface(&format,nullptr);CHECK(next && pool.releasePbuffer(next));}
+    CHECK(pool.mDeletePbufs.empty() && !pool.mPbuffersAbandoned);
+    std::puts("PASS a recovered driver creates surfaces immediately even with a full retired queue");
+}
 int main(int argc,char** argv) {
     if(argc>1) {
         const std::string test=argv[1];
         if(test=="pool-fallback")testPoolFallback();
         else if(test=="initial-dc")testInitialDcFailure();
+        else if(test=="full-recovery")testFullQueueRecovery();
         else CHECK(false);
         return 0;
     }
@@ -260,6 +275,7 @@ int main(int argc,char** argv) {
 
     testPoolFallback();
     testInitialDcFailure();
+    testFullQueueRecovery();
 #ifdef HAS_WGL_FAILURE_KINDS
     {
         ProbeDisplay pool;
@@ -278,8 +294,9 @@ int main(int argc,char** argv) {
             auto* pb=pool.createPbufferSurface(&format,nullptr);CHECK(pb);healthy.push_back(pb);
         }
         const auto created=nextId;
-        CHECK(!pool.createPbufferSurface(&format,nullptr));
-        CHECK(nextId==created && pool.mPbufferAllocationDenials);
+        auto* extra=pool.createPbufferSurface(&format,nullptr);CHECK(extra);
+        CHECK(nextId>created && !pool.mPbufferQueueEvictions);
+        healthy.push_back(extra);
         CHECK(pool.releasePbuffer(anchor));
         for(auto* pb:healthy)CHECK(pool.releasePbuffer(pb));
         auto reuse=[&]{auto* pb=pool.createPbufferSurface(&format,nullptr);CHECK(pb);CHECK(pool.releasePbuffer(pb));};
@@ -295,20 +312,19 @@ int main(int argc,char** argv) {
             const auto previous=destroyCalls;reuse();CHECK(destroyCalls-previous<=pool.kPbufferRetryBatch);
         }
         for(auto& item:attempts)CHECK(destroyAttempts[item.first]>item.second);
-        size_t releaseDetails=0,destroyDetails=0,pausedDetails=0;
+        size_t releaseDetails=0,destroyDetails=0;
         for(auto& line:logs) {
             if(line.find("MAS: wglReleasePbufferDC(")==0)++releaseDetails;
             if(line.find("MAS: wglDestroyPbuffer(")==0)++destroyDetails;
-            if(line.find("MAS: pbuffer allocation paused:")==0)++pausedDetails;
         }
-        CHECK(releaseDetails<=3 && destroyDetails==3 && pausedDetails>=1 && pausedDetails<=3);
+        CHECK(releaseDetails<=3 && destroyDetails==3);
         clearFailures();FakeClock::time+=std::chrono::seconds(1);
         for(int i=0;i<8 && !pool.mDeletePbufs.empty();++i)reuse();
         CHECK(pool.mDeletePbufs.empty() && !pool.mPbuffersAbandoned);
         CHECK(pool.mPbuffersDestroyed+pool.mFreePbufs[&format].size()==pool.mPbuffersCreated);
     }
-    std::puts("PASS full pending queue pauses only native allocation while healthy cached surfaces remain usable");
-    std::puts("PASS retries stay bounded and fair, and allocation-paused detail has an independent log quota");
+    std::puts("PASS a full pending queue permits both healthy cached reuse and fresh native allocation");
+    std::puts("PASS native destruction retries stay bounded and fair without changing healthy creation");
     {
         ProbeDisplay pool;
         auto* pb=pool.createPbufferSurface(&format,nullptr);CHECK(pb);
@@ -344,7 +360,7 @@ int main(int argc,char** argv) {
     {
         ProbeDisplay pool;
         failGet=true;
-        for(int i=0;i<1000;++i)CHECK(!pool.createPbufferSurface(&format,nullptr));
+        for(int i=0;i<8;++i)CHECK(!pool.createPbufferSurface(&format,nullptr));
         CHECK(pool.mPbuffersCreated==pool.kPbufferBacklogBudget && pool.mDeletePbufs.size()==pool.kPbufferBacklogBudget);
         std::vector<HPBUFFERARB> leaked;
         for(auto& pending:pool.mDeletePbufs)leaked.push_back(WinSurface::from(pending.surface)->getPbuffer());
@@ -361,11 +377,16 @@ int main(int argc,char** argv) {
         ProbeDisplay pool;
         std::vector<EglOS::Surface*> active;
         for(int i=0;i<80;++i){auto* pb=pool.createPbufferSurface(&format,nullptr);CHECK(pb);active.push_back(pb);}
+        FakeClock::time+=std::chrono::minutes(1);logs.clear();
         std::vector<HPBUFFERARB> retired;
         failRelease=failDestroy=true;
         for(auto* pb:active){retired.push_back(WinSurface::from(pb)->getPbuffer());CHECK(!pool.releasePbuffer(pb));}
         CHECK(pool.mDeletePbufs.size()==pool.kPbufferBacklogBudget);
         CHECK(pool.mPbuffersAbandoned==active.size()-pool.kPbufferBacklogBudget);
+        CHECK(pool.mPbufferQueueEvictions==pool.mPbuffersAbandoned);
+        size_t destroyDetails=0,queueDetails=0;
+        for(auto& line:logs){if(line.find("MAS: wglDestroyPbuffer(")==0)++destroyDetails;if(line.find("MAS: pbuffer backlog full:")==0)++queueDetails;}
+        CHECK(destroyDetails==3 && queueDetails==3);
         size_t dropped=0;
         for(auto handle:retired){bool tracked=false;for(auto& pending:pool.mDeletePbufs)if(WinSurface::from(pending.surface)->getPbuffer()==handle)tracked=true;if(!tracked){CHECK(buffers.count(handle));buffers.erase(handle);++dropped;}}
         CHECK(dropped==pool.mPbuffersAbandoned);
@@ -373,7 +394,7 @@ int main(int argc,char** argv) {
         for(int i=0;i<8 && !pool.mDeletePbufs.empty();++i){auto* pb=pool.createPbufferSurface(&format,nullptr);CHECK(pb && pool.releasePbuffer(pb));}
         CHECK(pool.mDeletePbufs.empty());
     }
-    std::puts("PASS retiring more than 64 existing live surfaces bounds the CPU queue and accounts for overflow losses");
+    std::puts("PASS queue overflow is independently logged and every dropped CPU record is counted as a possible native leak");
     {
         FakeClock::time+=std::chrono::minutes(1);
         WglFailureLog limiter;
@@ -383,7 +404,7 @@ int main(int argc,char** argv) {
             CHECK(!limiter.allow(kind));
         }
         FakeClock::time+=std::chrono::minutes(1);
-        CHECK(limiter.allow(WglFailure::Destroy) && limiter.allow(WglFailure::AllocationPaused));
+        CHECK(limiter.allow(WglFailure::Destroy) && limiter.allow(WglFailure::@BACKLOG_LOG_KIND@));
     }
     std::puts("PASS WGL failure reasons keep independent detail budgets across minute boundaries");
     {

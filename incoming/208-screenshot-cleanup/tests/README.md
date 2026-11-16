@@ -12,13 +12,13 @@ python incoming/208-screenshot-cleanup/tests/run.py --repo <gfxstream源码目�
 
 需要 Python 3.9 或更新版本和 C++17 编译器。Windows 默认通过 `vswhere` 查找 Visual Studio C++ 工具，也可用 `CXX` 指定编译器。脚本从源码提取函数体，配上可注入失败的 WGL、EGL 和 GL 接口后编译运行，输出 `results.json`。无需模拟器、Android 镜像、GPU 或第三方 Python 包。
 
-三个探针共 37 项检查：
+三个探针共 38 项检查：
 
-- WGL 共 17 项：释放状态、正常池复用、失败回收、空池与失效句柄；大池单次刷新失败和补池首次取 DC 失败仍能创建；队列满时健康空闲对象可复用；轮转与延时；HRESULT 包装错误码；重试上限、无存活对象时的过期恢复、队列溢出记账；按原因限速和只输出变化。
+- WGL 共 18 项：释放状态、正常池复用、失败回收、空池与失效句柄；大池单次刷新失败和补池首次取 DC 失败仍能创建；队列满时缓存复用和新建均可用，驱动恢复立即成功；轮转与延时；HRESULT 包装错误码；重试上限、无存活对象时的过期恢复、队列溢出记账；按原因限速和只输出变化。
 - 清理共 11 项：ColorBuffer 正常、恢复和终止清理；空 DisplaySurface 析构不绑定，有积压时恢复；同 helper 和不同 helper 的嵌套状态；读回容量与 RGB 转换；实际延后清理日志限速且计数不丢。
 - 读回与日志共九项：普通和 DMA 调用、FrameBuffer 后端失败与容量传递、宿主查询与截图、并发统计、失败详情限速、只输出变化、回调重入、保留 DMA 旧告警及清理事件的独立额度。
 
-`--only wgl` 可用于未修复的基线，预期失败在释放失败后 DC 已被错误清空的断言。其余两个探针需要新加的清理结构和日志头文件。复审发现的两处创建回归可单独运行 `--only wgl --case pool-fallback` 和 `--only wgl --case initial-dc`；它们在 `4dc6ffd` 版本上分别失败，在修订版本上通过。
+`--only wgl` 可用于未修复的基线，预期失败在释放失败后 DC 已被错误清空的断言。其余两个探针需要新加的清理结构和日志头文件。复审发现的两处创建回归可单独运行 `--only wgl --case pool-fallback` 和 `--only wgl --case initial-dc`；它们在 `4dc6ffd` 版本上分别失败，在修订版本上通过。`--only wgl --case full-recovery` 检查满队列后立即恢复，在曾保留暂停分配入口的 `9ec0711` 上失败，在最终版本通过。
 
 清理探针也提取实际的 DisplaySurface 析构函数，诊断探针提取两层 FrameBuffer 读回函数。使用可控时钟验证分钟窗口和一秒重试延时，不靠等待或机器速度判断。原 PR 版本在“空析构不应绑定”的新断言上失败；只移除嵌套保护时，外层 GL 状态回归也会失败。
 
@@ -44,9 +44,9 @@ python incoming/208-screenshot-cleanup/tests/run.py --repo <gfxstream源码目�
 
 `MAS: readback resources` 记录 ColorBuffer 和 RenderThread 的创建、释放累计数，以及延迟清理、恢复清理和放弃 GL 调用的数量。`cbRgbaEstimateBytes` 是仍存活的 ColorBuffer 按宽×高×4 的粗估，`pendingRgbaEstimateBytes` 是已退出但等待原上下文清理的粗估。它们不包含驱动缓存、共享纹理、FBO 或额外副本，也不是实测分配量。`cleanupAbandoned` 表示 helper 销毁时只回收了 CPU 所有权，不能据此宣称驱动内存已释放。
 
-`MAS: native pbuffers` 记录原生 pbuffer 的创建、销毁、使用中、池内空闲、待销毁、失效和放弃数量。`created - destroyed - invalid - abandoned` 应与 `live + free + pending` 对应。`abandoned` 是只释放了 CPU 记录、未确认销毁的对象数，可能对应驱动资源泄漏，不计作成功销毁。原生取 DC、释放 DC、创建、销毁、分配暂停和放弃清理各有独立的每分钟三条详情额度，销毁失败不会挤掉分配暂停的详情。汇总只输出变化。
+`MAS: native pbuffers` 记录原生 pbuffer 的创建、销毁、使用中、池内空闲、待销毁、失效和放弃数量。`created - destroyed - invalid - abandoned` 应与 `live + free + pending` 对应。`abandoned` 是只释放了 CPU 记录、未确认销毁的对象数，可能对应驱动资源泄漏，不计作成功销毁。原生取 DC、释放 DC、创建、销毁、队列溢出和放弃清理各有独立的每分钟三条详情额度，销毁失败不会挤掉队列溢出的详情。汇总只输出变化。
 
-创建先尝试池内的所有空闲对象，耗尽后才补池。一次请求最多进行一批补池尝试；原生分配失败才终止，首次取 DC 失败则继续下一项。待销毁对象不计入正常存活或空闲对象的分配预算。只有待销毁队列达到 64 项时才暂停新增原生分配，健康空闲对象仍可复用。`allocationDenials` 记录这类暂停次数，`pendingLimit` 为队列上限。
+创建先尝试池内的所有空闲对象，耗尽后才补池。一次请求最多进行一批补池尝试；原生分配失败才终止，首次取 DC 失败则继续下一项。待销毁对象不会阻止正常复用或新建，创建结果由原生调用决定，不再有软件冻结或暂停分配的入口。上限只作用于待销毁记录：`pendingLimit` 为 64，`queueEvictions` 是队列溢出时放弃 CPU 记录的次数。
 
 每次释放最多检查八个待销毁对象，轮转处理，失败后至少一秒再重试。按 [HRESULT_CODE](https://learn.microsoft.com/en-us/windows/win32/api/winerror/nf-winerror-hresult_code) 提取错误码，裸值 6 和 `0xC0070006` 都按失效句柄处理。单个对象最多尝试八次、最多等待 60 秒；达到上限或队列溢出时，回收 CPU 记录并增加 `abandoned`，日志注明可能的原生泄漏。无存活 surface 再触发释放时，创建路径也能清除已过期的 CPU 记录，使恢复后的驱动重新分配；这一过程不调用原生销毁。
 

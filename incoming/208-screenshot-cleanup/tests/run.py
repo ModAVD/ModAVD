@@ -61,6 +61,7 @@ def replacements(repo, name):
     if name == "wgl":
         source = read("host/gl/glestranslator/egl/egl_os_api_wgl.cpp")
         return {
+            "BACKLOG_LOG_KIND": "QueueFull" if "AllocationPaused" not in source else "AllocationPaused",
             "WGL_FAILURE_KIND": ("#define HAS_WGL_FAILURE_KINDS 1\n" + block(source, "enum class WglFailure")) if "enum class WglFailure" in source else "",
             "CREATE_RESULT": block(source, "    enum class PbufferCreateError", optional=True) + ("\n" + re.search(r"    using PbufferCreation[^;]+;", source)[0] if "using PbufferCreation" in source else ""),
             "ABANDON_PBUFFER": block(source, "    void abandonPbufferLocked(", optional=True),
@@ -113,7 +114,7 @@ def main():
     parser.add_argument("--repo", type=Path, required=True, help="Patched gfxstream source checkout")
     parser.add_argument("--work", type=Path, help="Build output directory, outside the source checkout")
     parser.add_argument("--only", choices=["wgl", "cleanup", "diagnostics"])
-    parser.add_argument("--case", choices=["pool-fallback", "initial-dc"], help="Run one WGL creation regression")
+    parser.add_argument("--case", choices=["pool-fallback", "initial-dc", "full-recovery"], help="Run one WGL creation regression")
     args = parser.parse_args()
     if args.case and args.only != "wgl":
         parser.error("--case requires --only wgl")
