@@ -33,6 +33,7 @@ jobs:
           choice=$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH" | tr -d '\r' |
             awk '/^### / { on = ($0 == "### 哪个组件 / Component"); next } on && NF { print; exit }')
           case "$choice" in
+            模拟器本体*) label=area:emulator ;;
             管理器和命令行*) label=area:manager ;;
             宿主输入法*) label=area:hostime ;;
             文档站*) label=area:docs ;;
