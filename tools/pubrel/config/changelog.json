@@ -1,5 +1,22 @@
 [
   {
+    "version": "v0.41.1",
+    "build": 41,
+    "min_automas": "5.7.0",
+    "changes": {
+      "新增": [
+        "终末地下载资源也走下载盘，不再被频繁落盘拖慢 (ModAVD/ModAVD#35)",
+        "实例内存可以选 8 GB (ModAVD/ModAVDManager#181)"
+      ],
+      "修复": [
+        "新建的实例用浏览器装安装包不再提示不允许安装未知应用 (ModAVD/ModAVD#218)",
+        "开机时不再先进桌面再黑屏重来一遍 (ModAVD/ModAVD#220)",
+        "1080p 实例的桌面底部不再多出一条任务栏 (ModAVD/ModAVD#221)",
+        "新装的崩坏：星穹铁道默认用 Vulkan 显示模式，首次启动不再闪退 (ModAVD/ModAVD#222)"
+      ]
+    }
+  },
+  {
     "version": "v0.41.0",
     "build": 41,
     "min_automas": "5.7.0",
