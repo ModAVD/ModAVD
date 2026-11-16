@@ -106,6 +106,30 @@ def replacements(repo, name):
             "DMA": block(source, "static int rcReadColorBufferDMA("),
             "SCREENSHOT": block(fb, "int FrameBuffer::getScreenshot("),
         }
+    if name == "egl":
+        root = "host/gl/glestranslator/"
+        common = read(root + "common/gles_context.cpp")
+        imp = read(root + "egl/egl_imp.cpp")
+        thread = read(root + "egl/thread_info.h")
+        return {
+            "THREAD_INFO": block(thread, "struct ThreadInfo"),
+            "EGL_IFACE": block(read(root + "common/include/common/translator_ifaces.h"), "struct EGLiface"),
+            "CLEANUP_SCOPE": ("#define HAS_CPU_ONLY_SCOPE 1\n" + block(thread, "class ScopedNativeGlCleanup")) if "class ScopedNativeGlCleanup" in thread else "",
+            "EGL_POLICY": block(imp, "static bool isNativeGlCleanupAllowed() {", optional=True) or "static bool isNativeGlCleanupAllowed() { return true; }",
+            "GLES_POLICY": block(common, "bool GLEScontext::isNativeGlCleanupAllowed()", optional=True) or "bool GLEScontext::isNativeGlCleanupAllowed() { return true; }",
+            "EGL_DTOR": block(read(root + "egl/egl_context.cpp"), "EglContext::~EglContext()"),
+            "EGL_FACTORY": block(imp, "static EGLContext eglCreateOrLoadContext("),
+            "GLES_DTOR": block(common, "GLEScontext::~GLEScontext()"),
+            "GLES_V2_DTOR": block(read(root + "gles_v2/gles_v2_context.cpp"), "GLESv2Context::~GLESv2Context()"),
+            "GLES_CM_DTOR": block(read(root + "gles_cm/gles_cm_context.cpp"), "GLEScmContext::~GLEScmContext()"),
+            "NAMED_TYPE": block(read(root + "common/include/common/named_object.h"), "enum class NamedObjectType"),
+            "NAMED_DTOR": block(read(root + "common/named_object.cpp"), "NamedObject::~NamedObject()"),
+            "FBO_DTOR": block(read(root + "common/framebuffer_data.cpp"), "FramebufferData::~FramebufferData()"),
+            "FBO_DETACH": block(read(root + "common/framebuffer_data.cpp"), "void FramebufferData::detachObject("),
+            "FBO_REFRESH": block(read(root + "common/framebuffer_data.cpp"), "void FramebufferData::refreshSeparateDepthStencilAttachmentState()"),
+            "CM_CORE_DTOR": block(read(root + "gles_cm/core_profile_engine.cpp"), "CoreProfileEngine::~CoreProfileEngine()"),
+            "CM_CORE_TEARDOWN": block(read(root + "gles_cm/core_profile_engine.cpp"), "void CoreProfileEngine::teardown()"),
+        }
     raise ValueError(name)
 
 
@@ -113,7 +137,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True, help="Patched gfxstream source checkout")
     parser.add_argument("--work", type=Path, help="Build output directory, outside the source checkout")
-    parser.add_argument("--only", choices=["wgl", "cleanup", "diagnostics"])
+    parser.add_argument("--only", choices=["wgl", "cleanup", "diagnostics", "egl"])
     parser.add_argument("--case", choices=["pool-fallback", "initial-dc", "full-recovery"], help="Run one WGL creation regression")
     args = parser.parse_args()
     if args.case and args.only != "wgl":
@@ -129,7 +153,7 @@ def main():
     fixture_dir = Path(__file__).resolve().parent
     cxx, vcvars = compiler()
     results = {}
-    for name in [args.only] if args.only else ["wgl", "cleanup", "diagnostics"]:
+    for name in [args.only] if args.only else ["wgl", "cleanup", "diagnostics", "egl"]:
         text = (fixture_dir / f"{name}.cpp.in").read_text(encoding="utf-8")
         for marker, definition in replacements(repo, name).items():
             text = text.replace(f"@{marker}@", definition)
