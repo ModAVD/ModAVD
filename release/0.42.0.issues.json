@@ -42,8 +42,8 @@
       "prs": [
         "ModAVDManager#187"
       ],
-      "kind": "close",
-      "note": "管理器 0.42.0 在 Windows 上给客体内核加 tsc=nowatchdog，运行中不再因为读 hpet 慢把时钟源换成 hpet。"
+      "kind": "keep",
+      "note": "管理器 0.42.0 在 Windows 上给客体内核加了 tsc=nowatchdog：运行中看门狗不会再因为读 hpet 慢、或 tsc 和 hpet 走得不一样快，把时钟源换成 hpet，长时间开着变卡的那一种已经修了。开机时各核 TSC 同步检查没过、一开机就退回 hpet 的那一种还会发生；issue 里那次是开机约 20 秒后退回的，属于哪种还不知道，所以先留着，下次碰到要留内核日志（dmesg 里 clocksource 那几行）。"
     }
   ]
 }
