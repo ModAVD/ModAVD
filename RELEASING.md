@@ -81,7 +81,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
 - [ ] 草稿建好后触发 `gh workflow run verify-release.yml --repo ModAVD/ModAVD -f version=<版本>`（[#134](https://github.com/ModAVD/ModAVD/issues/134)）：它在 GitHub 上下载附件，和 `release/0.<N>` 上发版提交的 `release/<版本>.SHA256SUMS.txt`、`release/<版本>.md` 核对，再核发版 PR 正文写的审过的头和合并提交的树相同。没过不发布。
 - [ ] **人工过目草稿后再发布**：目标标签/提交、版本号、两层校验表、附件字节数与摘要、源码对应关系、许可证、隐私报告、issue 链接、升级说明和分隔行以上的公告均正确。
 - [ ] 经维护者确认后通过 GitHub 页面发布；自动脚本只创建草稿，不发布、不改仓库设置。
-- [ ] 发布时 `close-released-issues.yml` 自动跑：按 tag 所在提交上的 `release/<版本>.issues.json` 逐条核修它的 PR 进了这一版，过了的关掉（或补评论）、附发布链接、去掉 `pending-release`；核不过的留着标签，列在 job summary 里。看一眼 summary；失败了修好以后 `gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=<版本>` 重跑，只补还没做的。
+- [ ] 发布时 `close-released-issues.yml` 自动跑：按 tag 所在提交上的 `release/<版本>.issues.json` 逐条核修它的 PR 进了这一版，过了的关掉（或补评论）、附发布链接、去掉 `pending-release`；核不过的留着标签，列在 job summary 里。看一眼 summary；失败了修好以后 `gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=<版本>` 重跑，只补还没做的。`release: published` 用的是 tag 所在提交上的 workflow 文件，所以发版分支上要有 `close-released-issues.yml`（发布脚本第 1 步会核）；没有就只能发布后手动跑上面那条。
 - [ ] 三个源码仓库的 `release/0.<N>` 和 tag、默认分支暂时还在本机推（要能跨仓库写的凭据，没上 CI）。
 - [ ] 发布后要改公告（例如补一条已知问题）就直接编辑 Release；分隔行和第一行机读注释不要删。
 

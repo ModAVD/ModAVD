@@ -536,6 +536,10 @@ class VerifyRelease(unittest.TestCase):
         s.gh.commit_pull_list[s.rel][0]["base"] = {"ref": "main"}
         self.check(s, "找到 0 个")
         s = VerifyScenario()
+        # the release commit is only one of the PR's commits, not its merge commit
+        s.gh.commit_pull_list[s.rel][0]["merge_commit_sha"] = h("someothermerge")
+        self.check(s, "找到 0 个")
+        s = VerifyScenario()
         s.gh.pulls[(REPO, 250)]["body"] = "no line"
         self.check(s, "现在 0 行")
         s = VerifyScenario()
