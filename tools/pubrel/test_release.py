@@ -1859,10 +1859,20 @@ class ReleaseChecks(unittest.TestCase):
         """changelog.json keeps the published integers next to the new strings; this version's entry must carry the
         build being packaged in its own form."""
         changelog = self.folder() / "changelog.json"
-        entry = lambda v, b: {"version": v, "build": b, "min_automas": "5.7.0", "changes": {"修复": ["修好一处"]}}
-        release.save(changelog, [entry("v0.42.0", "0.42.0"), entry("v0.41.1", 41), entry("v0.41.0", 41)])
+        entry = lambda v, b, m="5.7.0": {"version": v, "build": b, "min_automas": m, "changes": {"修复": ["修好一处"]}}
+        release.save(changelog, [entry("v0.42.0", "0.42.0", "5.9.0-beta.1"), entry("v0.41.1", 41), entry("v0.41.0", 41)])
         self.assertEqual([e["build"] for e in release.read_changelog(changelog, "0.42.0", release.build_number("0.42"))],
                          ["0.42.0", 41, 41])
+        # AUTO-MAS 5.8.0 reads Pkg.BuildId as mas-N before it starts an instance: a 0.N.0 build has to ask for a newer one
+        for minimum, ok in [("5.7.0", False), (None, False), ("5.8.0", False), ("5.9.0-alpha.3", False),
+                            ("5.9.0-beta.1", True), ("5.9.0-beta.2", True), ("5.9.0", True), ("6.0.0", True)]:
+            release.save(changelog, [entry("v0.42.0", "0.42.0", minimum), entry("v0.41.1", 41)])
+            if ok:
+                release.read_changelog(changelog, "0.42.0", "0.42.0")
+            else:
+                with self.assertRaisesRegex(ValueError, "min_automas must be at least 5.9.0-beta.1"):
+                    release.read_changelog(changelog, "0.42.0", "0.42.0")
+        release.save(changelog, [entry("v0.42.0", "0.42.0", "5.9.0"), entry("v0.41.1", 41), entry("v0.41.0", 41)])
         self.assertEqual(len(release.read_changelog(changelog, "0.41.1", 41)), 2)
         with self.assertRaisesRegex(ValueError, "differs from -Build"):
             release.read_changelog(changelog, "0.42.0", 42)

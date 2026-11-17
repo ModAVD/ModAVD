@@ -35,6 +35,10 @@ FIRST_NEW_BUILD = 33
 # tools take -Build 0.<N>). Directories named after the build follow: sdk-0.42.0, patches/qemu/0.42.0,
 # manifest-0.42.0.xml; the published masN ones keep their names.
 LAST_LEGACY_BUILD = 41
+# AUTO-MAS up to 5.8.0 checks Pkg.BuildId=mas-<N> (N >= 25) before it starts an instance and takes anything else for an
+# outdated build, so it cannot start a 0.N.0 build; 5.9.0-beta.1 dropped that check (it runs everything through the
+# modavd CLI). A release with a 0.N.0 build has to ask for at least that AUTO-MAS in min_automas.
+FIRST_AUTOMAS_FOR_NEW_BUILD = "5.9.0-beta.1"
 MANIFEST = "modavd-manifest.json"
 # Binary packages carry the platform (a Linux build may follow); the source bundle does not.
 PLATFORM = "win-x64"
@@ -497,7 +501,20 @@ def read_changelog(path, version, number):
     current = entries[versions.index("v" + version)]
     if current["build"] != number:
         raise ValueError("changelog entry build differs from -Build")
+    if type(number) is not int and (current["min_automas"] is None or
+                                    automas_key(current["min_automas"]) < automas_key(FIRST_AUTOMAS_FOR_NEW_BUILD)):
+        raise ValueError(f"v{version} has build {number} (Pkg.BuildId={number}), which AUTO-MAS before "
+                         f"{FIRST_AUTOMAS_FOR_NEW_BUILD} refuses to start: min_automas must be at least "
+                         f"{FIRST_AUTOMAS_FOR_NEW_BUILD} (collect-changelog.ps1 -MinAutoMas), not {current['min_automas']}")
     return entries[versions.index("v" + version):]
+
+
+def automas_key(value):
+    """5.9.0-beta.1 -> (5, 9, 0, 1, 1) for ordering: alpha < beta < the release (the forms check_min_automas takes)."""
+    checks.check_min_automas(value)
+    m = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-(alpha|beta)\.([0-9]+))?", value)
+    stage = {"alpha": 0, "beta": 1, None: 2}[m[4]]
+    return (int(m[1]), int(m[2]), int(m[3]), stage, int(m[5] or 0))
 
 
 def read_sums(path):
@@ -943,7 +960,7 @@ def assemble(args):
     data = load(args.snapshot)
     version = public_version(args)
     number = build_number(args.build)
-    current =read_changelog(args.changelog, version, number)[0]
+    current = read_changelog(args.changelog, version, number)[0]
     own = checked_sources(args)
     # Later steps take the public version and the public sources from the output copy of the snapshot.
     data.update(version=version, patch=checks.version_key("v" + version)[2], upstream=sdk_upstream(args.sdk), min_automas=current["min_automas"],

@@ -54,7 +54,7 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 公告的「更新内容」不手写。用户看得见的改动，各自的 PR 里带一个说明文件（`changelog.d/<名字>.<feat|fix|change|remove>.md`，一行话，写法见 [changelog.d/README.md](../../changelog.d/README.md)）；发版时把上一版以后新加的文件汇总进 `config/changelog.json`（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build 0.42 -Version 0.42.0 [-Note "更新前先把实例都关机"] [-MinAutoMas 5.7.0]
+pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build 0.42 -Version 0.42.0 [-Note "更新前先把实例都关机"] [-MinAutoMas 5.9.0-beta.1]
 ```
 
 - 读四个仓库的 `changelog.d`：ModAVD 的发版克隆读 HEAD；管理器、截图库、输入法读各自 `upstream` 的 `release/<X>.<Y>` 头（路径取 `-ManagerRepo`、`-ExtrasRepo`、`-ImeRepo` 或本机配置，先 `git fetch upstream --tags`）。没有这条发版分支的组件算这一版没重新打包，不出条目。
@@ -62,8 +62,8 @@ pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build 0.42 -Version 0.
 - 文件名里的类型就是分类：`feat` 新增，`fix` 修复，`change` 变更，`remove` 移除。条目是文件里那一行，末尾补上加这个文件的 PR（合并提交标题末尾的编号），写成 `(#N)` 或 `(ModAVD/ModAVDManager#N)`；那一行自己以 issue 或 PR 编号结尾的就不补。
 - 文件不合格（名字不对、不止一行、超过 60 字、有 `--`）会一次全报出来，回去改文件再跑。ModAVD 自己的 `changelog.d` 在 CI 的 `checks.py metadata` 里也查。
 - 每个仓库还会列出上一版以后没带说明文件的提交，过一眼有没有漏掉用户看得见的改动。
-- 「说明」类用 `-Note` 手写，只写这一版要用户动手的事；重新汇总时留着。`-MinAutoMas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。
-- 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.42.0", "build": "0.42.0", "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`（0.41 及以前的条目是 `"build": 41` 这样的整数，照旧留着），重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
+- 「说明」类用 `-Note` 手写，只写这一版要用户动手的事；重新汇总时留着。`-MinAutoMas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。构建号是 `0.N.0` 的版本，`min_automas` 至少要 `5.9.0-beta.1`：AUTO-MAS 5.8.0 及以前开机前按 `Pkg.BuildId=mas-N` 查内测包版本，认不出 `0.N.0` 就拦住开机，低了汇总和预检都会停。
+- 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.42.0", "build": "0.42.0", "min_automas": "5.9.0-beta.1", "changes": {"修复": ["…"]}}`（0.41 及以前的条目是 `"build": 41` 这样的整数，照旧留着），重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
 
 公告里除了「更新内容」只有开头一行：基于的上游版本、各组件的版本（本版重新打包的会标出来）和文档站的链接。怎么更新、已知问题、回归怎么测的都不写进公告；这一版有要用户动手的事，用 `-Note` 写成一条「说明」。
 
