@@ -1,7 +1,9 @@
 #requires -Version 7.0
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^mas[1-9][0-9]*$')][string]$Build,
+    # 构建号：0.42 起写这次重编对应的版本号 0.N（也收 0.N.0），产物 sdk-0.N.0、Pkg.BuildId=0.N.0；
+    # 旧写法 masN（sdk-masN、Pkg.BuildId=mas-N）只留给重编 mas41 及更早的历史构建。
+    [Parameter(Mandatory)][ValidatePattern('^(mas[1-9][0-9]*|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.0)?)$')][string]$Build,
     # 没给的路径从本机配置取（tools\local.ps1，键名见 tools\local.example.psd1），配置里也没有就报错。
     # AOSP 模拟器源码树（EmuSrc）；产物装到它下面的 sdk-<Build>
     [string]$EmuSrc,
@@ -28,6 +30,12 @@ if (-not $Python) { $Python = Use-Local Python $null '-Python' -Optional }
 if (-not $Python) { $Python = 'python' }
 if (-not $MinFreeGB) { $MinFreeGB = [int](Use-Local MinFreeGB $null '-MinFreeGB' -Optional) }
 if (-not $MinFreeGB) { $MinFreeGB = 120 }
+# 0.42 / 0.42.0 是同一个构建：一律写成三段，和 release_tools.py 的 normalize_build 一致（新写法从 0.42 起）
+if ($Build -match '^(\d+)\.(\d+)(\.0)?$') {
+    $Build = "$([int]$Matches[1]).$([int]$Matches[2]).0"
+    if ([int]$Matches[1] -eq 0 -and [int]$Matches[2] -le 41) { throw "0.41 及以前的构建号写 masN：$Build" }
+} elseif ([int]$Build.Substring(3) -gt 41) { throw "mas41 以后的构建号写 0.N（比如 -Build 0.42）：$Build" }
+$buildId = if ($Build.StartsWith('mas')) { "mas-$($Build.Substring(3))" } else { $Build }
 $sourceRoot = [IO.Path]::GetFullPath($EmuSrc)
 $target = Join-Path $sourceRoot "sdk-$Build"
 if (Test-Path -LiteralPath $target) { throw "目标已存在，拒绝覆盖：$target" }
@@ -48,7 +56,7 @@ Write-Host "$Python -I $helper snapshot --build $Build --emu-src $sourceRoot --s
 Write-Host "CMAKE_BUILD_PARALLEL_LEVEL=$Jobs"
 Write-Host "$Python $($buildArgs -join ' ')"
 Write-Host "robocopy $distribution $target\emulator /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ"
-Write-Host "写 $target\emulator\source.properties：Pkg.BuildId=mas-$($Build.Substring(3))"
+Write-Host "写 $target\emulator\source.properties：Pkg.BuildId=$buildId"
 Write-Host "放 arm64 执行桥载荷：$stageGate -Sdk $target$(if ($GatePayload) { " -Payload $GatePayload" })"
 Write-Host "保存源码提交快照：$target\build-info.json；日志：$logDir"
 # 载荷核对只读，放在 ShouldProcess 之前：-WhatIf 也要验一遍，免得编一个多小时之后才发现
@@ -87,7 +95,7 @@ try {
     if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE；保留目标以便排查" }
     $props = Join-Path $target 'emulator\source.properties'
     $text = [IO.File]::ReadAllText($props)
-    $id = "Pkg.BuildId=mas-$($Build.Substring(3))"
+    $id = "Pkg.BuildId=$buildId"
     if ($text -match '(?m)^Pkg\.BuildId=.*$') { $text = [regex]::Replace($text, '(?m)^Pkg\.BuildId=[^\r\n]*', $id) }
     else { $text = $text.TrimEnd() + "`r`n$id`r`n" }
     [IO.File]::WriteAllText($props, $text, [Text.UTF8Encoding]::new($false))

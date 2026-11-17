@@ -9,7 +9,7 @@ The pre-release regression (end-to-end tests) lives in a separate repository, [M
 
 | Directory | What it does |
 | --- | --- |
-| [`build/`](build/) | `build-sdk.ps1`: incrementally builds `sdk-masN` from the AOSP emulator source tree, records the commit of each repository at build time, and puts it into the execution bridge payload |
+| [`build/`](build/) | `build-sdk.ps1`: incrementally builds `sdk-0.N.0` (`sdk-masN` up to 0.41) from the AOSP emulator source tree, records the commit of each repository at build time, and puts it into the execution bridge payload |
 | [`gate/`](gate/README.md) | `stage-payload.ps1`: checks the pinned hashes of the three arm64 execution bridge payload files and puts them into the SDK tree |
 | [`pubrel/`](pubrel/README.md) | `release.ps1`: assembles the package, exports and replays patches, builds the source bundle and the Release notes, runs the privacy scan, and can optionally create a GitHub draft |
 

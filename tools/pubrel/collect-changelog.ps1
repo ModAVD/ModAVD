@@ -3,7 +3,8 @@
 # 组件仓库的路径和 release.ps1 一样取参数或本机配置；先在各仓库里 git fetch upstream --tags。说明见 README.md「发版」。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^mas[1-9][0-9]*$')][string]$Build,
+    # emulator build, as release.ps1 -Build: masN up to mas41, then 0.N (Pkg.BuildId=0.N.0)
+    [Parameter(Mandatory)][ValidatePattern('^(mas[1-9][0-9]*|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.0)?)$')][string]$Build,
     [Parameter(Mandatory)][ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version,
     # ModAVD release checkout (default: the checkout these tools are in); read at its HEAD
     [string]$Repository,

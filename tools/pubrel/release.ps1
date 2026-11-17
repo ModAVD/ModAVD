@@ -1,11 +1,13 @@
 #requires -Version 7.0
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidatePattern('^mas[1-9][0-9]*$')][string]$Build,
+    # emulator build: masN up to mas41, then 0.N (0.N.0 also taken), the version the emulator was built for
+    # (Pkg.BuildId=0.N.0); release_tools.py refuses 0.N up to 0.41
+    [Parameter(Mandatory)][ValidatePattern('^(mas[1-9][0-9]*|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.0)?)$')][string]$Build,
     [Parameter(Mandatory)][string]$Sdk,
     [ValidateRange(0, 999)][int]$Patch = 0,
     # public version X.Y.Z, counted on its own since 0.41 (the build is only recorded next to it); with it -Patch is
-    # left out. Without it the version is 0.<N>.<Patch> from -Build, as up to 0.40.
+    # left out. Without it the version is 0.<N>.<Patch> from -Build (masN or 0.N), as up to 0.40.
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version,
     # Paths not given here come from the local configuration (tools\local.ps1, keys in tools\local.example.psd1);
     # one that is in neither place stops the run. AOSP emulator source tree (EmuSrc).
@@ -76,14 +78,17 @@ $PSNativeCommandUseErrorActionPreference = $false
 . (Join-Path $PSScriptRoot '..\local.ps1')
 # pwsh -File 把 `-KeepIncoming a,b` 当成一个字符串
 $KeepIncoming = @($KeepIncoming | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-# 公开版本号用 -Version 给：模拟器重编才加第二位，没重编只加第三位；构建号 mas-N 只记在清单和公告机读行的 build 里。
-# 不给 -Version 照 0.40 及以前的旧规矩：0.<N>.<P>，N 是构建号，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
-$number = [int]$Build.Substring(3)
+# 公开版本号用 -Version 给：模拟器重编才加第二位，没重编只加第三位；构建号只记在清单和公告机读行的 build 里。
+# 构建号到 mas41 是 masN（Pkg.BuildId=mas-N），0.42 起是这次重编对应的版本号 0.N.0（-Build 0.N，Pkg.BuildId=0.N.0）。
+# 不给 -Version 照 0.40 及以前的旧规矩：0.<N>.<P>，N 是构建号的那个数，P 是不重编、只重新打包的次数（RELEASING.md「版本号」）
+if ($Build -match '^(\d+)\.(\d+)(\.0)?$') { $Build = "$([int]$Matches[1]).$([int]$Matches[2]).0" }
+$number = if ($Build.StartsWith('mas')) { [int]$Build.Substring(3) } else { [int]($Build -split '\.')[1] }
+$major = if ($Build.StartsWith('mas')) { 0 } else { [int]($Build -split '\.')[0] }
 # PowerShell 的变量名不分大小写：下面的 $version 就是参数 $Version，先把给的值另存
 $givenVersion = $Version
 if ($givenVersion -and $Patch) { throw '-Version 已经是完整版本号，不再和 -Patch 一起用' }
 $versionArgs = @(if ($givenVersion) { '--version', $givenVersion })
-$version = if ($givenVersion) { $givenVersion } else { "0.$number.$Patch" }
+$version = if ($givenVersion) { $givenVersion } else { "$major.$number.$Patch" }
 # 发版分支按公开版本号的前两位：0.41.x 在 release/0.41
 $releaseBranch = 'release/' + (($version -split '\.')[0..1] -join '.')
 $defaultName = if ($givenVersion) { "$Build-v$givenVersion" } elseif ($Patch) { "$Build-p$Patch" } else { $Build }

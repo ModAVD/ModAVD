@@ -523,8 +523,12 @@ if ($script:AvdDir) {
 $script:EmuBuild = 0
 $sprops = Join-Path $Root 'sdk\emulator\source.properties'
 if (Test-Path -LiteralPath $sprops) {
-    $bm = Select-String -LiteralPath $sprops -Pattern '^Pkg\.BuildId=mas-(\d+)'
-    if ($bm) { $script:EmuBuild = [int]$bm.Matches[0].Groups[1].Value }
+    # 构建号：到 0.41 是 mas-N（按 0.N.0 算），0.42 起是版本号 0.N.0；这里只拿来和 0.36.0 比，记成 N
+    $bm = Select-String -LiteralPath $sprops -Pattern '^Pkg\.BuildId=(?:mas-(\d+)|(\d+)\.(\d+)\.(\d+))'
+    if ($bm) {
+        $g = $bm.Matches[0].Groups
+        $script:EmuBuild = if ($g[1].Success) { [int]$g[1].Value } elseif ([int]$g[2].Value -gt 0) { [int]::MaxValue } else { [int]$g[3].Value }
+    }
 }
 
 function Set-WritableMarker {

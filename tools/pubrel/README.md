@@ -9,7 +9,7 @@
 ## 版本号
 
 公开版本号 `X.Y.Z` 用 `-Version` 给，不要求 Y 等于模拟器构建号：模拟器本体重新编译才加 Y，没重编（只换组件或只重新打包）只加 Z，比如 0.40.1 之后只换了管理器和截图库就是 0.40.2。
-构建号照旧叫 mas-N（`sdk-masN`、`Pkg.BuildId=mas-N`、补丁目录 `qemu/masN`），记在 `modavd-manifest.json` 和公告机读行的 `build` 里，`changelog.json` 每条的 `build` 也是它。
+构建号从 0.42 起是这次重编对应的版本号，参数写 `-Build 0.42`（`0.42.0` 也收），盘上一律三段：`sdk-0.42.0`、`Pkg.BuildId=0.42.0`、补丁目录 `qemu/0.42.0`、`manifest-0.42.0.xml`；`modavd-manifest.json`、公告机读行和 `changelog.json` 每条的 `build` 写字符串 `"0.42.0"`（[#219](https://github.com/ModAVD/ModAVD/issues/219)）。0.41 及以前是 mas-N（`sdk-masN`、`Pkg.BuildId=mas-N`、补丁目录 `qemu/masN`，`build` 写整数 N）：已发的目录、清单和条目都不改名，校验两种都认，`-Build masN` 只留给重编这些历史构建。新写法从 0.42 起，`-Build 0.41` 及以前会被拒。
 tag 是 `v<版本>`，标题 `ModAVD 0.41.0`；上游版本（`Pkg.Revision`，如 37.2.10）写进公告第一句「ModAVD 0.40.2，基于 Google AOSP Android Emulator 37.2.10 构建」；构建号只记在清单和公告机读行的 `build` 里，公告正文不写。
 
 0.40 及以前是旧规矩：版本 `0.<N>.<P>` 的 N 就是构建号，P 是只重新打包的次数；不给 `-Version` 时 `release.ps1` 还照这个算（mas30、mas32 的旧名 `v37.2.10-masN` 算作 `0.N.0`，只能带 `-Patch 1` 以上重新打包）。校验照旧认这些旧条目。
@@ -17,14 +17,14 @@ tag 是 `v<版本>`，标题 `ModAVD 0.41.0`；上游版本（`Pkg.Revision`，�
 ## 构建
 
 ```powershell
-pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build mas34 -WhatIf
+pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build 0.42 -WhatIf
 ```
 
 去掉 `-WhatIf` 才会实际编译。`-EmuSrc`（本机配置 `EmuSrc`）是 AOSP 模拟器源码树，`-Jobs` 默认 12、范围 1–16；
 `-Python` 默认取 `MODAVD_PYTHON`、本机配置 `Python`，再是 PATH 里的 `python`；`-LogRoot` 默认 `<TempRoot>\build-sdk`；
 `-MinFreeGB` 默认 120（源码树真正所在的盘，目录联接会跟过去）。
-目标 `<EmuSrc>\sdk-mas34` 已存在时拒绝执行；不用 clean / removeleftover，不执行删除命令。源码必须提交，编译前后提交快照一致才安装产物。
-产物复制到 `sdk-mas34/emulator`，`Pkg.BuildId` 写成 `mas-34`，旁边保存 `build-info.json` 供发版入口确定对应源码。
+目标 `<EmuSrc>\sdk-0.42.0` 已存在时拒绝执行；不用 clean / removeleftover，不执行删除命令。源码必须提交，编译前后提交快照一致才安装产物。
+产物复制到 `sdk-0.42.0/emulator`，`Pkg.BuildId` 写成 `0.42.0`（`-Build mas34` 这种旧写法是 `sdk-mas34`、`mas-34`），旁边保存 `build-info.json` 供发版入口确定对应源码。
 
 arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOSP 构建产物，由 `tools/gate/stage-payload.ps1` 单独放进 SDK 树：
 `build-sdk.ps1` 在 `ShouldProcess` 之前先跑一次只读的 `-CheckOnly`（`-WhatIf` 也验），编完 robocopy、写完 `source.properties` 之后再真正放进去。
@@ -37,7 +37,7 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 
 | 输入 | 是什么、从哪来 |
 | --- | --- |
-| SDK（`-Sdk`） | `build-sdk.ps1` 编出的 `sdk-masN`，带 `build-info.json` |
+| SDK（`-Sdk`） | `build-sdk.ps1` 编出的 `sdk-0.N.0`（旧构建是 `sdk-masN`），带 `build-info.json` |
 | 源码树（`EmuSrc`） | 编这个 SDK 的 AOSP 模拟器源码树。补丁从 `build-info.json` 记的提交导出，变了的源项目从这里 `git archive` |
 | 源码基准（`Baseline`） | 没变的源码归档直接复用，逐个核对 `config/mas30.SHA256SUMS.txt` 里冻结的哈希。可以用 mas30 Release 的源码包做：`ModAVD-37.2.10-mas30-sources.zip` 里那个文件夹的内容放进 `<Baseline>\source\`，仓库里的 `release/37.2.10-mas30.sources.SHA256SUMS.txt` 复制成 `<Baseline>\SHA256SUMS-sources.txt`（这个做法按代码推出，还没照着从头做过一遍） |
 | 说明和许可证（`LicensePackage`） | 已审核的 `LICENSES\`（`NOTICE.txt`、`NOTICE.csv`、各许可证全文）。预检要求 `LICENSES\AGPL-3.0.txt` 在，且换行统一成 LF 后的 SHA-256 是 `release_tools.py` 的 `AGPL_SHA256`（就是 `package/LICENSE`），否则停。目前只在维护者本机 |
@@ -54,7 +54,7 @@ arm64 执行桥的三个载荷文件（`emulator/resources/modavd/`）不是 AOS
 公告的「更新内容」不手写。用户看得见的改动，各自的 PR 里带一个说明文件（`changelog.d/<名字>.<feat|fix|change|remove>.md`，一行话，写法见 [changelog.d/README.md](../../changelog.d/README.md)）；发版时把上一版以后新加的文件汇总进 `config/changelog.json`（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build mas41 -Version 0.41.1 [-Note "更新前先把实例都关机"] [-MinAutoMas 5.7.0]
+pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build 0.42 -Version 0.42.0 [-Note "更新前先把实例都关机"] [-MinAutoMas 5.9.0-beta.1]
 ```
 
 - 读四个仓库的 `changelog.d`：ModAVD 的发版克隆读 HEAD；管理器、截图库、输入法读各自 `upstream` 的 `release/<X>.<Y>` 头（路径取 `-ManagerRepo`、`-ExtrasRepo`、`-ImeRepo` 或本机配置，先 `git fetch upstream --tags`）。没有这条发版分支的组件算这一版没重新打包，不出条目。
@@ -62,8 +62,8 @@ pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build mas41 -Version 0
 - 文件名里的类型就是分类：`feat` 新增，`fix` 修复，`change` 变更，`remove` 移除。条目是文件里那一行，末尾补上加这个文件的 PR（合并提交标题末尾的编号），写成 `(#N)` 或 `(ModAVD/ModAVDManager#N)`；那一行自己以 issue 或 PR 编号结尾的就不补。
 - 文件不合格（名字不对、不止一行、超过 60 字、有 `--`）会一次全报出来，回去改文件再跑。ModAVD 自己的 `changelog.d` 在 CI 的 `checks.py metadata` 里也查。
 - 每个仓库还会列出上一版以后没带说明文件的提交，过一眼有没有漏掉用户看得见的改动。
-- 「说明」类用 `-Note` 手写，只写这一版要用户动手的事；重新汇总时留着。`-MinAutoMas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。
-- 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["…"]}}`，重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
+- 「说明」类用 `-Note` 手写，只写这一版要用户动手的事；重新汇总时留着。`-MinAutoMas` 不给就沿用上一版的，`none` 表示没有要求；它只进第一行机读注释，公告正文不写。构建号是 `0.N.0` 的版本，`min_automas` 至少要 `5.9.0-beta.1`：AUTO-MAS 5.8.0 及以前开机前按 `Pkg.BuildId=mas-N` 查内测包版本，认不出 `0.N.0` 就拦住开机，低了汇总和预检都会停。
+- 写出来的是 `changelog.json` 最前面本版那一条，`{"version": "v0.42.0", "build": "0.42.0", "min_automas": "5.9.0-beta.1", "changes": {"修复": ["…"]}}`（0.41 及以前的条目是 `"build": 41` 这样的整数，照旧留着），重跑会整条换掉。第一行机读注释带 `changelog.json` 最前面最多 10 条，给 AUTO-MAS 跳版本时合并显示；整行超过 8000 字预检就停，这时只能删掉最老的几条或者缩短旧条目。
 
 公告里除了「更新内容」只有开头一行：基于的上游版本、各组件的版本（本版重新打包的会标出来）和文档站的链接。怎么更新、已知问题、回归怎么测的都不写进公告；这一版有要用户动手的事，用 `-Note` 写成一条「说明」。
 
@@ -78,7 +78,7 @@ python -I tools/pubrel/release_tools.py component-notes --component manager --ve
 汇总完先看公告长度，不用 SDK、不打包：
 
 ```powershell
-python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.41.0 [--sdk <SDK 根目录>]
+python -I tools/pubrel/release_tools.py notes-budget --build 0.42 --version 0.42.0 [--sdk <SDK 根目录>]
 ```
 
 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 条的改动，旧版的条目也算在里面）和分隔行以上的公告（限 4000 字）各多长；超了就报错并说该删哪里，过了 90% 会提醒。没给 `--sdk` 时上游版本按 `99.99.99` 估，比真的多一两个字。`release.ps1` 的预检用同一个算法再查一遍，超了在打包之前就停。
@@ -86,10 +86,10 @@ python -I tools/pubrel/release_tools.py notes-budget --build mas40 --version 0.4
 再检查本次 NOTICE、组件来源和许可证；在测试机上跑发版前回归（[ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)），结果自己留着，不进公告。
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll> -MumuShim <下载的 external_renderer_ipc.dll>
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build 0.42 -Version 0.42.0 -Sdk <SDK 根目录> -Manager <下载的 ModAVDManager-0.3.0-win-x64.zip> -ImeApk <下载的 modavd-ime.apk> -ExtrasDll <下载的 modavd_extras.dll> -MumuShim <下载的 external_renderer_ipc.dll>
 ```
 
-默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\mas40-v0.41.0`。
+默认只生成本地产物和隐私报告，输出 `<TempRoot>\pubrel\0.42.0-v0.42.0`。
 
 管理器、输入法、截图库、执行桥源码和随包脚本都取公开仓库：管理器、输入法和截图库用各自 Release 的附件（管理器、截图库还没打 tag 时见下面一节），
 随包脚本和执行桥源码取发版克隆（`-Repository`，默认就是这份工具所在的克隆）当前提交的 `package/`、`bridge/`。
@@ -114,9 +114,9 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 
 | 参数 | 用途 |
 | --- | --- |
-| `-Build` / `-Sdk` | 必填，构建号 `masNN`（mas32 及更早的只能重新打包）、SDK 根目录；检查 `Pkg.BuildId`，`Pkg.Revision` 记为上游版本 |
-| `-Version` | 公开版本号 `X.Y.Z`，要比 `changelog.json` 里已有的都新；输出目录 `masNN-v<版本>`。给了就不再用 `-Patch` |
-| `-Patch` | 不给 `-Version` 时才用（0.40 及以前的旧规矩）：默认 0，只重新打包时加一，版本变成 `0.<N>.<P>`，输出目录 `masNN-pP` |
+| `-Build` / `-Sdk` | 必填，构建号 `0.N`（0.42 起；旧构建 `masNN`，mas32 及更早的只能重新打包）、SDK 根目录；检查 `Pkg.BuildId`（`0.N.0` 或 `mas-NN`），`Pkg.Revision` 记为上游版本 |
+| `-Version` | 公开版本号 `X.Y.Z`，要比 `changelog.json` 里已有的都新；输出目录 `<构建号>-v<版本>`（`0.42.0-v0.42.0`、`mas40-v0.41.0`）。给了就不再用 `-Patch` |
+| `-Patch` | 不给 `-Version` 时才用（0.40 及以前的旧规矩）：默认 0，只重新打包时加一，版本变成 `0.<N>.<P>`，输出目录 `<构建号>-pP` |
 | `-Changelog` | 默认 `config/changelog.json`；试运行时指向临时副本 |
 | `-Snapshot` | 默认读 SDK 的 `build-info.json` |
 | `-EmuSrc` | 源码树（`EmuSrc`） |
@@ -169,7 +169,7 @@ pwsh -NoProfile -File tools/pubrel/release-pr.ps1 -PlanFile <清单.psd1> -BodyF
 - `release-assets.json` 记录供仓库 CI 使用的大小与哈希。
 - `patches/`：要进发版提交的补丁。`series.json`、`BASE.md` 是发版克隆（`-Repository`）里那两份加上这一版，直接覆盖仓库里的：
   - 和已发布的某个系列仓库、基准、分支头都相同的，沿用那个目录（比如 Crashpad 一直是 `crashpad/module-version22`），不加新目录；它的导出放在 `work/patches-reused/` 给回放和 incoming 核对用，不在 `patches/` 里。
-  - 其余的是新目录（`patches/<仓库>/masN/`）：`series.json` 最前面加一条；`BASE.md` 版本表加一行（同一构建再发一个版本，比如重新打包，按构建号找到那一行，只补「；<版本> 相同」），目录表在同一仓库的旧行上面加一行，目录表下面的说明加一句（和上一个目录前几个补丁相同、从第几个起是新增的，按 patch-id 算）。
+  - 其余的是新目录（`patches/<仓库>/<构建号>/`，0.42 起如 `qemu/0.42.0`，以前是 `qemu/masN`）：`series.json` 最前面加一条；`BASE.md` 版本表加一行（同一构建再发一个版本，比如重新打包，按构建号找到那一行，只补「；<版本> 相同」），目录表在同一仓库的旧行上面加一行，目录表下面的说明加一句（和上一个目录前几个补丁相同、从第几个起是新增的，按 patch-id 算）。
   - 新补丁的许可证、新增的补丁做了什么只能人写，留成「发布前填写」：填完再提交，`checks.py metadata` 见到它就失败。版本表下面的许可证表、回放示例也按需要手改。
   - 发版克隆里已经是加过这一版的（重跑一遍），不会重复加。`logs/patch-dirs.json` 记每个仓库这一版用哪个目录、是不是新的。
 
@@ -200,7 +200,7 @@ NOTICE.txt 里每个 `(package root)` 文件都要在包里。以后往包里加
 截图库（`extras\modavd_extras.dll`）按 LGPL-3.0-or-later 发布，源码在 https://github.com/ModAVD/ModAVDExtras，`modavd-src` 的 NOTICE 写明这个例外。
 补丁按所改文件的许可证；ModAVD 仓库根目录的 LICENSE 仍是 Apache-2.0；图标不在任何许可证范围内。
 24 个源项目发生变化时重新 `git archive`；其他 manifest 项目（尤其 prebuilts）发生变化会停止，需重新审核对应源码及 NOTICE。
-P3 审核过的说明和 NOTICE 里写的是 `37.2.10-mas30`，组包时换成新版本号，`mas-30` / `mas30` 换成本次构建号。
+P3 审核过的说明和 NOTICE 里写的是 `37.2.10-mas30`，组包时换成新版本号，`mas-30` / `mas30` 换成本次构建号（0.42 起两处都是 `0.42.0`，清单文件 `manifest-0.42.0.xml`）。
 清单模板是仓库里审核过的 `manifests/manifest-mas30.xml`。
 
 ## 共享校验与隐私规则

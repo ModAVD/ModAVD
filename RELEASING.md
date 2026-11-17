@@ -7,7 +7,7 @@
 
 版本号 `0.<N>.<P>` 用 `release.ps1 -Version` 给：0 表示内测阶段；模拟器本体重新编译才加 N，模拟器没重编（只换管理器、截图库、输入法等，或只重新打包）只加 P，比如 0.40.1 之后只换了管理器和截图库就发 0.40.2。
 管理器、截图库、输入法从 0.41.0 的下一版起跟整包走（[#216](https://github.com/ModAVD/ModAVD/issues/216)）：这一版重新打包了，版本号就取这一版的版本号；没重新打包的不动。比如 0.42.3 只重新编译了管理器，管理器就是 0.42.3，截图库还是 0.42.0。
-模拟器构建号照旧是 mas-N（`source.properties` 的 `Pkg.BuildId=mas-N`），不要求等于 N，只记在 `modavd-manifest.json` 和公告机读行的 `build` 里；公告、标题和 PR 里不写构建号。
+模拟器构建号从 0.42.0 起写成这次重编对应的版本号 `0.N.0`（`source.properties` 的 `Pkg.BuildId=0.42.0`，`modavd-manifest.json`、公告机读行和 `changelog.json` 的 `build` 写同样的字符串 `"0.42.0"`）；口头和命令行参数叫 `0.N`（`-Build 0.42`），盘上一律写三段，只随模拟器重编变，重新打包的 0.42.3 还是 `0.42.0`（[#219](https://github.com/ModAVD/ModAVD/issues/219)）。公告、标题和 PR 里不写构建号。
 0.40.0 带的管理器 0.8.0 装包时还要求版本中间那位等于构建号，所以 0.40.0 之后先发 0.40.1（mas-40，带不再要这个对应的管理器 0.9.0）；装了 0.40.1 以后的根目录才能用「更新」装上版本号和构建号对不上的包。
 tag 是 `v0.<N>.<P>`，标题是 `ModAVD 0.<N>.<P>`；Release 说明第一句写明基于的 Google AOSP Android Emulator 版本和包里各组件的版本。
 0.32.1 到 0.40 是旧规矩：N 就是构建号，P 是不重编、只重新打包的次数，标题 `ModAVD mas-<N>（0.<N>.<P>）`。
@@ -31,12 +31,12 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 ## 发版前
 
 - [ ] 确定构建号、已提交的待编译源码、对应 manifest、补丁基准及第三方组件来源。更新许可证声明。
-- [ ] 先预览构建命令，再另行安排实际构建：`pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build mas34 -WhatIf`。实际构建去掉 `-WhatIf`，并行度最多 16；目标 SDK 已存在时停止。
-- [ ] 确认 SDK 中 `source.properties` 的 `Pkg.BuildId=mas-34`，并保留构建入口生成的 `build-info.json`。
+- [ ] 先预览构建命令，再另行安排实际构建：`pwsh -NoProfile -File tools/build/build-sdk.ps1 -Build 0.42 -WhatIf`。实际构建去掉 `-WhatIf`，并行度最多 16；目标 SDK 已存在时停止。
+- [ ] 确认 SDK 中 `source.properties` 的 `Pkg.BuildId=0.42.0`（产物目录 `sdk-0.42.0`），并保留构建入口生成的 `build-info.json`。
 - [ ] **在测试机上跑回归**：启动/关机、WHPX、GLES/GuestAngle、MAA/MaaFW 共享内存截图与点击、已有游戏及相关修复；记录结果。运行器和套件在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)，改了什么跑什么（`-Scope`），先 `-DryRun` 看会跑哪些项；结果表 `results.md` 自己留着，不进 Release 说明。计划内关闭实例先执行 `adb -P <独立端口> -s emulator-<实例端口> shell sync`，再 `emu kill`。
-- [ ] 「更新内容」不手写，从各 PR 带的说明文件汇总：`pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build mas34 -Version <版本>` 把四个仓库 `changelog.d` 里上一版以后新加的文件每个写成一条，进 `tools/pubrel/config/changelog.json` 最前面本版那一条。它同时列出没带说明文件的提交，过一眼有没有漏的；漏了就补一个文件再跑。用法见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版」。
+- [ ] 「更新内容」不手写，从各 PR 带的说明文件汇总：`pwsh -NoProfile -File tools/pubrel/collect-changelog.ps1 -Build 0.42 -Version <版本>` 把四个仓库 `changelog.d` 里上一版以后新加的文件每个写成一条，进 `tools/pubrel/config/changelog.json` 最前面本版那一条。它同时列出没带说明文件的提交，过一眼有没有漏的；漏了就补一个文件再跑。用法见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版」。
 - [ ] 这一版重新打包的组件，版本号设成这一版的版本号，`release/<版本>.md` 用 `release_tools.py component-notes` 生成。
-- [ ] 汇总完看长度：`python -I tools/pubrel/release_tools.py notes-budget --build mas34 [--sdk <SDK根目录>]` 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 版的改动）和分隔行以上的公告（限 4000 字）各多长，超了就报错，过了 90% 会提醒。`release.ps1` 的预检也查这一项，不用等到第 7 步。
+- [ ] 汇总完看长度：`python -I tools/pubrel/release_tools.py notes-budget --build 0.42 [--sdk <SDK根目录>]` 报出机读行（限 8000 字，带 `changelog.json` 最前面最多 10 版的改动）和分隔行以上的公告（限 4000 字）各多长，超了就报错，过了 90% 会提醒。`release.ps1` 的预检也查这一项，不用等到第 7 步。
 - [ ] 怎么更新、已知问题不写进 Release 说明：新发现的问题建 issue、打上 `bug`；这一版有要用户动手的事（比如更新前要先关实例），用 `collect-changelog.ps1 -Note` 写成一条「说明」。
 
 ## 生成和核对
@@ -44,7 +44,7 @@ mas30、mas32 是旧写法 `v37.2.10-masN`，保持不变，算作 `0.N.0`；`0.
 默认只在本地执行到隐私扫描。SDK 和管理器包通过参数指定，源码树、源码基准、说明和许可证目录等外部输入用参数或本机配置给（见 [tools/pubrel/README.md](tools/pubrel/README.md)「外部输入」）：
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> -ImeApk <modavd-ime.apk> -ExtrasDll <modavd_extras.dll> -MumuShim <external_renderer_ipc.dll>
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build 0.42 -Version <版本> -Sdk <SDK根目录> -Manager <ModAVDManager-版本-win-x64.zip> -ImeApk <modavd-ime.apk> -ExtrasDll <modavd_extras.dll> -MumuShim <external_renderer_ipc.dll>
 ```
 
 `-ImeApk`、`-ExtrasDll`、`-MumuShim` 打包时都必须给：宿主输入法 APK 的哈希钉在 `tools/pubrel/config/components.SHA256SUMS.txt` 里，钉了没给就停；截图库和 MuMu 兼容外壳每个包都带，没给就停。
@@ -74,7 +74,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> 
 然后显式添加 `-DraftRelease` 重新生成并创建草稿：它只收组件都打了 tag 的包，隐私扫描不读缓存、全部重扫，草稿的 tag 指向 `release/0.<N>`。已有本地输出时可以使用 `-Force`，它只重建有匹配所有权标记的本次输出目录；失败时保留现场。
 
 ```powershell
-pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas34 -Sdk <SDK根目录> -Force -DraftRelease
+pwsh -NoProfile -File tools/pubrel/release.ps1 -Build 0.42 -Version <版本> -Sdk <SDK根目录> -Force -DraftRelease
 ```
 
 - [ ] 草稿附件**恰好三个**：主包 ZIP、源码总包 ZIP、外层 `SHA256SUMS.txt`。
