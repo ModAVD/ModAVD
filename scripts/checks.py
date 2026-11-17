@@ -346,7 +346,9 @@ def replay(root, work):
             raise ValueError("Invalid AOSP project/base")
         check_base_row(base_text, s)
         directory = s["dir"]
-        if not re.fullmatch(r"[a-z0-9_-]+/[a-z0-9_-]+", directory):
+        # from 0.42 new series directories are named after the version (qemu/0.42.0): the second part may have dots,
+        # but not start with one (so never . or ..)
+        if not re.fullmatch(r"[a-z0-9_-]+/[a-z0-9][a-z0-9_.-]*", directory):
             raise ValueError("Unsafe series directory")
         repo = work / directory.replace("/", "-")
         repo.mkdir()
