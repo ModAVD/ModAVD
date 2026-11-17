@@ -590,9 +590,14 @@ class ReleaseChecks(unittest.TestCase):
             release.write_manifest(tree, {"build": build, "version": version, "upstream": "37.2.10", "min_automas": "5.7.0"})
             data = checks.check_manifest(tree)
             self.assertEqual((data["version"], data["build"]), ("v" + version, int(build[3:])))
+        # from 0.42 the build is written as the version it was built for, the same string as Pkg.BuildId
+        for version, build in [("0.42.0", "0.42"), ("0.42.3", "0.42.0")]:
+            release.write_manifest(tree, {"build": build, "version": version, "upstream": "37.2.10", "min_automas": "5.7.0"})
+            data = checks.check_manifest(tree)
+            self.assertEqual((data["version"], data["build"]), ("v" + version, "0.42.0"))
         good = release.load(manifest)
         for field, value in [("build", 0), ("build", "40"), ("build", True), ("build", None), ("version", "0.41.0"),
-                             ("version", "v0.41")]:
+                             ("version", "v0.41"), ("build", "0.42"), ("build", "v0.42.0"), ("build", "mas-42")]:
             release.save(manifest, {**good, field: value})
             with self.assertRaises(ValueError):
                 checks.check_manifest(tree)
@@ -1212,10 +1217,59 @@ class ReleaseChecks(unittest.TestCase):
         for given, patch in [("0.41.0", 1), ("v0.41.0", 0), ("0.41", 0), ("0.041.0", 0), ("0.41.0-rc1", 0)]:
             with self.assertRaises(ValueError):
                 version("mas40", patch, given)
-        for good in [1, 40, 1000]:
+        for good in [1, 40, 1000, "0.42.0", "0.100.0", "1.0.0"]:
             self.assertTrue(checks.is_build(good))
-        for bad in [0, -1, "40", 40.0, True, None]:
+        for bad in [0, -1, "40", 40.0, True, None, "0.42", "0.42.1", "v0.42.0", "mas-42", "0.042.0", "0.0.0", "0.42.0 "]:
             self.assertFalse(checks.is_build(bad))
+
+    def test_build_ids(self):
+        """Up to mas41 the build is masN (Pkg.BuildId mas-N, the integer N in the manifest); from 0.42 it is the
+        version the emulator was built for, -Build 0.N, Pkg.BuildId and the manifest's "build" both 0.N.0."""
+        for given, name, number, build_id in [("mas41", "mas41", 41, "mas-41"), ("mas30", "mas30", 30, "mas-30"),
+                                              ("0.42", "0.42.0", "0.42.0", "0.42.0"), ("0.42.0", "0.42.0", "0.42.0", "0.42.0"),
+                                              ("0.100", "0.100.0", "0.100.0", "0.100.0"), ("1.0", "1.0.0", "1.0.0", "1.0.0")]:
+            self.assertEqual(release.normalize_build(given), name)
+            self.assertEqual(release.build_number(given), number)
+            self.assertEqual(release.pkg_build_id(release.build_number(given)), build_id)
+            self.assertTrue(checks.is_build(number))
+        for bad in ["0.41", "0.41.0", "0.33", "0.42.1", "0.042", "v0.42", "mas-42", "mas0", "mas42", "42", "", None,
+                    "0.42.0.0"]:
+            with self.assertRaises(ValueError):
+                release.normalize_build(bad)
+        # without --version the version still follows the build: 0.42 -> 0.42.<patch>, and 0.42.0 itself is new
+        self.assertEqual(release.release_version("0.42", 0), "0.42.0")
+        self.assertEqual(release.release_version("0.42.0", 3), "0.42.3")
+        self.assertEqual(release.public_version(SimpleNamespace(build="0.42.0", patch=0, version="0.42.0")), "0.42.0")
+        self.assertEqual(release.render_components("0.42.0", "0.42.0", None), "组件：模拟器 0.42.0（本版更新）。")
+        self.assertEqual(release.render_components("0.42.1", "0.42.0", None), "组件：模拟器 0.42.0。")
+        self.assertEqual(release.render_components("0.41.1", 41, None), "组件：模拟器 0.41.0。")
+        # preflight: the SDK's Pkg.BuildId is this build's, written the same way
+        sdk = self.folder()
+        props = sdk / "emulator/source.properties"
+        props.parent.mkdir(parents=True)
+        for text, number, ok in [("Pkg.BuildId=0.42.0\r\n", "0.42.0", True), ("Pkg.BuildId=mas-41\n", 41, True),
+                                 ("Pkg.BuildId=mas-42\n", "0.42.0", False), ("Pkg.BuildId=0.42.0\n", 42, False),
+                                 ("Pkg.BuildId=0.42.0.1\n", "0.42.0", False), ("Pkg.BuildId=0.42\n", "0.42.0", False),
+                                 ("Pkg.BuildId=0x42x0\n", "0.42.0", False), ("Pkg.BuildId=mas-410\n", 41, False)]:
+            props.write_text("Pkg.Revision=37.2.10\n" + text, encoding="utf-8", newline="")
+            if ok:
+                release.check_sdk_build_id(sdk, number)
+            else:
+                with self.assertRaisesRegex(ValueError, "Pkg.BuildId differs"):
+                    release.check_sdk_build_id(sdk, number)
+
+    def test_annotated_manifest_of_a_version_build(self):
+        """manifest-0.42.0.xml: the header names Pkg.BuildId 0.42.0 instead of mas-N."""
+        s = {"repo": "external/example", "base": "a" * 40, "head": "b" * 40, "dir": "example/0.42.0", "count": 1}
+        template = (f'<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
+                    f"  <!-- {s['repo']}：AOSP 基准 {'0' * 40}，本地分支 old = 基准 + 1 个提交，HEAD {'1' * 40} -->\n"
+                    f'  <project path="{s["repo"]}" revision="{"1" * 40}"/>\n</manifest>\n')
+        expected = ET.fromstring(template)
+        expected.find("project").set("revision", s["head"])
+        text = release.annotated_manifest(template, expected, "0.42.0", [s], "37.2.10", [])
+        self.assertTrue(text.startswith("<!-- 0.42.0 emulator 37.2.10 "))
+        self.assertIn("补丁系列 patches/example/0.42.0 = 基准 + 1 个提交", text)
+        self.assertNotIn("mas-", text)
 
     def annotated_series(self, series, recorded):
         template = '<!-- mas-30 emulator 37.2.10 2026-10-01 生成 -->\n<manifest>\n'
@@ -1601,6 +1655,39 @@ class ReleaseChecks(unittest.TestCase):
         self.assertIn("（0001–0002 按 `bbbbbbbb`）。", text)
         self.assertIn("回放示例（以 mas-38 的 qemu 为例）：", text)
 
+    def test_patch_records_of_a_version_build(self):
+        """0.42 on: the version row says Pkg.BuildId=0.42.0, the new directory is qemu/0.42.0 under the published
+        qemu/mas41, and the replay example follows; a later version of the same build finds that row again."""
+        old = {"repo": "external/qemu", "upstream": "platform/external/qemu", "base": "a" * 40, "head": "b" * 40,
+               "dir": "qemu/mas41", "count": 2, "tree": "c" * 40}
+        s = {**old, "head": "d" * 40, "dir": "qemu/0.42.0", "count": 3, "tree": "e" * 40, "trees": [], "authors": [],
+             "path": "patches/qemu/0.42.0"}
+        base_md = ("| 版本 | qemu |\n| --- | --- |\n| 0.41.0（`Pkg.BuildId=mas-41`；0.41.1 相同） | qemu/mas41 |\n\n"
+                   "| 目录 | AOSP 仓库 | 基准 | 补丁数 | 分支头 | 许可证 |\n| --- | --- | --- | --- | --- | --- |\n"
+                   f"| `qemu/mas41` | `platform/external/qemu` | `{'a' * 40}` | 2 | `{'b' * 40}` | GPL-2.0 |\n\n- 说明。\n\n"
+                   "## qemu 补丁的许可证\n\n这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（0001–0002 按 `bbbbbbbb`）。\n\n"
+                   "回放示例（以 mas-41 的 qemu 为例）：\n\n```sh\ngit checkout -b mas41 " + "a" * 40 +
+                   "\ngit am --keep-cr ../patches/qemu/mas41/*.patch\n```\n")
+        root = self.folder()
+        number = release.build_number("0.42")
+        with mock.patch.object(release, "leading_same", return_value=2):
+            records, text, dirs = release.merge_patch_records([s], [old], base_md, root, root, "0.42.0", number)
+        lines = text.split("\n")
+        self.assertEqual(lines[2], "| 0.42.0（`Pkg.BuildId=0.42.0`） | qemu/0.42.0 |")
+        self.assertEqual(lines[3], "| 0.41.0（`Pkg.BuildId=mas-41`；0.41.1 相同） | qemu/mas41 |")
+        self.assertIn("0003–0003 是 0.42.0 新增的：", text)
+        self.assertIn("回放示例（以 0.42.0 的 qemu 为例）：", text)
+        self.assertIn("git checkout -b 0.42.0 " + "a" * 40 + "\ngit am --keep-cr ../patches/qemu/0.42.0/*.patch\n", text)
+        self.assertEqual([r["dir"] for r in records], ["qemu/0.42.0", "qemu/mas41"])
+        self.assertEqual(dirs, {"external/qemu": {"dir": "qemu/0.42.0", "new": True}})
+        # 0.42.1 on the same emulator: the same row, nothing new; the replay example of 0.42.0 is found again
+        recorded = [{k: v for k, v in r.items()} for r in records]
+        with mock.patch.object(release, "leading_same", return_value=2):
+            records2, text2, dirs2 = release.merge_patch_records([s], recorded, text, root, root, "0.42.1", number)
+        self.assertIn("| 0.42.0（`Pkg.BuildId=0.42.0`；0.42.1 相同） | qemu/0.42.0 |", text2)
+        self.assertEqual(text2.count("Pkg.BuildId=0.42.0"), 1)
+        self.assertEqual(dirs2, {"external/qemu": {"dir": "qemu/0.42.0", "new": False}})
+
     def test_patch_records_refuse_a_stale_directory(self):
         root = self.folder()
         series, checkout = self.published_checkout(root)
@@ -1756,11 +1843,38 @@ class ReleaseChecks(unittest.TestCase):
             self.assertEqual(checks.check_announcement(text, version, build)["build"], build)
             with self.assertRaises(ValueError):
                 checks.check_announcement(text, version, build + 1)
-        for build in [0, -1, "40", True, 40.0]:
+        for build in [0, -1, "40", True, 40.0, "0.42", "mas-42", "0.42.1"]:
             with self.assertRaises(ValueError):
                 checks.check_announcement(self.notes_text(changes={"v0.41.0": {"修复": ["a"]}}, version="v0.41.0", build=build))
         with self.assertRaises(ValueError):
             checks.machine_line({"changes": {"v0.33.0": {"修复": ["a -- b"]}}})
+        # from 0.42 the build is the version the emulator was built for, as a string; integer 42 is another build
+        text = self.notes_text(changes={"v0.42.0": {"修复": ["a"]}, "v0.41.1": {"修复": ["b"]}}, version="v0.42.0", build="0.42.0")
+        self.assertIn('"build":"0.42.0"', text.split("\n")[0])
+        self.assertEqual(checks.check_announcement(text, "v0.42.0", "0.42.0")["build"], "0.42.0")
+        with self.assertRaises(ValueError):
+            checks.check_announcement(text, "v0.42.0", 42)
+
+    def test_changelog_mixes_both_build_forms(self):
+        """changelog.json keeps the published integers next to the new strings; this version's entry must carry the
+        build being packaged in its own form."""
+        changelog = self.folder() / "changelog.json"
+        entry = lambda v, b: {"version": v, "build": b, "min_automas": "5.7.0", "changes": {"修复": ["修好一处"]}}
+        release.save(changelog, [entry("v0.42.0", "0.42.0"), entry("v0.41.1", 41), entry("v0.41.0", 41)])
+        self.assertEqual([e["build"] for e in release.read_changelog(changelog, "0.42.0", release.build_number("0.42"))],
+                         ["0.42.0", 41, 41])
+        self.assertEqual(len(release.read_changelog(changelog, "0.41.1", 41)), 2)
+        with self.assertRaisesRegex(ValueError, "differs from -Build"):
+            release.read_changelog(changelog, "0.42.0", 42)
+        release.save(changelog, [entry("v0.42.0", "0.42"), entry("v0.41.1", 41)])
+        with self.assertRaisesRegex(ValueError, "0.N.0"):
+            release.read_changelog(changelog, "0.42.0", "0.42.0")
+        machine = release.text_fields("0.41.1", 41, "37.2.10", self.write_changelog_for_fields(changelog))["MACHINE"]
+        self.assertIn('"build":41', machine)
+
+    def write_changelog_for_fields(self, changelog):
+        release.save(changelog, [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["x"]}}])
+        return changelog
 
     def test_notes_budget_before_packaging(self):
         """0.38.0: the machine line (9157) and the announcement (4532) were over their limits, which only step 7 said,

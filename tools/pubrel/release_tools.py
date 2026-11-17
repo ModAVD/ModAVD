@@ -30,6 +30,11 @@ IDENTITY = checks.MAINTAINER
 # and the machine line). Without --version the old rule still applies: mas30 and mas32 were published as
 # 37.2.10-masN, which counts as 0.N.0, so builds before this one can only be repackaged (P >= 1), e.g. mas32 -> 0.32.1.
 FIRST_NEW_BUILD = 33
+# The build ID: Pkg.BuildId=mas-<N> up to mas41; from the 0.42 rebuild on it is the version the emulator was built for,
+# Pkg.BuildId=0.<N>.0, and the manifest, machine line and changelog.json write that string where they had N (the
+# tools take -Build 0.<N>). Directories named after the build follow: sdk-0.42.0, patches/qemu/0.42.0,
+# manifest-0.42.0.xml; the published masN ones keep their names.
+LAST_LEGACY_BUILD = 41
 MANIFEST = "modavd-manifest.json"
 # Binary packages carry the platform (a Linux build may follow); the source bundle does not.
 PLATFORM = "win-x64"
@@ -264,19 +269,48 @@ def no_links(path):
                     raise RuntimeError(f"Refusing linked output entry: {child}")
 
 
+def normalize_build(build):
+    """The build as the tools name it (-Build / --build): legacy "mas<N>" as it is, or from 0.42 "0.<N>" / "0.<N>.0"
+    written "0.<N>.0". The new form starts after mas41 (0.41.0); a nonzero last part is refused, since every rebuild
+    of the emulator moves the middle number."""
+    text = build or ""
+    if re.fullmatch(r"mas[1-9][0-9]*", text) and int(text[3:]) <= LAST_LEGACY_BUILD:
+        return text
+    m = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.0)?", text)
+    if not m or (int(m[1]), int(m[2])) <= (0, LAST_LEGACY_BUILD):
+        raise ValueError(f"Invalid build number {build!r}: masN up to mas{LAST_LEGACY_BUILD}, "
+                         f"then 0.N or 0.N.0 from 0.{LAST_LEGACY_BUILD + 1}")
+    return f"{int(m[1])}.{int(m[2])}.0"
+
+
 def build_number(build):
-    m = re.fullmatch(r"mas([1-9][0-9]*)", build or "")
-    if not m:
-        raise ValueError("Invalid build number")
-    return int(m[1])
+    """The build as modavd-manifest.json, the machine line and changelog.json write it: mas41 -> 41 (an integer, as
+    published up to 0.41), 0.42 / 0.42.0 -> "0.42.0" (the same as Pkg.BuildId)."""
+    build = normalize_build(build)
+    return int(build[3:]) if build.startswith("mas") else build
+
+
+def pkg_build_id(number):
+    """Pkg.BuildId of a build_number: 41 -> mas-41, "0.42.0" -> 0.42.0."""
+    return f"mas-{number}" if type(number) is int else number
+
+
+def check_sdk_build_id(sdk, number):
+    """The SDK's emulator/source.properties says Pkg.BuildId of this build (mas-41, 0.42.0), nothing else."""
+    props = (Path(sdk) / "emulator/source.properties").read_text(encoding="utf-8-sig")
+    if not re.search(rf"(?m)^Pkg\.BuildId={re.escape(pkg_build_id(number))}[ \t\r]*$", props):
+        raise ValueError(f"SDK Pkg.BuildId differs from requested release (want {pkg_build_id(number)})")
 
 
 def release_version(build, patch):
-    """mas33 + patch 0 -> 0.33.0; mas32 + patch 1 -> 0.32.1 (no leading v; the tag adds it)."""
+    """mas33 + patch 0 -> 0.33.0; mas32 + patch 1 -> 0.32.1; 0.42 + patch 0 -> 0.42.0 (no leading v; the tag adds it)."""
     number = build_number(build)
     patch = int(patch or 0)
     if not 0 <= patch <= 999:
         raise ValueError("Patch must be 0-999")
+    if type(number) is not int:
+        major, minor, _ = number.split(".")
+        return f"{major}.{minor}.{patch}"
     if number < FIRST_NEW_BUILD and patch < 1:
         raise ValueError(f"{build} was published as 37.2.10-{build} (= 0.{number}.0); repackage it with -Patch 1 or later")
     return f"0.{number}.{patch}"
@@ -451,7 +485,7 @@ def read_changelog(path, version, number):
             raise ValueError(f"changelog entry needs exactly version/build/min_automas/changes: {e}")
         key = checks.version_key(e["version"])
         if not checks.is_build(e["build"]):
-            raise ValueError(f"changelog build must be a positive integer (Pkg.BuildId mas-N): {e['version']}")
+            raise ValueError(f"changelog build must be a positive integer (Pkg.BuildId mas-N) or \"0.N.0\": {e['version']}")
         if seen and key >= seen[-1]:
             raise ValueError("changelog.json must be sorted newest first without duplicates")
         seen.append(key)
@@ -500,8 +534,7 @@ def baseline_sums(baseline):
 
 
 def snapshot_data(args):
-    if not re.fullmatch(r"mas[1-9][0-9]*", args.build):
-        raise ValueError("Invalid build number")
+    args.build = normalize_build(args.build)
     data = load(HERE / "config/mas30.json")
     if args.build == "mas30":
         raise ValueError("mas30 snapshot is frozen; choose a new build number")
@@ -605,10 +638,7 @@ def preflight(args):
             raise ValueError("Patch series and manifest revisions disagree")
     version = public_version(args)
     number = build_number(args.build)
-    sdk = Path(args.sdk) / "emulator"
-    props = (sdk / "source.properties").read_text(encoding="utf-8-sig")
-    if not re.search(rf"(?m)^Pkg.BuildId=mas-{number}\s*$", props):
-        raise ValueError("SDK Pkg.BuildId differs from requested release")
+    check_sdk_build_id(args.sdk, number)
     upstream = sdk_upstream(args.sdk)
     # reads and checks changelog.json, and the release notes' length limits (step 7 checks them again)
     budget = describe_budget(*notes_budget(version, number, upstream, args.changelog))
@@ -638,7 +668,7 @@ def preflight(args):
     if changed(REPO, *OWN_SOURCES_ROOT.values()):
         raise ValueError("Uncommitted changes under " + ", ".join(OWN_SOURCES_ROOT.values()) + "; commit first")
     own = checked_sources(args)
-    print(f"Preflight OK: v{version} (mas-{number}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
+    print(f"Preflight OK: v{version} ({pkg_build_id(number)}, Emulator {upstream}), changes, changelog, release notes ({budget}), snapshot, baseline hashes, "
           f"AGPL-3.0 full text{', LGPL-3.0 / GPL-3.0 full texts' if lgpl else ''}, "
           f"pinned components ({', '.join(sorted(Path(r).name for r in components))}), disk budget, output path; "
           f"{describe_sources(own)}")
@@ -941,10 +971,11 @@ def assemble(args):
         if p.is_file():
             copy(p, dest / "LICENSES" / p.name)
     # The reviewed P3 texts say "37.2.10-mas30": the folder name becomes ModAVD-<version>-<platform>, the product
-    # name the new version; the build ID and manifest names stay masN.
+    # name the new version; the build ID and manifest names become this build's (mas-41 / manifest-mas41.xml, from
+    # 0.42 0.42.0 / manifest-0.42.0.xml).
     for text in (dest / "LICENSES").glob("NOTICE.*"):
         content = text.read_text(encoding="utf-8-sig").replace("ModAVD-37.2.10-mas30", name).replace("37.2.10-mas30", version)
-        content = content.replace("mas-30", f"mas-{number}").replace("mas30", args.build)
+        content = content.replace("mas-30", pkg_build_id(number)).replace("mas30", args.build)
         text.write_text(content, encoding="utf-8")
     extend_texts(dest, own["manager"]["go"])
     check_notice_coverage(dest)
@@ -1339,7 +1370,7 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
     want = [by_column[c.lower()] for c in columns]
     # The rows are keyed by the build, not by the version: one build can be published under several versions (a
     # repack, or since 0.41 a release that changes only what is around the emulator, e.g. 0.41.0 on mas-40).
-    build_id = f"`Pkg.BuildId=mas-{number}`"
+    build_id = f"`Pkg.BuildId={pkg_build_id(number)}`"
     rows = [i for i in range(head + 2, end) if build_id in cells(lines[i])[0]]
     if len(rows) > 1:
         raise ValueError(f"patches/BASE.md: more than one version row for {build_id}")
@@ -1392,10 +1423,10 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
                 what = f"全部 {s['count']} 个与 `{previous['dir']}` 是同一批提交（补丁文件头里的序号不同）"
             elif same:
                 what = (f"0001–{same:04d} 与 `{previous['dir']}` 是同一批提交（补丁文件头里的序号不同），"
-                        f"{same + 1:04d}–{s['count']:04d} 是 mas-{number} 新增的：{PLACEHOLDER}（新增的补丁各做了什么）")
+                        f"{same + 1:04d}–{s['count']:04d} 是 {pkg_build_id(number)} 新增的：{PLACEHOLDER}（新增的补丁各做了什么）")
                 extended[s["repo"]] = same + 1
             else:
-                what = f"0001–{s['count']:04d} 都是 mas-{number} 的：{PLACEHOLDER}（和已发布的目录有什么不同）"
+                what = f"0001–{s['count']:04d} 都是 {pkg_build_id(number)} 的：{PLACEHOLDER}（和已发布的目录有什么不同）"
             notes.append(f"- `{d['dir']}` 的 {what}。")
         else:
             name = names[d["dir"].split("/")[0]]
@@ -1403,7 +1434,7 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
             if not first or d["dir"] == s["dir"] or any(line.startswith(f"- {version} 的 {name} 补丁") for line in lines):
                 continue
             notes.append(f"- {version} 的 {name} 补丁和已发布的 `{d['dir']}` 是同一批提交（基准、分支头都相同），沿用这个目录；"
-                         f"mas-{number} 清单注释里写的也是这个目录。")
+                         f"{pkg_build_id(number)} 清单注释里写的也是这个目录。")
     lines[at:at] = notes
     text = "\n".join(lines)
     # The qemu license section names, for each range of patches, the commit whose file headers it was read from, and
@@ -1415,7 +1446,7 @@ def merge_patch_records(series_log, published, base_text, repo, out, version, nu
         first_new = extended[s["repo"]]
         text = re.sub(r"(这张表是按编译时提交上各文件开头的许可证声明逐个归出来的（[^\n]*?)）。",
                       lambda m: f"{m[1]}，{first_new:04d}–{s['count']:04d} 按 `{s['head'][:8]}`）。", text, count=1)
-        replay = [(r"回放示例（以 mas-\d+ 的 qemu 为例）", f"回放示例（以 mas-{number} 的 qemu 为例）"),
+        replay = [(r"回放示例（以 (?:mas-\d+|\d+\.\d+\.0) 的 qemu 为例）", f"回放示例（以 {pkg_build_id(number)} 的 qemu 为例）"),
                   (r"git checkout -b \S+ [0-9a-f]{40}", f"git checkout -b {s['dir'].split('/')[1]} {s['base']}"),
                   (r"git am --keep-cr \.\./patches/qemu/[^/\s]+/\*\.patch", f"git am --keep-cr ../patches/{s['dir']}/*.patch")]
         if all(len(re.findall(pattern, text)) == 1 for pattern, _ in replay):
@@ -1572,7 +1603,7 @@ def sources(args):
         text = (baseline / "source/SOURCES.txt").read_text(encoding="utf-8-sig")
         # "ModAVD-37.2.10-mas30.zip" is the main ZIP name, which is now ModAVD-<version>-<platform>.zip.
         text = text.replace("ModAVD-37.2.10-mas30", package_name(data["version"])).replace("37.2.10-mas30", data["version"])
-        text = text.replace("mas-30", "mas-" + data["build"][3:]).replace("mas30", data["build"])
+        text = text.replace("mas-30", pkg_build_id(build_number(data["build"]))).replace("mas30", data["build"])
         for p in source_projects:
             text = text.replace(p.replace("/", "-") + "-" + old[p][:12], p.replace("/", "-") + "-" + new[p][:12])
         summary.append(own_sources(out, dest, data["own"]))
@@ -1643,7 +1674,7 @@ def manifest_shape(root):
 
 def annotated_manifest(template, expected, build, series, upstream, published_series):
     """Rewrite a reviewed mas30 manifest so its comments survive; fail closed unless it parses to `expected`."""
-    text = template.replace("mas-30", "mas-" + build[3:]).replace("emulator 37.2.10", "emulator " + upstream)
+    text = template.replace("mas-30", pkg_build_id(build_number(build))).replace("emulator 37.2.10", "emulator " + upstream)
     text, n = re.subn(r"\d{4}-\d{2}-\d{2} 生成", datetime.date.today().isoformat() + " 生成", text)
     if n != 1:
         raise ValueError("Manifest header date not found")
@@ -1736,7 +1767,7 @@ def render_components(version, number, own):
     a release takes that release's version) or was not tagged yet when packaged; the emulator when this is 0.<N>.0."""
     def new(part_version, also=False):
         return "（本版更新）" if part_version == version or also else ""
-    emulator = f"0.{number}.0"
+    emulator = f"0.{number}.0" if type(number) is int else number
     parts = [f"模拟器 {emulator}{new(emulator)}"]
     for key, name in COMPONENT_NAMES:
         part = (own or {}).get(key)
@@ -1992,7 +2023,7 @@ def main():
     # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
     # before their tags exist
     parser.add_argument("--release-branch")
-    # the public version X.Y.Z (release.ps1 -Version); without it 0.<N>.<--patch> from --build, as up to 0.40
+    # the public version X.Y.Z (release.ps1 -Version); without it 0.<N>.<--patch> from --build (masN or 0.N)
     parser.add_argument("--version")
     # preflight: every component must be tagged (release.ps1 -DraftRelease)
     parser.add_argument("--require-tags", action="store_true")
@@ -2013,6 +2044,9 @@ def main():
                 "privacy-release": privacy_release, "changelog-collect": collect_command,
                 "component-notes": component_notes_command}
     try:
+        # -Build 0.42 and 0.42.0 are the same build: every command, the snapshot and the ownership marker see 0.42.0
+        if args.build is not None:
+            args.build = normalize_build(args.build)
         commands[args.command](args)
     except Exception as e:
         print(f"ERROR [{args.command}]: {e}", file=sys.stderr)

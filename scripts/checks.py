@@ -106,8 +106,13 @@ def version_key(value):
 
 
 def is_build(value):
-    """The emulator build number N of Pkg.BuildId mas-N: a positive integer (not a bool)."""
-    return type(value) is int and value >= 1
+    """The emulator build as the manifest, the machine line and changelog.json write it: up to 0.41 the number N of
+    Pkg.BuildId mas-N, a positive integer (not a bool); from 0.42 the version the emulator was built for, the string
+    "0.N.0", the same as Pkg.BuildId. Published releases keep their integers, so both stay valid."""
+    if type(value) is int:
+        return value >= 1
+    return isinstance(value, str) and re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.0", value) is not None \
+        and value != "0.0.0"
 
 
 def check_min_automas(value):
@@ -221,7 +226,7 @@ def check_manifest(tree):
         raise ValueError("Manifest fields differ from schema 1")
     version_key(data["version"])
     if not is_build(data["build"]):
-        raise ValueError(f"Manifest build must be a positive integer (Pkg.BuildId mas-N): {data['build']!r}")
+        raise ValueError(f"Manifest build must be a positive integer (Pkg.BuildId mas-N) or \"0.N.0\": {data['build']!r}")
     if not re.fullmatch(r"(?:win|linux)-(?:x64|arm64)", str(data["platform"])):
         raise ValueError(f"Manifest platform invalid: {data['platform']!r}")
     check_min_automas(data["min_automas"])

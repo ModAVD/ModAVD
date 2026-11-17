@@ -17,13 +17,13 @@
     pwsh -NoProfile -File tools\gate\stage-payload.ps1 -CheckOnly
 
     # 放进 SDK 树
-    pwsh -NoProfile -File tools\gate\stage-payload.ps1 -Sdk <源码树>\sdk-mas36
+    pwsh -NoProfile -File tools\gate\stage-payload.ps1 -Sdk <源码树>\sdk-0.42.0
 
     # 重编了载荷，重新固定哈希（会打印改了哪几行）
     pwsh -NoProfile -File tools\gate\stage-payload.ps1 -UpdateSums
 
 参数：
-  -Sdk          sdk-masN 根目录（里面有 emulator\）。-CheckOnly / -UpdateSums 时可以不给。
+  -Sdk          SDK 根目录 sdk-0.N.0 或旧的 sdk-masN（里面有 emulator\）。-CheckOnly / -UpdateSums 时可以不给。
   -Payload      一个已冻结的目录，里面就是那三个文件。给了就只认这个目录，忽略下面三个单独路径。
                 不给时取本机配置的 GatePayload（tools\local.example.psd1）。
   -Bridge / -Gate   两个 .so 各自的路径。不给时取本机配置的 BridgeSo / GateSo，再没有就是
@@ -123,7 +123,7 @@ Write-Host "载荷与 $Sums 一致（$($actual.Count) 个文件）"
 if ($CheckOnly) { return }
 
 # ---- 放进 SDK 树
-if (-not $Sdk) { throw '要 -Sdk（sdk-masN 根目录），或者用 -CheckOnly / -UpdateSums' }
+if (-not $Sdk) { throw '要 -Sdk（sdk-0.N.0 / sdk-masN 根目录），或者用 -CheckOnly / -UpdateSums' }
 $sdkRoot = [IO.Path]::GetFullPath($Sdk)
 $emu = Join-Path $sdkRoot 'emulator'
 if (-not (Test-Path -LiteralPath (Join-Path $emu 'emulator.exe'))) { throw "不像是 SDK 根目录（找不到 emulator\emulator.exe）：$sdkRoot" }
