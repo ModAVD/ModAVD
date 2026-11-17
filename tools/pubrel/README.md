@@ -137,6 +137,28 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build mas40 -Version 0.41.0 -Sdk
 | `-Python` / `-SevenZip` | 指定可执行文件；Python 也可由 `MODAVD_PYTHON` 指定，再是本机配置 `Python`、PATH 里的 `python.exe`；7-Zip 再是本机配置 `SevenZip`、PATH 里的 `7z.exe`、`Program Files\7-Zip` |
 | `-DraftRelease` | 全部校验通过后创建 GitHub 草稿（标题 `ModAVD <版本>`，tag 指向 `release/<X>.<Y>`）；上传主包、源码总包、外层校验表这三个附件。有组件还没打 tag 时预检就停 |
 
+### 发版 PR 和 GitHub 上的两个 workflow
+
+打包、私有规则全扫、发布前回归、建草稿传附件照旧在本机；核草稿、关 issue 由 GitHub Actions 做（[#134](https://github.com/ModAVD/ModAVD/issues/134)）。为此发版 PR 要带两样机读的东西，都由 `release-pr.ps1` 从发版清单（维护者本机的 `.psd1`，里面有 `Version`、`Manager`、`Issues`、`ReviewedHead`）生成：
+
+```powershell
+# 写 release/<版本>.issues.json，和发版提交一起进发版 PR
+pwsh -NoProfile -File tools/pubrel/release-pr.ps1 -PlanFile <清单.psd1> [-Repository <发版克隆>]
+# 审过以后把 ReviewedHead 填进清单，给 PR 正文文件写上 Reviewed-Head 那一行，再 gh pr edit <号> --body-file <文件>
+pwsh -NoProfile -File tools/pubrel/release-pr.ps1 -PlanFile <清单.psd1> -BodyFile <PR 正文.md>
+```
+
+- `release/<版本>.issues.json`：`{"version": "0.42.0", "manager": "0.42.0", "issues": [{"issue": 103, "prs": ["ModAVDManager#54"], "kind": "close", "note": ""}]}`。
+  `prs` 写「仓库#号」或「仓库@提交」，模拟器源码补丁没有 PR 就留空、在 `note` 写是哪个补丁；`kind` 是 `close`（关掉、附发布链接）、`comment`（已经关了，补一条「已随发布」）、`keep`（`note` 当评论发、不关）。带 `pending-release` 的 issue 都要写进来。格式由 `release_ci.py` 的 `load_issues` 核对，写错了生成时就报。
+- PR 正文里单独一行 `Reviewed-Head: <40 位提交>`，正好一行，写审过的那个头。审过以后 PR 又进了提交，就重新审、重新写这一行。
+
+两个 workflow（核对逻辑都在 `release_ci.py`，单测 `test_release_ci.py` 在 `check.yml` 里跑）：
+
+- `verify-release.yml`：建好草稿以后手动触发 `gh workflow run verify-release.yml --repo ModAVD/ModAVD -f version=<版本>`。在 GitHub 的机器上下载草稿的附件、算 SHA-256，核：附件正好是两个 zip 和 `SHA256SUMS.txt`，和发版提交（草稿的目标，要在 `release/0.<N>` 上；tag 已在的要指向它）上的 `release/<版本>.SHA256SUMS.txt` 对上，GitHub 记的摘要也一样；Release 标题和说明（`release/<版本>.md`）对上；合并成这个提交、合进 `release/0.<N>` 的发版 PR 正好一个，正文的 `Reviewed-Head` 是这个 PR 的提交、树和合并提交相同。过了才发布。草稿只有能写仓库内容的令牌看得见，所以下载那个 job 是 `contents: write`，它不检出、不跑仓库里的代码，只用 `gh` 和 `sha256sum`，把哈希交给只读的核对 job。
+- `close-released-issues.yml`：网页上点发布（`release: published`）时自动跑，也可以 `gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=<版本>` 重跑。只用 `GITHUB_TOKEN`（`issues: write`，其余只读）。读 tag 所在提交上的 `release/<版本>.issues.json`，逐条核修它的 PR：ModAVDManager 的 PR 合并提交要在 `v<manager>` 这个 tag 里；ModAVD 的要是发版提交的祖先（GitHub 记的合并提交因为 main 改写过不在 main 上时，改按 main 上标题以「 (#号)」结尾、树相同的那一个提交，不是正好一个就跳过）；ModAVDE2E、ModAVDHostIME 合了就算；「仓库@提交」直接核这个提交。都过了的按 `kind` 关掉或评论（评论附发布页链接），去掉 `pending-release`；核不过的不动、留着标签，列在 job summary 里，下一版再核。重跑只做还没做的：评论里已经有发布链接的不再评论，关或评论失败的不去标签。发布时触发的是 tag 所在提交上的这个文件：发版分支在它合进 main 以前切的，发布时不会跑，要手动触发。
+
+推三个源码仓库（ModAVDQemu、ModAVDGfxstream、ModAVDCrashpad）的 `release/0.<N>` 和 tag、换默认分支要能跨仓库写的凭据，还没上 CI，照旧在本机做。
+
 产物（以 `0.33.0` 为例）：
 
 - 主包 `ModAVD-0.33.0-win-x64.zip`，**没有外层文件夹**，包根就是 ModAVD 根目录：Mirror 酱按路径比文件，带版本号的外层文件夹会让增量等于全量（不再另出 `-update.zip`）。用户用「全部解压缩」或 7-Zip「解压到 <包名>\」会得到同名文件夹。文件名带平台，以后可能有 `linux-x64`；平台写在 `release_tools.py` 的 `PLATFORM` 和 `release.ps1` 里。
@@ -209,7 +231,10 @@ P3 审核过的说明和 NOTICE 里写的是 `37.2.10-mas30`，组包时换成�
 
 ```powershell
 python -I tools/pubrel/test_release.py --work <全新临时目录>
+python -I tools/pubrel/test_release_ci.py
 ```
+
+两条都在 CI（`check.yml`）里跑。第二条是两个发版 workflow 的核对逻辑（`release_ci.py`），用假的 GitHub，不连网：关 issue 的各种核不过（PR 没合、合并提交不在这一版或管理器 tag 里、main 改写后找不到或找到不止一个、不认识的仓库、还开着的 `comment`）、没有 `pending-release` 的不去标签、跳过的不动、重跑不重复评论、关或评论失败时留着标签再跑接着做、Release 没发布或没有 `issues.json` 就不动、`issues.json` 读 tag 所在提交上的那份、`issues.json` 的格式；核草稿的附件哈希、GitHub 摘要、附件多了少了、`SHA256SUMS.txt` 的内容、标题和说明、发版提交不在发版分支上、tag 指向别处、发版 PR 找不到、`Reviewed-Head` 没有或不止一行、不是 PR 的提交、树不同；分页的下一页链接不能离开 API。
 
 不需要维护者的私有规则：涉及私有规则的几项用测试里自造的规则。
 覆盖输出所有权、路径越界、incoming 在 `core.autocrlf=true` 的检出里也删得掉、补丁记录在已发布的 `series.json` / `BASE.md` 上追加（沿用目录、重跑不重复、重新打包）、公告长度在打包前就算出来、发版克隆不许落在受保护目录、ASCII / UTF-16 / UTF-8 / tar 隐私拦截、私有规则从仓库外加载（指了不存在就报错、没加载到发版扫描就停）、白名单边界、表格哈希/大小/重复/缺项、ZIP 原始反斜杠/内容错误、主包带了外层文件夹、清单缺漏或内容不符、版本号、公告的机读行/分隔行/长度/哈希、「更新内容」从各仓库 `changelog.d` 汇总（只取上一版以后新加的、补上加文件的 PR 编号、没有发版分支的组件不出条目、发过的文件改了或文件不合格一次报全、重跑留着手写的「说明」、版本号放不进去时不动文件）、公告里的组件版本行、组件仓库的 Release 短页、重新打包的组件版本号要等于这一版、changelog.json 的顺序和构建号（构建号和版本号可以不同）、许可证包缺 AGPL-3.0 全文或内容不对、带截图库时缺 LGPL-3.0 / GPL-3.0 全文或内容不对、固定的组件（APK 没固定的被拒、固定了没给或文件不在、内容不同；`components/` 以外一律不许钉，截图库和外壳也不钉；截图库和外壳要一起给、真打包时必须给）、公开来源的核对（管理器包或其中的 exe 和 tag 上的校验表不符、tag 不在、输入法 APK 没有 tag 列着、截图库的版本按发版分支头的 `CMakeLists.txt` 取、旧一版的 DLL 被拒、没有发版分支时按列着它的 tag 找、和那里的校验表不符或 tag / 校验表不在、发版克隆的 `package/` 有改动）、还没打 tag 的组件（取发版分支头、文件和那里的校验表不符或版本号不是这一版就停、打了 tag 以后认 tag、建草稿的那一轮不收）、随包脚本按原字节取出、`modavd-src` 的布局（根目录 LICENSE / NOTICE，各仓库各占一个文件夹，ModAVD 只有 `bridge/`）和可复现（`package/LICENSE` / `config/own-sources-NOTICE.txt` 有没提交的改动时这一项跳过）。

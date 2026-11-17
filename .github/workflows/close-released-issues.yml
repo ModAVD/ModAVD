@@ -1,0 +1,56 @@
+# After a ModAVD release is published, close the issues it fixes (ModAVD/ModAVD#134). Reads
+# release/<version>.issues.json on the tagged commit (written into the release PR by tools/pubrel/release-pr.ps1);
+# an issue is closed (or commented on), linked to the release and loses pending-release only when every PR that fixes
+# it is in this release. Issues that do not check out are skipped and listed in the job summary. Running it again
+# only does what is still missing:
+#   gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=0.42.0
+name: Close released issues
+run-name: Close released issues ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version whose issues are closed, for example 0.42.0
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: close-released-issues-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  close:
+    if: ${{ github.repository_owner == 'ModAVD' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v0\.[1-9][0-9]*\.(0|[1-9][0-9]*)$ ]]; then
+            echo "tag 不是 v0.N.P：$TAG" >&2
+            exit 1
+          fi
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Close the issues this release fixes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I tools/pubrel/release_ci.py close-issues --repo "$GITHUB_REPOSITORY" --tag "$TAG" --summary "$GITHUB_STEP_SUMMARY"

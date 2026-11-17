@@ -1,0 +1,101 @@
+# Check a ModAVD release before it is published (ModAVD/ModAVD#134). Run it by hand once the draft is up
+# (the maintainer's publish script does it in its step 6):
+#   gh workflow run verify-release.yml --repo ModAVD/ModAVD -f version=0.42.0
+# It downloads the draft's assets, compares them with release/<version>.SHA256SUMS.txt on the release commit (the
+# draft's target, which must be on release/0.<N>), the notes with release/<version>.md, and checks that the release
+# PR's merge commit has the same tree as the head named on the "Reviewed-Head: <40 hex>" line of the PR body.
+# Draft releases are only visible to tokens that can write contents, so the first job has contents: write; it runs no
+# code from the repository, only gh and sha256sum, and passes the hashes to the read-only job that checks them.
+name: Verify release
+run-name: Verify release ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version whose (draft) release is checked, for example 0.42.0
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  fetch:
+    if: ${{ github.repository_owner == 'ModAVD' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Validate version input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^0\.[1-9][0-9]*\.(0|[1-9][0-9]*)$ ]]; then
+            echo "版本号不是 0.N.P：$VERSION" >&2
+            exit 1
+          fi
+      - name: Download the release and its assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-check"
+          assets="$RUNNER_TEMP/release-assets"
+          mkdir -p "$out" "$assets"
+          export TAG="v$VERSION"
+          # drafts are not under releases/tags/<tag>; list them and pick by tag name
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select(.tag_name == $ENV.TAG) | tojson' > "$out/releases.jsonl"
+          count="$(grep -c . "$out/releases.jsonl" || true)"
+          if [[ "$count" != 1 ]]; then
+            echo "$TAG 应该正好有一个 Release（含草稿），现在有 $count 个" >&2
+            exit 1
+          fi
+          head -n 1 "$out/releases.jsonl" > "$out/release.json"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$assets"
+          (cd "$assets" && find . -maxdepth 1 -type f -printf '%f\0' | sort -z | xargs -0 -r sha256sum --) > "$out/downloaded.SHA256SUMS.txt"
+          cat "$out/downloaded.SHA256SUMS.txt"
+          # the asset's own lines are compared too (it is CRLF, the committed file LF)
+          if [[ -f "$assets/SHA256SUMS.txt" ]]; then cp "$assets/SHA256SUMS.txt" "$out/asset.SHA256SUMS.txt"; fi
+      - name: Hand the hashes to the read-only job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-check
+          path: ${{ runner.temp }}/release-check
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    needs: fetch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the hashes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-check
+          path: ${{ runner.temp }}/release-check
+      - name: Check the release against the release commit and the release PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I tools/pubrel/release_ci.py verify-release --repo "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --release-json "$RUNNER_TEMP/release-check/release.json" \
+            --downloaded "$RUNNER_TEMP/release-check/downloaded.SHA256SUMS.txt" \
+            --sums-asset "$RUNNER_TEMP/release-check/asset.SHA256SUMS.txt" \
+            --summary "$GITHUB_STEP_SUMMARY"
