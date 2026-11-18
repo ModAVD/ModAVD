@@ -1,0 +1,464 @@
+From baf0fd5600360307fe799083118d214dadf1b4be Mon Sep 17 00:00:00 2001
+From: Ji Mao Cai <44921326+jinghero@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 22:43:20 +0800
+Subject: [PATCH 45/45] =?UTF-8?q?gfxstream:=20=E7=BB=91=E5=AE=9A=E5=A4=B1?=
+ =?UTF-8?q?=E8=B4=A5=E6=97=B6=E5=8F=AA=E9=87=8A=E6=94=BE=20CPU=20=E5=AF=B9?=
+ =?UTF-8?q?=E8=B1=A1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+析构前先确认本上下文已绑定。绑定或 pbuffer 创建失败时，
+仍释放 CPU 所有权，但不在其他上下文执行 GL 删除和附件恢复。
+
+EGL 的线程状态统一控制各 GLES 库的析构调用。
+正常路径继续清理并恢复调用方上下文，失败次数和原因写入日志。
+
+同时移除原生创建失败时的重复释放，验证共享上下文后再分配 GLES 对象。
+
+Refs ModAVD/ModAVD#208
+---
+ .../common/framebuffer_data.cpp               |  7 +-
+ .../gl/glestranslator/common/gles_context.cpp | 14 +++-
+ .../common/include/common/gles_context.h      |  1 +
+ .../common/include/common/translator_ifaces.h |  4 +
+ .../gl/glestranslator/common/named_object.cpp |  1 +
+ host/gl/glestranslator/egl/egl_context.cpp    | 78 ++++++++++++-------
+ host/gl/glestranslator/egl/egl_imp.cpp        | 19 +++--
+ host/gl/glestranslator/egl/thread_info.h      | 17 ++++
+ .../gles_cm/core_profile_engine.cpp           |  2 +-
+ .../gles_v2/gles_v2_context.cpp               |  5 +-
+ .../render-utils/readback_diagnostics.h       | 31 +++++++-
+ 11 files changed, 132 insertions(+), 47 deletions(-)
+
+diff --git a/host/gl/glestranslator/common/framebuffer_data.cpp b/host/gl/glestranslator/common/framebuffer_data.cpp
+index 3f4a4919..70c65e3d 100644
+--- a/host/gl/glestranslator/common/framebuffer_data.cpp
++++ b/host/gl/glestranslator/common/framebuffer_data.cpp
+@@ -426,7 +426,7 @@ void FramebufferData::detachObject(int idx) {
+         rbData->attachedPoint = 0;
+     }
+ 
+-    if(m_attachPoints[idx].owned)
++    if(m_attachPoints[idx].owned && GLEScontext::isNativeGlCleanupAllowed())
+     {
+         switch(m_attachPoints[idx].target)
+         {
+@@ -461,6 +461,11 @@ void FramebufferData::refreshSeparateDepthStencilAttachmentState() {
+ 
+     if (m_hasSeparateDepthStencil) return;
+ 
++    if (!GLEScontext::isNativeGlCleanupAllowed()) {
++        m_separateDSEmulationRbo = 0;
++        return;
++    }
++
+     // Delete the emulated RBO and restore the original
+     // if we don't have separate depth/stencil anymore.
+     auto& gl = GLEScontext::dispatcher();
+diff --git a/host/gl/glestranslator/common/gles_context.cpp b/host/gl/glestranslator/common/gles_context.cpp
+index df539a4d..5415d3d0 100644
+--- a/host/gl/glestranslator/common/gles_context.cpp
++++ b/host/gl/glestranslator/common/gles_context.cpp
+@@ -386,6 +386,11 @@ EGLiface* GLEScontext::eglIface() {
+     return s_eglIface;
+ }
+ 
++bool GLEScontext::isNativeGlCleanupAllowed() {
++    // A context whose initialization never completed has no native GL owners.
++    return s_eglIface && s_eglIface->isNativeGlCleanupAllowed();
++}
++
+ // static
+ void GLEScontext::initEglIface(EGLiface* iface) {
+     if (!s_eglIface) s_eglIface = iface;
+@@ -583,8 +588,9 @@ GLEScontext::GLEScontext(GlobalNameSpace* globalNameSpace,
+ 
+ GLEScontext::~GLEScontext() {
+     auto& gl = dispatcher();
++    const bool nativeCleanup = isNativeGlCleanupAllowed();
+ 
+-    if (m_blitState.program) {
++    if (nativeCleanup && m_blitState.program) {
+         gl.glDeleteProgram(m_blitState.program);
+         gl.glDeleteTextures(1, &m_blitState.tex);
+         gl.glDeleteVertexArrays(1, &m_blitState.vao);
+@@ -592,14 +598,14 @@ GLEScontext::~GLEScontext() {
+         gl.glDeleteFramebuffers(1, &m_blitState.fbo);
+     }
+ 
+-    if (m_textureEmulationProg) {
++    if (nativeCleanup && m_textureEmulationProg) {
+         gl.glDeleteProgram(m_textureEmulationProg);
+         gl.glDeleteTextures(2, m_textureEmulationTextures);
+         gl.glDeleteFramebuffers(1, &m_textureEmulationFBO);
+         gl.glDeleteVertexArrays(1, &m_textureEmulationVAO);
+     }
+ 
+-    if (m_defaultFBO) {
++    if (nativeCleanup && m_defaultFBO) {
+         gl.glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFBO);
+         gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, 0);
+         gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+@@ -608,7 +614,7 @@ GLEScontext::~GLEScontext() {
+         gl.glDeleteFramebuffers(1, &m_defaultFBO);
+     }
+ 
+-    if (m_defaultReadFBO && (m_defaultReadFBO != m_defaultFBO)) {
++    if (nativeCleanup && m_defaultReadFBO && (m_defaultReadFBO != m_defaultFBO)) {
+         gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, m_defaultReadFBO);
+         gl.glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, 0);
+         gl.glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+diff --git a/host/gl/glestranslator/common/include/common/gles_context.h b/host/gl/glestranslator/common/include/common/gles_context.h
+index 7f8f71d3..a7a579ec 100644
+--- a/host/gl/glestranslator/common/include/common/gles_context.h
++++ b/host/gl/glestranslator/common/include/common/gles_context.h
+@@ -320,6 +320,7 @@ public:
+         return s_glSupport.ext_GL_EXT_shader_framebuffer_fetch;
+     }
+     virtual ~GLEScontext();
++    static bool isNativeGlCleanupAllowed();
+     virtual int getMaxTexUnits() = 0;
+     virtual int getMaxCombinedTexUnits() { return getMaxTexUnits(); }
+     virtual void drawValidate(void);
+diff --git a/host/gl/glestranslator/common/include/common/translator_ifaces.h b/host/gl/glestranslator/common/include/common/translator_ifaces.h
+index 5e7fecb8..5f972709 100644
+--- a/host/gl/glestranslator/common/include/common/translator_ifaces.h
++++ b/host/gl/glestranslator/common/include/common/translator_ifaces.h
+@@ -159,6 +159,10 @@ struct EGLiface {
+ 
+     // When we need to get function pointers via eglGetProcAddress.
+     std::function<void*(const char*)> getProcAddress;
++
++    // This must query EGL's TLS, not a separate TLS flag in each GLES DLL.
++    // False during CPU-only destruction after the native context cannot bind.
++    bool (*isNativeGlCleanupAllowed)();
+ };
+ 
+ typedef GLESiface* (*__translator_getGLESIfaceFunc)(const EGLiface*);
+diff --git a/host/gl/glestranslator/common/named_object.cpp b/host/gl/glestranslator/common/named_object.cpp
+index 6dcd000c..aa35a4ee 100644
+--- a/host/gl/glestranslator/common/named_object.cpp
++++ b/host/gl/glestranslator/common/named_object.cpp
+@@ -84,6 +84,7 @@ NamedObject::NamedObject(GenNameInfo genNameInfo,
+ }
+ 
+ NamedObject::~NamedObject() {
++    if (!GLEScontext::isNativeGlCleanupAllowed()) return;
+     gfxstream::base::AutoLock _lock(m_globalNameSpace->m_lock);
+     assert(GLEScontext::dispatcher().isInitialized());
+     switch (m_type) {
+diff --git a/host/gl/glestranslator/egl/egl_context.cpp b/host/gl/glestranslator/egl/egl_context.cpp
+index e1cca7e7..85b6d7b1 100644
+--- a/host/gl/glestranslator/egl/egl_context.cpp
++++ b/host/gl/glestranslator/egl/egl_context.cpp
+@@ -20,6 +20,7 @@
+ #include "egl_pbuffer_surface.h"
+ #include "thread_info.h"
+ #include "gfxstream/common/logging.h"
++#include "render-utils/readback_diagnostics.h"
+ 
+ #include <common/gles_context.h>
+ #include <memory>
+@@ -107,10 +108,13 @@ EglContext::~EglContext()
+     SurfacePtr rebindRead = nullptr;
+     SurfacePtr rebindDraw = nullptr;
+     std::unique_ptr<EglPbufferSurface> pbSurface;
+-    if (rebindCtx == this) {
++    bool nativeCleanup = m_native && rebindCtx == this;
++    bool bindingAttempted = nativeCleanup;
++    const char* failure = "missing-native-context";
++    if (nativeCleanup) {
+         // this context is current, no need to rebind.
+         rebindCtx = nullptr;
+-    } else {
++    } else if (m_native) {
+         if (rebindCtx && !m_dpy->getContext((EGLContext)SafePointerFromUInt(
+                             rebindCtx->getHndl()))) {
+             rebindCtx = nullptr;
+@@ -128,43 +132,59 @@ EglContext::~EglContext()
+         pbInfo.hasMipmap = false;
+         EglOS::Surface* pb = m_dpy->nativeType()->createPbufferSurface(
+                 m_config->nativeFormat(), &pbInfo);
+-        assert(pb);
+         if (pb) {
+-            // This can fail for real, e.g. with ERROR_BUSY on Windows while
+-            // the context is current on another thread. Do not assert: the
+-            // GL objects are then not released through this context, but
+-            // the native context itself is still destroyed.
+-            if (!m_dpy->nativeType()->makeCurrent(pb, pb, m_native.get())) {
+-                GFXSTREAM_ERROR("Failed to make EGL context %p current to destroy it",
+-                                this);
+-            }
++            bindingAttempted = true;
++            nativeCleanup = m_dpy->nativeType()->makeCurrent(pb, pb, m_native.get());
++            failure = "make-current";
+             pbSurface->setNativePbuffer(pb);
++        } else {
++            failure = "create-pbuffer";
+         }
+     }
+     //
+-    // release GL resources. m_shareGroup, m_mngr and m_glesContext hold
+-    // smart pointers to share groups. We must clean them up when the context
+-    // is current.
++    // Release the shared CPU owners even when binding failed. Their GL
++    // destruction requires this context to be current.
+     //
+-    g_eglInfo->getIface(version())->setShareGroup(m_glesContext, {});
+-    if (m_mngr) {
+-        m_mngr->deleteShareGroup(m_native.get());
++    {
++        // Resource destructors in all translator DLLs query EGL's TLS through
++        // EGLiface. CPU ownership is released in either case; GL destruction
++        // is allowed only after this native context was successfully bound.
++        ScopedNativeGlCleanup cleanup(nativeCleanup);
++        if (!thread->nativeGlCleanupAllowed) {
++            using namespace gfxstream::host;
++            ReadbackDiagnostics::get().eglContextCpuOnly();
++            if (ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::EglContextCpuOnly)) {
++                GFXSTREAM_ERROR(
++                    "MAS: EGL context cleanup is CPU-only handle=%u reason=%s; "
++                    "native GL resources may remain",
++                    m_hndl, nativeCleanup ? "outer-cpu-only-cleanup" : failure);
++            }
++        }
++        g_eglInfo->getIface(version())->setShareGroup(m_glesContext, {});
++        if (m_mngr) {
++            m_mngr->deleteShareGroup(m_native.get());
++        }
++        m_shareGroup.reset();
++        g_eglInfo->getIface(version())->deleteGLESContext(m_glesContext);
++        m_glesContext = nullptr;
+     }
+-    m_shareGroup.reset();
+-
+-    //
+-    // call the client-api to remove the GLES context
+-    //
+-    g_eglInfo->getIface(version())->deleteGLESContext(m_glesContext);
+     //
+     // restore the previous context
+     //
+-    if (rebindCtx) {
+-        m_dpy->nativeType()->makeCurrent(rebindRead.get() ? rebindRead->native() : nullptr,
+-                                         rebindDraw.get() ? rebindDraw->native() : nullptr,
+-                                         rebindCtx->nativeType());
+-    } else {
+-        m_dpy->nativeType()->makeCurrent(nullptr, nullptr, nullptr);
++    if (bindingAttempted) {
++        const bool restored = rebindCtx
++            ? m_dpy->nativeType()->makeCurrent(rebindRead ? rebindRead->native() : nullptr,
++                                              rebindDraw ? rebindDraw->native() : nullptr,
++                                              rebindCtx->nativeType())
++            : m_dpy->nativeType()->makeCurrent(nullptr, nullptr, nullptr);
++        if (!restored) {
++            using namespace gfxstream::host;
++            ReadbackDiagnostics::get().eglContextRestoreFailed();
++            if (ReadbackDiagnostics::get().shouldLog(DiagnosticEvent::EglContextRestoreFailed)) {
++                GFXSTREAM_ERROR("Failed to restore native context after destroying EGL context %u",
++                                m_hndl);
++            }
++        }
+     }
+ }
+ 
+diff --git a/host/gl/glestranslator/egl/egl_imp.cpp b/host/gl/glestranslator/egl/egl_imp.cpp
+index 7dffb9b4..ec526164 100644
+--- a/host/gl/glestranslator/egl/egl_imp.cpp
++++ b/host/gl/glestranslator/egl/egl_imp.cpp
+@@ -71,6 +71,7 @@ static bool unbindAndDestroyAuxiliaryContext(
+ static bool bindAuxiliaryContext(
+     EGLContext context, EGLSurface surface);
+ static bool unbindAuxiliaryContext();
++static bool isNativeGlCleanupAllowed();
+ 
+ } // namespace translator
+ } // namespace egl
+@@ -97,6 +98,7 @@ static const EGLiface s_eglIface = {
+     .bindAuxiliaryContext = translator::egl::bindAuxiliaryContext,
+     .unbindAuxiliaryContext = translator::egl::unbindAuxiliaryContext,
+     .getProcAddress = translator::egl::getProcAddressFromEGL,
++    .isNativeGlCleanupAllowed = translator::egl::isNativeGlCleanupAllowed,
+ };
+ 
+ static void initGLESx(GLESVersion version) {
+@@ -263,6 +265,10 @@ GLEScontext* getGLESContext()
+     return thread->glesContext;
+ }
+ 
++static bool isNativeGlCleanupAllowed() {
++    return getThreadInfo()->nativeGlCleanupAllowed;
++}
++
+ GlLibrary* getGlLibrary() {
+     return EglGlobalInfo::getInstance()->getOsEngine()->getGlLibrary();
+ }
+@@ -994,12 +1000,8 @@ static EGLContext eglCreateOrLoadContext(EGLDisplay display, EGLConfig config,
+     }
+ 
+     const GLESiface* iface = g_eglInfo->getIface(glesVersion);
+-    GLEScontext* glesCtx = NULL;
+-    if(iface) {
+-        glesCtx = iface->createGLESContext(major_version, minor_version,
+-                dpy->getGlobalNameSpace(), stream);
+-    } else { // there is no interface for this gles version
+-                RETURN_ERROR(EGL_NO_CONTEXT,EGL_BAD_ATTRIBUTE);
++    if (!iface) {
++        RETURN_ERROR(EGL_NO_CONTEXT,EGL_BAD_ATTRIBUTE);
+     }
+ 
+     if(share_context != EGL_NO_CONTEXT) {
+@@ -1011,6 +1013,8 @@ static EGLContext eglCreateOrLoadContext(EGLDisplay display, EGLConfig config,
+         assert(shareGroupId);
+     }
+ 
++    GLEScontext* glesCtx = iface->createGLESContext(major_version, minor_version,
++            dpy->getGlobalNameSpace(), stream);
+     gfxstream::base::AutoLock mutex(*graphicsDriverLock());
+ 
+     ContextPtr ctx(new EglContext(dpy, shareGroupId, cfg,
+@@ -1020,10 +1024,9 @@ static EGLContext eglCreateOrLoadContext(EGLDisplay display, EGLConfig config,
+                                   stream));
+     if(ctx->nativeType()) {
+         return dpy->addContext(ctx);
+-    } else {
+-        iface->deleteGLESContext(glesCtx);
+     }
+ 
++    // EglContext owns glesCtx even when native context creation failed.
+     return EGL_NO_CONTEXT;
+ }
+ 
+diff --git a/host/gl/glestranslator/egl/thread_info.h b/host/gl/glestranslator/egl/thread_info.h
+index 6ae9f6ef..519d551d 100644
+--- a/host/gl/glestranslator/egl/thread_info.h
++++ b/host/gl/glestranslator/egl/thread_info.h
+@@ -33,8 +33,25 @@ struct ThreadInfo {
+     GLEScontext*         glesContext = nullptr;
+     ShareGroupPtr        shareGroup;
+     ObjectNameManager*   objManager = nullptr;
++    // Shared through EGLiface so every translator library observes the same
++    // per-thread decision while releasing an unbindable context's CPU owners.
++    bool nativeGlCleanupAllowed = true;
+ };
+ 
+ ThreadInfo* getThreadInfo();
+ 
++class ScopedNativeGlCleanup {
++public:
++    explicit ScopedNativeGlCleanup(bool allowed)
++        : mThread(getThreadInfo()), mPrevious(mThread->nativeGlCleanupAllowed) {
++        mThread->nativeGlCleanupAllowed = mPrevious && allowed;
++    }
++    ~ScopedNativeGlCleanup() { mThread->nativeGlCleanupAllowed = mPrevious; }
++    ScopedNativeGlCleanup(const ScopedNativeGlCleanup&) = delete;
++    ScopedNativeGlCleanup& operator=(const ScopedNativeGlCleanup&) = delete;
++private:
++    ThreadInfo* mThread;
++    bool mPrevious;
++};
++
+ #endif
+diff --git a/host/gl/glestranslator/gles_cm/core_profile_engine.cpp b/host/gl/glestranslator/gles_cm/core_profile_engine.cpp
+index c09e88f7..417912e1 100644
+--- a/host/gl/glestranslator/gles_cm/core_profile_engine.cpp
++++ b/host/gl/glestranslator/gles_cm/core_profile_engine.cpp
+@@ -35,7 +35,7 @@ CoreProfileEngine::CoreProfileEngine(GLEScmContext* ctx, bool onGles) :
+ }
+ 
+ CoreProfileEngine::~CoreProfileEngine() {
+-    teardown();
++    if (GLEScontext::isNativeGlCleanupAllowed()) teardown();
+ }
+ 
+ static const uint32_t sDrawTexIbo[] = {
+diff --git a/host/gl/glestranslator/gles_v2/gles_v2_context.cpp b/host/gl/glestranslator/gles_v2/gles_v2_context.cpp
+index c8e911aa..5302a62e 100644
+--- a/host/gl/glestranslator/gles_v2/gles_v2_context.cpp
++++ b/host/gl/glestranslator/gles_v2/gles_v2_context.cpp
+@@ -187,11 +187,12 @@ GLESv2Context::GLESv2Context(int maj, int min, GlobalNameSpace* globalNameSpace,
+ }
+ 
+ GLESv2Context::~GLESv2Context() {
+-    if (m_emulatedClientIBO) {
++    const bool nativeCleanup = isNativeGlCleanupAllowed();
++    if (nativeCleanup && m_emulatedClientIBO) {
+         s_glDispatch.glDeleteBuffers(1, &m_emulatedClientIBO);
+     }
+ 
+-    if (!m_emulatedClientVBOs.empty()) {
++    if (nativeCleanup && !m_emulatedClientVBOs.empty()) {
+         s_glDispatch.glDeleteBuffers(
+             m_emulatedClientVBOs.size(),
+             &m_emulatedClientVBOs[0]);
+diff --git a/host/include/render-utils/readback_diagnostics.h b/host/include/render-utils/readback_diagnostics.h
+index e4f2613a..39d90100 100644
+--- a/host/include/render-utils/readback_diagnostics.h
++++ b/host/include/render-utils/readback_diagnostics.h
+@@ -33,6 +33,8 @@ enum class DiagnosticEvent {
+     CleanupRecovered,
+     CleanupAbandoned,
+     DmaMissingFramebuffer,
++    EglContextCpuOnly,
++    EglContextRestoreFailed,
+     Count
+ };
+ 
+@@ -130,6 +132,26 @@ class ReadbackDiagnostics {
+         ++mResources.threadsCreated;
+         ++mResourceRevision;
+     }
++    void eglContextCpuOnly() {
++        std::optional<Snapshot> summary;
++        {
++            std::lock_guard<std::mutex> lock(mMutex);
++            ++mResources.eglContextCpuOnly;
++            ++mResourceRevision;
++            summary = snapshotLocked();
++        }
++        logSummary(summary);
++    }
++    void eglContextRestoreFailed() {
++        std::optional<Snapshot> summary;
++        {
++            std::lock_guard<std::mutex> lock(mMutex);
++            ++mResources.eglContextRestoreFailures;
++            ++mResourceRevision;
++            summary = snapshotLocked();
++        }
++        logSummary(summary);
++    }
+     void renderThreadReleased() {
+         std::optional<Snapshot> summary;
+         {
+@@ -176,6 +198,8 @@ class ReadbackDiagnostics {
+         uint64_t created = 0, released = 0, liveRgba = 0;
+         uint64_t deferred = 0, recovered = 0, abandoned = 0, pendingRgba = 0;
+         uint64_t threadsCreated = 0, threadsReleased = 0;
++        uint64_t eglContextCpuOnly = 0;
++        uint64_t eglContextRestoreFailures = 0;
+     };
+     struct Snapshot {
+         std::array<Readbacks, kSourceCount> rows{};
+@@ -242,7 +266,8 @@ class ReadbackDiagnostics {
+             "MAS: readback resources cbCreated=%llu cbReleased=%llu "
+             "cbRgbaEstimateBytes=%llu cleanupDeferred=%llu cleanupRecovered=%llu "
+             "cleanupAbandoned=%llu pendingRgbaEstimateBytes=%llu "
+-            "threadsCreated=%llu threadsReleased=%llu",
++            "threadsCreated=%llu threadsReleased=%llu eglContextCpuOnly=%llu "
++            "eglContextRestoreFailures=%llu",
+             static_cast<unsigned long long>(resources.created),
+             static_cast<unsigned long long>(resources.released),
+             static_cast<unsigned long long>(resources.liveRgba),
+@@ -251,7 +276,9 @@ class ReadbackDiagnostics {
+             static_cast<unsigned long long>(resources.abandoned),
+             static_cast<unsigned long long>(resources.pendingRgba),
+             static_cast<unsigned long long>(resources.threadsCreated),
+-            static_cast<unsigned long long>(resources.threadsReleased));
++            static_cast<unsigned long long>(resources.threadsReleased),
++            static_cast<unsigned long long>(resources.eglContextCpuOnly),
++            static_cast<unsigned long long>(resources.eglContextRestoreFailures));
+     }
+ 
+     std::mutex mMutex;
