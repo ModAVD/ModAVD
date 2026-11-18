@@ -1,0 +1,70 @@
+From 800bbc415b8b1c587ae74f1ddf9d8fd53f6c9f29 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 17 Nov 2026 15:53:22 +0100
+Subject: [PATCH 108/110] MAS local: set the media volume through su
+
+On the API 34 image the shell's own `cmd media_session volume --set` is
+turned down by AppOps (com.android.server.media from uid 2000 may not
+AUDIO_MEDIA_VOLUME), so the volume bar read the guest's volume but every
+drag and the mute were dropped. Reading still works as the shell. The set
+now runs `su 0 cmd media_session volume ...` and falls back to the plain
+shell command where there is no su.
+
+Test: aemu-ui-lean-window_unittests; on flow-a (API 34) su 0 sets 5 -> 9
+and the shell alone stays at 5.
+
+Refs ModAVD/ModAVD#226
+
+Change-Id: Ibe5e0457879bdf6ff6947f6861a36a3043a8b6f6
+---
+ .../src/android/lean-title-bar-logic.cpp             | 12 ++++++++++--
+ .../test/android/lean-title-bar-logic_unittest.cpp   | 10 +++++++---
+ 2 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+index 749af24d6..6db65dfed 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -109,9 +109,17 @@ std::vector<std::string> getMusicVolumeArgs() {
+             kMusicStream, "--get"};
+ }
+ 
++// On API 34 the shell's own `cmd media_session volume --set` is turned down
++// (AppOps: com.android.server.media from uid 2000 may not
++// AUDIO_MEDIA_VOLUME), while reading works. So the set goes through su first
++// and falls back to the shell only where there is no su. adb shell joins the
++// words and runs them in the guest's sh, so the || is the guest's.
+ std::vector<std::string> setMusicVolumeArgs(int index) {
+-    return {"shell", "cmd",    "media_session", "volume", "--stream",
+-            kMusicStream, "--set", std::to_string(index)};
++    const std::string value = std::to_string(index);
++    return {"shell",  "su",           "0",      "cmd",      "media_session",
++            "volume", "--stream",     kMusicStream, "--set", value,
++            "||",     "cmd",          "media_session", "volume", "--stream",
++            kMusicStream, "--set",    value};
+ }
+ 
+ std::optional<StreamVolume> parseStreamVolume(std::string_view output) {
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index 1c63653ab..35a4edb63 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -82,11 +82,15 @@ TEST(LeanTitleBarLogic, VolumeArgs) {
+     EXPECT_EQ(tb::getMusicVolumeArgs(),
+               (std::vector<std::string>{"shell", "cmd", "media_session",
+                                         "volume", "--stream", "3", "--get"}));
++    // su first (the shell's own set is refused on API 34), the shell after.
+     EXPECT_EQ(tb::setMusicVolumeArgs(7),
+-              (std::vector<std::string>{"shell", "cmd", "media_session",
+-                                        "volume", "--stream", "3", "--set",
+-                                        "7"}));
++              (std::vector<std::string>{
++                      "shell", "su", "0", "cmd", "media_session", "volume",
++                      "--stream", "3", "--set", "7", "||", "cmd",
++                      "media_session", "volume", "--stream", "3", "--set",
++                      "7"}));
+     EXPECT_EQ(tb::setMusicVolumeArgs(0).back(), "0");
++    EXPECT_EQ(tb::setMusicVolumeArgs(0)[9], "0");
+ }
+ 
+ TEST(LeanTitleBarLogic, ParseStreamVolume) {

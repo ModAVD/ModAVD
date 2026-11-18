@@ -1,0 +1,49 @@
+{
+  "version": "0.42.0",
+  "manager": "0.42.0",
+  "issues": [
+    {
+      "issue": 231,
+      "prs": [
+        "ModAVD#233",
+        "ModAVDManager#188"
+      ],
+      "kind": "close",
+      "note": "模拟器这边是 qemu/0.42.0 的 0106：标题栏加了截图按钮；管理器 0.42.0 把截图存到「图片\\ModAVD」。"
+    },
+    {
+      "issue": 226,
+      "prs": [
+        "ModAVD#233",
+        "ModAVD#237",
+        "ModAVDManager#188"
+      ],
+      "kind": "close",
+      "note": "模拟器这边是 qemu/0.42.0 的 0106–0109：开了声音的实例标题栏有音量按钮，点一下唤起安卓系统的音量面板；管理器 0.42.0 的实例设置里可以打开声音。"
+    },
+    {
+      "issue": 219,
+      "prs": [
+        "ModAVD#232"
+      ],
+      "kind": "close",
+      "note": "0.42.0 的模拟器构建号是 0.42.0。"
+    },
+    {
+      "issue": 208,
+      "prs": [
+        "ModAVD#209"
+      ],
+      "kind": "close",
+      "note": "模拟器源码补丁 gfxstream/0.42.0 的 0044、0045。"
+    },
+    {
+      "issue": 110,
+      "prs": [
+        "ModAVDManager#187"
+      ],
+      "kind": "keep",
+      "note": "管理器 0.42.0 在 Windows 上给客体内核加了 tsc=nowatchdog：运行中看门狗不会再因为读 hpet 慢、或 tsc 和 hpet 走得不一样快，把时钟源换成 hpet，长时间开着变卡的那一种已经修了。开机时各核 TSC 同步检查没过、一开机就退回 hpet 的那一种还会发生；issue 里那次是开机约 20 秒后退回的，属于哪种还不知道，所以先留着，下次碰到要留内核日志（dmesg 里 clocksource 那几行）。"
+    }
+  ]
+}
