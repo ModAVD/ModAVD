@@ -4,7 +4,7 @@
 
 <!-- README.md and README.en.md match section by section: if you change one, change the other in the same PR. -->
 
-![ModAVD](assets/banner.png)
+![ModAVD – An AOSP-based Android emulator](assets/banner-en.png)
 
 ModAVD is an Android emulator built from the AOSP Android Emulator 37.2.10 plus a set of patches. It runs on Windows today; support for more platforms is planned (see [#27](https://github.com/ModAVD/ModAVD/issues/27)).
 
@@ -12,7 +12,7 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 
 **Documentation: <https://modavd.github.io/en/>** (installation, upgrade, feedback, privacy, the components and how to contribute are all there)
 
-> **Version note (current Release vs. `main`)**: this document describes the latest released package, `v0.39.0`. `main` may contain changes that have not been released yet. When you use a downloaded package, go by the notes of that Release and the version inside the package.
+> The documentation on `main` may describe unreleased changes. For installation and upgrades, follow the release notes for the version you use.
 
 - [What is ModAVD](#what-is-modavd)
 - [Tested games](#tested-games)
@@ -64,14 +64,14 @@ These are the games the maintainer has actually run in the pre-release regressio
 | Memory | Each instance gets 6 GB by default (3–6 GB can be chosen); the PC needs about 1.5 GB more free when an instance starts |
 | Disk | An NTFS drive. Fetching the components needs about 6.5 GB free; the first start of each instance needs more than 10 GB free, and usage then grows with game data, usually tens of GB per game |
 | Path | A path with only ASCII letters and digits, for example `D:\ModAVD` |
-| AUTO-MAS | `v5.7.0` or newer is recommended. From v5.7.0-beta.5 the MAA and MFW scripts (MaaFramework projects such as M9A) work; other scripts are not supported yet. See the Release notes for what each version supports |
+| AUTO-MAS (optional) | If you manage instances with AUTO-MAS, check the release notes for your ModAVD version to find a compatible AUTO-MAS version |
 
 ## Install
 
-1. Download `ModAVD-0.39.0-win-x64.zip` from [Releases](../../releases).
+1. Download the Windows x64 package (`ModAVD-<version>-win-x64.zip`) from the [latest release](../../releases/latest).
 2. Right-click it and choose Extract All (the zip has no outer folder, so do not use "extract here"), and put the resulting folder in a path with only ASCII letters and digits, for example `D:\ModAVD`.
 3. Double-click `ModAVD.exe` (the manager) in the folder and click **补全组件** (Fetch components) in the notice at the top. Once you pick a download source and accept Google's license agreement, it downloads adb and the Android 14 system image (about 1.5 GB). You can also run `tools\modavd.exe components fetch` in the folder. In 0.38.1 and earlier packages you double-click `补全组件.bat` instead.
-4. In AUTO-MAS, open **模拟器管理** (Emulator Management), click **管理模拟器** (Manage emulators) → **添加魔改 AVD（内测）** (Add ModAVD (beta)), choose this folder, and add it once the check passes. You can also point the bundled `ModAVD.exe` or `tools\modavd.exe` at this root folder directly.
+4. Use the manager (`ModAVD.exe`) or CLI (`tools\modavd.exe`) to create and start an instance. If you use AUTO-MAS, go to **模拟器管理** (Emulator Management) → **管理模拟器** (Manage emulators) → **添加魔改 AVD（内测）** (Add ModAVD (beta)) and select the extracted folder.
 
 For detailed steps, how to turn on virtualization and common problems, see [Install](https://modavd.github.io/en/guide/install) on the docs site.
 
