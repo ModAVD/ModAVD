@@ -4,7 +4,7 @@
 
 <!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
 
-![ModAVD](assets/banner.png)
+![ModAVD：基于 AOSP 的安卓模拟器](assets/banner.png)
 
 基于 AOSP Android Emulator 37.2.10 的安卓模拟器，加了一批补丁后自己编译。目前支持 Windows，以后计划支持更多平台（见 [#27](https://github.com/ModAVD/ModAVD/issues/27)）。
 
@@ -12,7 +12,7 @@
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
-> **版本提示（当前 Release 与 `main`）**：本文按最新已发布整包 `v0.39.0` 编写；`main` 可能包含尚未随 Release 发布的改动。使用下载包时，请以对应 Release 的说明和包内版本为准。
+> `main` 上的文档可能介绍尚未随整包发布的改动。安装和升级时，请以所用版本的发布说明为准。
 
 - [这是什么](#这是什么)
 - [已实测的游戏](#已实测的游戏)
@@ -64,14 +64,14 @@
 | 内存 | 每台实例默认 6 GB（可选 3–6 GB），开机时电脑要再空出约 1.5 GB |
 | 硬盘 | 放在 NTFS 盘。补全组件时要约 6.5 GB 可用；每台实例第一次开机要 10 GB 以上可用，之后随游戏数据增长，一个游戏通常几十 GB |
 | 路径 | 只含英文、数字的路径，例如 `D:\ModAVD` |
-| AUTO-MAS | 推荐 `v5.7.0` 或更新。v5.7.0-beta.5 起 MAA 和 MFW 脚本（MaaFramework 项目，如 M9A）可以用，其他脚本暂不支持；各版本的支持情况见 Release 说明 |
+| AUTO-MAS（可选） | 用 AUTO-MAS 管理实例时，请查看所用 ModAVD 版本的发布说明，确认兼容的 AUTO-MAS 版本 |
 
 ## 安装
 
-1. 从 [Releases](../../releases) 下载 `ModAVD-0.39.0-win-x64.zip`。
+1. 从[最新发布页](../../releases/latest)下载 Windows x64 整包 `ModAVD-<版本>-win-x64.zip`。
 2. 右键「全部解压缩」（压缩包里没有外层文件夹，不要用「解压到当前文件夹」），把得到的文件夹放到一个只含英文、数字的路径，例如 `D:\ModAVD`。
 3. 双击文件夹里的 `ModAVD.exe`（管理器），点上方提示里的「补全组件」，选好下载源、同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。也可以在这个文件夹里运行 `tools\modavd.exe components fetch`。0.38.1 及更早的包里是双击「补全组件.bat」。
-4. 在 AUTO-MAS 的「模拟器管理」里点「管理模拟器」→「添加魔改 AVD（内测）」，选这个文件夹，检查通过后添加；也可以直接用包里的 `ModAVD.exe` 或 `tools\modavd.exe` 指向这个根目录。
+4. 用管理器 `ModAVD.exe` 或命令行 `tools\modavd.exe` 新建并启动实例。如果用 AUTO-MAS，在「模拟器管理」→「管理模拟器」→「添加魔改 AVD（内测）」中选择解压后的文件夹。
 
 详细步骤、开启虚拟化和常见问题见文档站的[安装](https://modavd.github.io/guide/install)。
 
