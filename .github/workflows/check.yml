@@ -30,6 +30,28 @@ jobs:
       - name: Scan tracked files for private identity and paths
         run: python3 scripts/privacy.py .
 
+  authors:
+    name: Commit authors and trailers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # Empty outside pull_request: the script then checks origin/main..HEAD.
+      REPO_CHECK_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+      REPO_CHECK_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+    steps:
+      - name: Checkout full history without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run repo checks unit tests
+        run: python3 -B -I -X utf8 scripts/test_repo_checks.py -v
+      # PR 里的提交在 pull_request 时已经查过。push 和 merge_group 下要查的只剩 GitHub 生成的 squash 提交，
+      # 它的作者邮箱取自贡献者 GitHub 账号的设置，不归作者检查管；查了会让合并队列和 main 无端变红。
+      - name: Check commit authors and trailers
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        run: python3 -B -I -X utf8 scripts/repo_checks.py
+
   zizmor:
     name: Workflow security (zizmor)
     runs-on: ubuntu-24.04
