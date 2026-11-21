@@ -1,0 +1,1437 @@
+From 6cea497c13fa51f2794226385bd813e39bd4fc18 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 17 Nov 2026 15:17:08 +0100
+Subject: [PATCH 106/116] MAS local: screenshot and volume buttons on the lean
+ title bar
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The lean window's title bar had only back, home and the window buttons,
+so a screenshot meant the full toolbar or Ctrl+S, and an instance that
+plays sound had nothing to turn it down with. It now has, left of back:
+
+- 截图 (ModAVD#231): the side toolbar's screenshot, TAKE_SCREENSHOT,
+  saved where -save-path says (the manager passes Pictures\ModAVD;
+  the folder is made when it is not there yet) with the flash. When it
+  is not saved the lean window no longer opens an English dialog: a
+  short note, 截图没存上, shows under the button (or in the message
+  overlay without the title bar) and goes away by itself. The full
+  toolbar (ANDROID_EMU_FULL_TOOLBAR=1) keeps its dialog. Off Windows the
+  lean side toolbar keeps its screenshot button.
+
+- 音量 (ModAVD#226), only while the emulator plays sound: the manager
+  passes -audio none (and -feature -VirtioSndCard) when the instance's
+  sound is off, and -no-audio / -noaudio hide it too. As MuMu has it, a
+  click opens a bar under the button: a speaker on the left mutes and
+  unmutes, a slider on the right sets the volume as it moves. A click
+  anywhere outside the bar, the volume button included, closes it.
+
+The bar sets Android's media volume (STREAM_MUSIC), not the host's
+output gain: on opening it reads `cmd media_session volume --stream 3
+--get` ("volume is 5 in range [0..15]"), so a change made in a game or
+in Android's settings shows the next time, and the slider sends
+`--set N`. Muting sets the minimum and unmuting the last index above
+it (or half way up), since setting a stream's volume above zero unmutes
+it and Android keeps the index across boots. adb goes through the
+window's AdbInterface: the adb process runs and its output is read on
+the interface's own thread, the answer comes back to the UI thread, and
+the slider runs one command at a time with only its newest value
+waiting, so a drag does not start an adb process per pixel. The adb
+inherits the emulator's ANDROID_ADB_SERVER_PORT, the manager's own
+server; without it, with it set to 5037, or without an adb (the SDK's
+platform-tools first), the button is disabled and its tool tip says
+so, and nothing reaches adb's default server.
+
+The icons are the dark theme's screen_shot and volume_up, drawn at the
+window buttons' size, and a muted speaker in the same style.
+
+The arithmetic is in lean-title-bar-logic, tested in
+aemu-ui-lean-window_unittests (12 new tests): the buttons' order with and
+without volume, when volume is shown, which ANDROID_ADB_SERVER_PORT
+values may be used, where the bar opens on the screen, the adb
+arguments, parsing the volume line, the unmute index and the one at a
+time sender. Mutation check: 15 of 15 mutants killed.
+
+Refs ModAVD/ModAVD#231
+Refs ModAVD/ModAVD#226
+
+Change-Id: If6b7b00700967326754693d3b1387022167226c4
+---
+ .../modules/aemu-ui-qt/CMakeLists.txt         |   1 +
+ .../android/skin/qt/emulator-qt-window.cpp    |  27 +-
+ .../src/android/skin/qt/emulator-qt-window.h  |   3 +
+ .../images/dark/ic_volume_off_lean_16px.svg   |   4 +
+ .../src/android/skin/qt/lean-title-bar.cpp    |  85 ++++-
+ .../src/android/skin/qt/lean-title-bar.h      |  31 +-
+ .../src/android/skin/qt/lean-volume.cpp       | 325 ++++++++++++++++++
+ .../src/android/skin/qt/lean-volume.h         | 118 +++++++
+ .../src/android/skin/qt/resources.qrc         |   2 +
+ .../src/android/skin/qt/tool-window.cpp       |  32 +-
+ .../src/android/skin/qt/common.cpp            |   5 +
+ .../modules/aemu-ui-window/CMakeLists.txt     |   4 +-
+ .../include/android/lean-title-bar-logic.h    | 101 ++++++
+ .../src/android/lean-title-bar-logic.cpp      | 169 +++++++++
+ .../android/lean-title-bar-logic_unittest.cpp | 185 ++++++++++
+ 15 files changed, 1065 insertions(+), 27 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+ create mode 100644 android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+index dcf1a72e1..cbcc7e06c 100644
+--- a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+@@ -30,6 +30,7 @@ android_qt_lib(
+       android/skin/qt/GlassesStatusOverlay.cpp
+       android/skin/qt/init-qt.cpp
+       android/skin/qt/lean-title-bar.cpp
++      android/skin/qt/lean-volume.cpp
+       android/skin/qt/left-hand-dialog.cpp
+       android/skin/qt/left-hand-dialog.ui
+       android/skin/qt/ModalOverlay.cpp
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 8f3855c3e..e2323ba50 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -58,6 +58,7 @@
+ #include "android/skin/qt/extended-pages/snapshot-page.h"
+ #include "android/skin/qt/extended-pages/telephony-controller.h"
+ #include "android/skin/qt/extended-pages/telephony-page.h"
++#include "android/skin/qt/lean-title-bar.h"
+ #include "android/skin/qt/multi-display-widget.h"
+ #include "android/skin/qt/native-keyboard-event-handler.h"
+ #include "android/skin/qt/qt-keycode.h"
+@@ -2918,13 +2919,29 @@ void EmulatorQtWindow::slot_scrollRangeChanged(int min, int max) {
+                              mContainer.verticalScrollBar()->value());
+ }
+ 
++void EmulatorQtWindow::screenshotFailed(const QString& dialogText) {
++    if (!mToolWindow->isLeanToolbar()) {
++        showErrorDialog(dialogText, tr("Screenshot"));
++        return;
++    }
++    // The lean window says it in a short note that goes away by itself
++    // (ModAVD#231): no dialog to dismiss.
++    const QString text = QString::fromUtf8("截图没存上");
++    if (LeanTitleBar* titleBar = mToolWindow->leanTitleBar()) {
++        titleBar->showScreenshotNotice(text);
++    } else {
++        constexpr int kNoticeMs = 4000;
++        mContainer.messageCenter().addMessage(
++                text, Ui::OverlayMessageType::Error, kNoticeMs);
++    }
++}
++
+ void EmulatorQtWindow::screenshot() {
+     QString savePath = getScreenshotSaveDirectory();
+     if (savePath.isEmpty()) {
+-        showErrorDialog(tr("The screenshot save location is not set.<br/>"
+-                           "Check the settings page and ensure the directory "
+-                           "exists and is writeable."),
+-                        tr("Screenshot"));
++        screenshotFailed(tr("The screenshot save location is not set.<br/>"
++                            "Check the settings page and ensure the directory "
++                            "exists and is writeable."));
+         return;
+     }
+ 
+@@ -2943,7 +2960,7 @@ void EmulatorQtWindow::screenshot() {
+ 
+     const auto uiAgent = mToolWindow->getUiEmuAgent();
+     if (!uiAgent->record->doSnap(savePath.toStdString().c_str(), displayId)) {
+-        showErrorDialog(tr("Screenshot failed"), tr("Screenshot"));
++        screenshotFailed(tr("Screenshot failed"));
+     } else {
+         // Display the flash animation immediately as feedback - if it fails, an
+         // error dialog will indicate as such.
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 86ebf87f0..c6ece2d49 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -512,6 +512,9 @@ private:
+     QPixmap mRotatedScreenMaskPixmap;
+     bool mScreenMaskChanged = true;
+     void updateScreenMask();
++    // A screenshot was not saved: the full toolbar shows |dialogText| in a
++    // dialog, the lean one a short note in Chinese that blocks nothing.
++    void screenshotFailed(const QString& dialogText);
+ 
+     static const std::string_view kRemoteDownloadsDir;
+     static const std::string_view kRemoteDownloadsDirApi10;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
+new file mode 100644
+index 000000000..4539c9241
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
+@@ -0,0 +1,4 @@
++<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
++<path d="M4.52808 6.1H4.73932L4.88657 5.94854L7.52808 3.23157L7.52808 12.7684L4.88657 10.0515L4.73932 9.9H4.52808H2.02808C1.75193 9.9 1.52808 9.67614 1.52808 9.4V6.6C1.52808 6.32386 1.75193 6.1 2.02808 6.1H4.52808Z" stroke="white"/>
++<path d="M10 5.75L14 9.75M14 5.75L10 9.75" stroke="white" stroke-linecap="round"/>
++</svg>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+index 5ca34ea19..dfac93083 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -21,7 +21,9 @@
+ #include <QHBoxLayout>
+ #include <QIcon>
+ #include <QLabel>
++#include <QPoint>
+ #include <QPushButton>
++#include <QRect>
+ #include <QResizeEvent>
+ #include <QSize>
+ #include <QStyle>
+@@ -30,6 +32,7 @@
+ #include <algorithm>
+ #include <utility>
+ 
++#include "android/lean-title-bar-logic.h"
+ #include "android/lean-window-frame.h"
+ 
+ namespace {
+@@ -53,7 +56,8 @@ constexpr int kWindowIconSize = 16;
+ 
+ }  // namespace
+ 
+-LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
++LeanTitleBar::LeanTitleBar(QWidget* window, bool volumeShown)
++    : QWidget(window), mWindow(window) {
+     setObjectName(QStringLiteral("leanTitleBar"));
+     setAttribute(Qt::WA_StyledBackground);
+     setStyleSheet(QString::fromLatin1(kStyle));
+@@ -75,6 +79,14 @@ LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
+     mTitle->setTextFormat(Qt::PlainText);
+     layout->addWidget(mTitle, 1, Qt::AlignVCenter);
+ 
++    // The screenshot and volume icons are drawn at the window buttons' size,
++    // as on the side toolbar.
++    mScreenshot = addButton("screen_shot", QString::fromUtf8("截图"),
++                            kWindowIconSize);
++    if (volumeShown) {
++        mVolume = addButton("volume_up", QString::fromUtf8("音量"),
++                            kWindowIconSize);
++    }
+     mBack = addButton("back", QString::fromUtf8("返回"), kNavIconSize);
+     mHome = addButton("home", QString::fromUtf8("桌面"), kNavIconSize);
+     mDivider = new QFrame(this);
+@@ -85,14 +97,37 @@ LeanTitleBar::LeanTitleBar(QWidget* window) : QWidget(window), mWindow(window) {
+                           kWindowIconSize);
+     mClose = addButton("close", QString::fromUtf8("关机"), kWindowIconSize);
+ 
+-    layout->addWidget(mBack);
+-    layout->addWidget(mHome);
+-    layout->addSpacing(4);
+-    layout->addWidget(mDivider, 0, Qt::AlignVCenter);
+-    layout->addSpacing(4);
+-    layout->addWidget(mMinimize);
+-    layout->addWidget(mMaximize);
+-    layout->addWidget(mClose);
++    using android::lean_title_bar::Item;
++    for (Item item : android::lean_title_bar::items(volumeShown)) {
++        switch (item) {
++            case Item::Screenshot:
++                layout->addWidget(mScreenshot);
++                break;
++            case Item::Volume:
++                layout->addWidget(mVolume);
++                break;
++            case Item::Back:
++                layout->addWidget(mBack);
++                break;
++            case Item::Home:
++                layout->addWidget(mHome);
++                break;
++            case Item::Divider:
++                layout->addSpacing(4);
++                layout->addWidget(mDivider, 0, Qt::AlignVCenter);
++                layout->addSpacing(4);
++                break;
++            case Item::Minimize:
++                layout->addWidget(mMinimize);
++                break;
++            case Item::Maximize:
++                layout->addWidget(mMaximize);
++                break;
++            case Item::Close:
++                layout->addWidget(mClose);
++                break;
++        }
++    }
+ 
+     // The tool tip of the maximize / restore button while the window sees
+     // the mouse over it: Qt shows none for a widget it gets no mouse events
+@@ -124,10 +159,12 @@ QPushButton* LeanTitleBar::addButton(const char* icon,
+ 
+ int LeanTitleBar::buttonsLeft() const {
+     // The first button shown; back or home may be hidden for some AVDs.
+-    for (QWidget* widget : {static_cast<QWidget*>(mBack),
++    for (QWidget* widget : {static_cast<QWidget*>(mScreenshot),
++                            static_cast<QWidget*>(mVolume),
++                            static_cast<QWidget*>(mBack),
+                             static_cast<QWidget*>(mHome),
+                             static_cast<QWidget*>(mDivider)}) {
+-        if (!widget->isHidden()) {
++        if (widget && !widget->isHidden()) {
+             return widget->x();
+         }
+     }
+@@ -135,12 +172,36 @@ int LeanTitleBar::buttonsLeft() const {
+ }
+ 
+ void LeanTitleBar::setButtonsEnabled(bool enabled) {
+-    for (QPushButton* button : {mBack, mHome, mMinimize, mMaximize, mClose}) {
++    mButtonsEnabled = enabled;
++    for (QPushButton* button :
++         {mScreenshot, mBack, mHome, mMinimize, mMaximize, mClose}) {
+         button->setEnabled(enabled);
+     }
++    if (mVolume) {
++        mVolume->setEnabled(enabled && mVolumeAvailable);
++    }
+     if (!enabled) {
+         setMaximizeButtonMouse(false, false);
++        emit buttonsDisabled();
++    }
++}
++
++void LeanTitleBar::setVolumeAvailable(bool available, const QString& reason) {
++    mVolumeAvailable = available;
++    if (!mVolume) {
++        return;
+     }
++    mVolume->setEnabled(mButtonsEnabled && available);
++    const QString tip = available ? QString::fromUtf8("音量") : reason;
++    mVolume->setToolTip(tip);
++    mVolume->setAccessibleName(tip);
++}
++
++void LeanTitleBar::showScreenshotNotice(const QString& text) {
++    constexpr int kNoticeMs = 4000;
++    QToolTip::showText(
++            mScreenshot->mapToGlobal(QPoint(0, mScreenshot->height())), text,
++            mScreenshot, QRect(), kNoticeMs);
+ }
+ 
+ void LeanTitleBar::setMaximizedQuery(std::function<bool()> query) {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+index e90c89df7..594def07c 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -26,11 +26,12 @@ class QPushButton;
+ class QResizeEvent;
+ 
+ // The title bar the lean window draws itself (ModAVD#58), at the top of the
+-// emulator window: the window's icon and title on the left, then back, home,
+-// a divider, minimize, maximize / restore (ModAVD#185) and close on the
+-// right. It shows the title and icon of the window it sits in. Moving the
+-// window by the title bar, and the system menu, are the window's
+-// (WindowsLeanFrame); this only has the buttons.
++// emulator window: the window's icon and title on the left, then screenshot
++// (ModAVD#231), volume while the emulator plays sound (ModAVD#226), back,
++// home, a divider, minimize, maximize / restore (ModAVD#185) and close on the
++// right (lean_title_bar::items()). It shows the title and icon of the window
++// it sits in. Moving the window by the title bar, and the system menu, are
++// the window's (WindowsLeanFrame); this only has the buttons.
+ class LeanTitleBar : public QWidget {
+     Q_OBJECT
+ 
+@@ -38,12 +39,22 @@ public:
+     // Logical pixels.
+     static constexpr int kHeight = 32;
+ 
+-    explicit LeanTitleBar(QWidget* window);
++    LeanTitleBar(QWidget* window, bool volumeShown);
+ 
+     // Where the buttons start, in logical pixels from the left edge.
+     int buttonsLeft() const;
+     void setButtonsEnabled(bool enabled);
+ 
++    QPushButton* screenshotButton() const { return mScreenshot; }
++    // Null without sound.
++    QPushButton* volumeButton() const { return mVolume; }
++    // Whether the volume button can be used: without adb it is disabled
++    // and its tool tip says |reason|.
++    void setVolumeAvailable(bool available, const QString& reason);
++    bool volumeAvailable() const { return mVolumeAvailable; }
++    // A short note under the screenshot button that goes away by itself, as
++    // when a screenshot was not saved; it does not stop anything.
++    void showScreenshotNotice(const QString& text);
+     QPushButton* backButton() const { return mBack; }
+     QPushButton* homeButton() const { return mHome; }
+     QPushButton* minimizeButton() const { return mMinimize; }
+@@ -61,6 +72,10 @@ public:
+     // |down|, with its tool tip after a while.
+     void setMaximizeButtonMouse(bool hot, bool down);
+ 
++signals:
++    // setButtonsEnabled(false), as the safe shutdown begins.
++    void buttonsDisabled();
++
+ protected:
+     bool eventFilter(QObject* watched, QEvent* event) override;
+     void resizeEvent(QResizeEvent* event) override;
+@@ -74,6 +89,10 @@ private:
+     QWidget* mWindow;
+     QLabel* mIcon = nullptr;
+     QLabel* mTitle = nullptr;
++    QPushButton* mScreenshot = nullptr;
++    QPushButton* mVolume = nullptr;
++    bool mVolumeAvailable = true;
++    bool mButtonsEnabled = true;
+     QPushButton* mBack = nullptr;
+     QPushButton* mHome = nullptr;
+     QFrame* mDivider = nullptr;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
+new file mode 100644
+index 000000000..e8b7c5646
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
+@@ -0,0 +1,325 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/skin/qt/lean-volume.h"
++
++#include <QApplication>
++#include <QHBoxLayout>
++#include <QHideEvent>
++#include <QIcon>
++#include <QLabel>
++#include <QMetaObject>
++#include <QMouseEvent>
++#include <QPushButton>
++#include <QRect>
++#include <QScreen>
++#include <QShowEvent>
++#include <QSignalBlocker>
++#include <QSize>
++#include <QSlider>
++
++#include <sstream>
++#include <utility>
++
++#include "android/base/system/System.h"
++#include "android/emulation/control/adb/AdbInterface.h"
++#include "android/skin/qt/lean-title-bar.h"
++
++namespace tb = android::lean_title_bar;
++using android::emulation::AdbInterface;
++using android::emulation::OptionalAdbCommandResult;
++
++namespace {
++
++// The lean title bar's palette (lean-title-bar.cpp).
++constexpr char kStyle[] =
++        "#leanVolumePopup { background: #20212D; border: 1px solid #3B3D52; }"
++        "#leanVolumePopup QLabel { color: #E8E8EC; background: transparent; }"
++        "#leanVolumePopup QPushButton { background: #20212D; border: 0; }"
++        "#leanVolumePopup QPushButton:hover { background: #303142; }"
++        "#leanVolumePopup QPushButton:pressed { background: #3B3D52; }"
++        "#leanVolumePopup QSlider::groove:horizontal {"
++        " height: 4px; background: #3B3D52; border-radius: 2px; }"
++        "#leanVolumePopup QSlider::sub-page:horizontal {"
++        " background: #E8E8EC; border-radius: 2px; }"
++        "#leanVolumePopup QSlider::handle:horizontal {"
++        " background: #E8E8EC; width: 12px; margin: -4px 0; border-radius: 6px; }"
++        "#leanVolumePopup QSlider::sub-page:horizontal:disabled {"
++        " background: #3B3D52; }"
++        "#leanVolumePopup QSlider::handle:horizontal:disabled {"
++        " background: #5A5C70; }";
++
++constexpr int kHeight = 40;
++constexpr int kSpeakerSize = 32;
++constexpr int kIconSize = 16;
++constexpr int kSliderWidth = 160;
++constexpr int kAdbTimeoutMs = 5000;
++
++}  // namespace
++
++LeanVolumePopup::LeanVolumePopup(QWidget* parent)
++    : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint |
++                             Qt::NoDropShadowWindowHint) {
++    setObjectName(QStringLiteral("leanVolumePopup"));
++    setAttribute(Qt::WA_StyledBackground);
++    setStyleSheet(QString::fromLatin1(kStyle));
++    setFixedHeight(kHeight);
++
++    auto* layout = new QHBoxLayout(this);
++    layout->setContentsMargins(4, 0, 12, 0);
++    layout->setSpacing(8);
++
++    mSpeaker = new QPushButton(this);
++    mSpeaker->setFocusPolicy(Qt::NoFocus);
++    mSpeaker->setFlat(true);
++    mSpeaker->setFixedSize(kSpeakerSize, kSpeakerSize);
++    mSpeaker->setIconSize(QSize(kIconSize, kIconSize));
++    layout->addWidget(mSpeaker, 0, Qt::AlignVCenter);
++
++    mSlider = new QSlider(Qt::Horizontal, this);
++    mSlider->setFocusPolicy(Qt::NoFocus);
++    mSlider->setFixedWidth(kSliderWidth);
++    mSlider->setTracking(true);
++    mSlider->setAccessibleName(QString::fromUtf8("媒体音量"));
++    layout->addWidget(mSlider, 0, Qt::AlignVCenter);
++
++    mStatus = new QLabel(this);
++    mStatus->setFixedWidth(kSliderWidth);
++    mStatus->hide();
++    layout->addWidget(mStatus, 0, Qt::AlignVCenter);
++
++    connect(mSpeaker, &QPushButton::clicked, this,
++            &LeanVolumePopup::muteClicked);
++    connect(mSlider, &QSlider::valueChanged, this,
++            &LeanVolumePopup::volumeDragged);
++    showMuted(false);
++    adjustSize();
++}
++
++void LeanVolumePopup::openUnder(QPushButton* anchor) {
++    mAnchor = anchor;
++    mStatus->hide();
++    mSlider->show();
++    mSlider->setEnabled(false);
++    mSpeaker->setEnabled(false);
++    adjustSize();
++
++    const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height()));
++    int left = below.x();
++    if (QScreen* screen = anchor->screen()) {
++        const QRect area = screen->availableGeometry();
++        left = tb::popupLeft(below.x(), width(), area.left(),
++                             area.left() + area.width());
++    }
++    move(left, below.y());
++    show();
++    raise();
++}
++
++void LeanVolumePopup::showVolume(const tb::StreamVolume& volume) {
++    mStatus->hide();
++    mSlider->show();
++    const QSignalBlocker blocker(mSlider);
++    mSlider->setRange(volume.min, volume.max);
++    mSlider->setPageStep(1);
++    mSlider->setValue(volume.index);
++    mSlider->setEnabled(true);
++    mSpeaker->setEnabled(true);
++    showMuted(volume.muted());
++}
++
++void LeanVolumePopup::showMuted(bool muted) {
++    mSpeaker->setIcon(QIcon(muted ? QStringLiteral(":/dark/volume_off_lean")
++                                  : QStringLiteral(":/dark/volume_up")));
++    const QString tip =
++            muted ? QString::fromUtf8("取消静音") : QString::fromUtf8("静音");
++    mSpeaker->setToolTip(tip);
++    mSpeaker->setAccessibleName(tip);
++}
++
++void LeanVolumePopup::setSliderValue(int index) {
++    const QSignalBlocker blocker(mSlider);
++    mSlider->setValue(index);
++}
++
++void LeanVolumePopup::showUnavailable(const QString& text) {
++    mSlider->hide();
++    mSpeaker->setEnabled(false);
++    mStatus->setText(text);
++    mStatus->show();
++}
++
++void LeanVolumePopup::mousePressEvent(QMouseEvent* event) {
++    if (!rect().contains(event->position().toPoint())) {
++        // A click on the volume button closes the bar and goes no further,
++        // or the button would open it again at once.
++        if (mAnchor && mAnchor->isVisible() &&
++            QRect(mAnchor->mapToGlobal(QPoint(0, 0)), mAnchor->size())
++                    .contains(event->globalPosition().toPoint())) {
++            setAttribute(Qt::WA_NoMouseReplay, true);
++        }
++        close();
++        return;
++    }
++    QFrame::mousePressEvent(event);
++}
++
++void LeanVolumePopup::showEvent(QShowEvent* event) {
++    setAttribute(Qt::WA_NoMouseReplay, false);
++    QFrame::showEvent(event);
++}
++
++void LeanVolumePopup::hideEvent(QHideEvent* event) {
++    QFrame::hideEvent(event);
++    emit closed();
++}
++
++LeanVolumeControl::LeanVolumeControl(LeanTitleBar* titleBar, AdbGetter adb)
++    : QObject(titleBar), mTitleBar(titleBar), mAdb(std::move(adb)) {
++    QPushButton* button = mTitleBar->volumeButton();
++    mPopup = new LeanVolumePopup(button->window());
++    connect(button, &QPushButton::clicked, this, &LeanVolumeControl::toggle);
++    connect(mPopup, &LeanVolumePopup::volumeDragged, this,
++            &LeanVolumeControl::onDragged);
++    connect(mPopup, &LeanVolumePopup::muteClicked, this,
++            &LeanVolumeControl::onMuteClicked);
++    connect(mTitleBar, &LeanTitleBar::buttonsDisabled, mPopup,
++            &QWidget::close);
++
++    const std::string port =
++            android::base::System::get()->envGet("ANDROID_ADB_SERVER_PORT");
++    if (!tb::adbServerPortUsable(port.empty() ? nullptr : port.c_str())) {
++        mTitleBar->setVolumeAvailable(
++                false, QString::fromUtf8("音量：没有可用的 adb 服务，调不了"));
++    }
++}
++
++void LeanVolumeControl::checkAvailable() {
++    if (!mTitleBar->volumeAvailable()) {
++        return;
++    }
++    AdbInterface* adb = mAdb ? mAdb() : nullptr;
++    if (!adb || adb->detectedAdbPath().empty()) {
++        mTitleBar->setVolumeAvailable(
++                false, QString::fromUtf8("音量：没找到 adb，调不了"));
++    }
++}
++
++void LeanVolumeControl::toggle() {
++    if (mPopup->isVisible()) {
++        mPopup->close();
++        return;
++    }
++    mPopup->openUnder(mTitleBar->volumeButton());
++    readVolume();
++}
++
++void LeanVolumeControl::readVolume() {
++    const int generation = ++mReadGeneration;
++    mVolume.reset();
++    runAdb(tb::getMusicVolumeArgs(), true,
++           [this, generation](bool ok, const std::string& output) {
++               if (generation != mReadGeneration || !mPopup->isVisible()) {
++                   return;
++               }
++               const auto volume =
++                       ok ? tb::parseStreamVolume(output) : std::nullopt;
++               if (!volume) {
++                   mPopup->showUnavailable(
++                           QString::fromUtf8("读不到安卓的音量"));
++                   return;
++               }
++               mVolume = volume;
++               if (!volume->muted()) {
++                   mRemembered = volume->index;
++               }
++               mPopup->showVolume(*volume);
++           });
++}
++
++void LeanVolumeControl::onDragged(int index) {
++    if (!mVolume) {
++        return;
++    }
++    mVolume->index = index;
++    if (!mVolume->muted()) {
++        mRemembered = index;
++    }
++    mPopup->showMuted(mVolume->muted());
++    send(mSender.request(index));
++}
++
++void LeanVolumeControl::onMuteClicked() {
++    if (!mVolume) {
++        return;
++    }
++    // Muting sets the minimum and unmuting the last index above it: setting
++    // a stream's volume above zero unmutes it, and the guest keeps the index
++    // across boots.
++    const int index =
++            mVolume->muted()
++                    ? tb::unmuteIndex(mRemembered, mVolume->min, mVolume->max)
++                    : mVolume->min;
++    mVolume->index = index;
++    mPopup->setSliderValue(index);
++    mPopup->showMuted(mVolume->muted());
++    send(mSender.request(index));
++}
++
++void LeanVolumeControl::send(std::optional<int> index) {
++    if (!index) {
++        return;
++    }
++    runAdb(tb::setMusicVolumeArgs(*index), false,
++           [this](bool, const std::string&) { send(mSender.finished()); });
++}
++
++void LeanVolumeControl::runAdb(
++        const std::vector<std::string>& args,
++        bool wantOutput,
++        std::function<void(bool ok, const std::string& output)> done) {
++    // The answer comes back on the UI thread, and only while this lives.
++    QPointer<LeanVolumeControl> self(this);
++    auto answer = [self, done = std::move(done)](bool ok, std::string output) {
++        QMetaObject::invokeMethod(
++                qApp,
++                [self, done, ok, output = std::move(output)] {
++                    if (self) {
++                        done(ok, output);
++                    }
++                },
++                Qt::QueuedConnection);
++    };
++    AdbInterface* adb = mAdb ? mAdb() : nullptr;
++    if (!adb) {
++        answer(false, std::string());
++        return;
++    }
++    auto command = adb->runAdbCommand(
++            args,
++            [answer, wantOutput](const OptionalAdbCommandResult& result) {
++                const bool ok = result && result->exit_code == 0;
++                std::string output;
++                if (ok && wantOutput && result->output) {
++                    std::ostringstream text;
++                    text << result->output->rdbuf();
++                    output = text.str();
++                }
++                answer(ok, std::move(output));
++            },
++            kAdbTimeoutMs, wantOutput);
++    if (!command) {
++        // Not running Android, so no adb.
++        answer(false, std::string());
++    }
++}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
+new file mode 100644
+index 000000000..44b719231
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
+@@ -0,0 +1,118 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <QFrame>
++#include <QObject>
++#include <QPointer>
++#include <QString>
++
++#include <functional>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "android/lean-title-bar-logic.h"
++
++class QHideEvent;
++class QLabel;
++class QMouseEvent;
++class QPushButton;
++class QShowEvent;
++class QSlider;
++class LeanTitleBar;
++
++namespace android {
++namespace emulation {
++class AdbInterface;
++}  // namespace emulation
++}  // namespace android
++
++// The bar the lean title bar's volume button opens under itself (ModAVD#226),
++// as MuMu has it: a speaker that mutes and unmutes on the left, a slider on
++// the right. A click anywhere outside it, the volume button included, closes
++// it.
++class LeanVolumePopup : public QFrame {
++    Q_OBJECT
++
++public:
++    explicit LeanVolumePopup(QWidget* parent);
++
++    // Opens under |anchor|, the volume button, with the slider disabled until
++    // showVolume() or showUnavailable().
++    void openUnder(QPushButton* anchor);
++    void showVolume(const android::lean_title_bar::StreamVolume& volume);
++    // Shows the speaker as muted or not, the slider where it is.
++    void showMuted(bool muted);
++    void setSliderValue(int index);
++    void showUnavailable(const QString& text);
++
++signals:
++    void volumeDragged(int index);
++    void muteClicked();
++    void closed();
++
++protected:
++    void mousePressEvent(QMouseEvent* event) override;
++    void showEvent(QShowEvent* event) override;
++    void hideEvent(QHideEvent* event) override;
++
++private:
++    QPointer<QPushButton> mAnchor;
++    QPushButton* mSpeaker = nullptr;
++    QSlider* mSlider = nullptr;
++    QLabel* mStatus = nullptr;
++};
++
++// The volume button's control: reads the guest's media volume when the bar
++// opens and sets it while the slider moves, over adb (`cmd media_session
++// volume --stream 3`). adb runs on the AdbInterface's own thread and answers
++// on the UI thread; the slider sends one command at a time and only its
++// newest value waits. It talks only to the adb server that
++// ANDROID_ADB_SERVER_PORT names (the manager's own), never to 5037: without
++// one, or without adb, the button is disabled and says why.
++class LeanVolumeControl : public QObject {
++    Q_OBJECT
++
++public:
++    using AdbGetter = std::function<android::emulation::AdbInterface*()>;
++
++    LeanVolumeControl(LeanTitleBar* titleBar, AdbGetter adb);
++
++    // Disables the button when there is no adb or no adb server of the
++    // manager's to talk to. Asks the AdbInterface, so it is called once the
++    // window is up rather than while it is made.
++    void checkAvailable();
++
++private:
++    void toggle();
++    void readVolume();
++    void onDragged(int index);
++    void onMuteClicked();
++    void send(std::optional<int> index);
++    void runAdb(const std::vector<std::string>& args,
++                bool wantOutput,
++                std::function<void(bool ok, const std::string& output)> done);
++
++    LeanTitleBar* mTitleBar;
++    AdbGetter mAdb;
++    LeanVolumePopup* mPopup = nullptr;
++    android::lean_title_bar::VolumeSender mSender;
++    std::optional<android::lean_title_bar::StreamVolume> mVolume;
++    // The last index above the minimum, for unmuting.
++    int mRemembered = -1;
++    // Bumped whenever the bar opens, so a late answer to an older read is
++    // dropped.
++    int mReadGeneration = 0;
++};
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+index d97a46c31..7e71672ff 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+@@ -289,6 +289,8 @@
+         <!-- The lean title bar's maximize / restore button (ModAVD#185) -->
+         <file alias="window_maximize">images/dark/ic_window_maximize_white_48dp.svg</file>
+         <file alias="window_restore">images/dark/ic_window_restore_white_48dp.svg</file>
++        <!-- The lean volume popup's speaker while muted (ModAVD#226) -->
++        <file alias="volume_off_lean">images/dark/ic_volume_off_lean_16px.svg</file>
+         <file alias="more">images/dark/ic_more_horiz_white_48dp.svg</file>
+         <file alias="overview">images/dark/System_Overview_white.svg</file>
+         <file alias="meta">images/dark/meta.svg</file>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index a1acd646f..65e448d78 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -92,7 +92,9 @@
+ #include "android/skin/qt/extended-pages/common.h"
+ #include "android/skin/qt/extended-pages/virtual-sensors-page.h"
+ #include "android/skin/qt/extended-window.h"
++#include "android/lean-title-bar-logic.h"
+ #include "android/skin/qt/lean-title-bar.h"
++#include "android/skin/qt/lean-volume.h"
+ #include "android/skin/qt/posture-selection-dialog.h"
+ #include "android/skin/qt/qt-settings.h"
+ #include "android/skin/qt/qt-ui-commands.h"
+@@ -673,11 +675,12 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+ 
+     if (leanToolbar()) {
+         // Hide everything else; all_apps_button remains the home button for
+-        // AVDs that use AllAppsForHomeTray.
++        // AVDs that use AllAppsForHomeTray. The screenshot button stays
++        // (ModAVD#231); on Windows the title bar has its own.
+         const QPushButton* keep[] = {
+                 mToolsUi->close_button,    mToolsUi->minimize_button,
+                 mToolsUi->back_button,     mToolsUi->home_button,
+-                mToolsUi->all_apps_button,
++                mToolsUi->all_apps_button, mToolsUi->scrShot_button,
+         };
+         for (QPushButton* button : findChildren<QPushButton*>()) {
+             if (std::find(std::begin(keep), std::end(keep), button) ==
+@@ -719,6 +722,7 @@ ToolWindow::ToolWindow(EmulatorQtWindow* window,
+         mToolsUi->back_button->setToolTip(QString::fromUtf8("返回"));
+         mToolsUi->home_button->setToolTip(QString::fromUtf8("主页"));
+         mToolsUi->all_apps_button->setToolTip(QString::fromUtf8("主页"));
++        mToolsUi->scrShot_button->setToolTip(QString::fromUtf8("截图"));
+         if (inWindowNav()) {
+             mToolsUi->close_button->hide();
+             mToolsUi->minimize_button->hide();
+@@ -973,11 +977,33 @@ void ToolWindow::createLeanTitleBar() {
+     if (mLeanTitleBar) {
+         return;
+     }
+-    mLeanTitleBar = new LeanTitleBar(mEmulatorWindow->containerWindow());
++    // The volume button only while the emulator plays sound (ModAVD#226):
++    // the manager passes -audio none when the instance's sound is off.
++    const AndroidOptions* options =
++            getConsoleAgents()->settings->android_cmdLineOptions();
++    const bool volumeShown = android::lean_title_bar::volumeButtonShown(
++            options->audio, options->no_audio || options->noaudio);
++    mLeanTitleBar = new LeanTitleBar(mEmulatorWindow->containerWindow(),
++                                     volumeShown);
+     // Room for it from the start, before the guest screen is placed.
+     mEmulatorWindow->containerWindow()->setLeanTitleBarHeight(
+             LeanTitleBar::kHeight);
+ 
++    // The screenshot goes where -save-path says, as the side toolbar's
++    // (ModAVD#231).
++    QObject::connect(mLeanTitleBar->screenshotButton(), &QPushButton::clicked,
++                     this, [this] {
++                         handleUICommand(QtUICommand::TAKE_SCREENSHOT, true);
++                     });
++    if (volumeShown) {
++        EmulatorQtWindow* window = mEmulatorWindow;
++        auto* volume = new LeanVolumeControl(
++                mLeanTitleBar, [window] { return window->getAdbInterface(); });
++        // The AdbInterface finds adb when it is first asked for; ask once
++        // the window is up.
++        QTimer::singleShot(0, volume, [volume] { volume->checkAvailable(); });
++    }
++
+     QPushButton* back = mLeanTitleBar->backButton();
+     back->setVisible(!mToolsUi->back_button->isHidden());
+     QObject::connect(back, &QPushButton::pressed, this,
+diff --git a/android/android-ui/modules/aemu-ui-widgets/src/android/skin/qt/common.cpp b/android/android-ui/modules/aemu-ui-widgets/src/android/skin/qt/common.cpp
+index 30869cdb0..ed1575ce9 100644
+--- a/android/android-ui/modules/aemu-ui-widgets/src/android/skin/qt/common.cpp
++++ b/android/android-ui/modules/aemu-ui-widgets/src/android/skin/qt/common.cpp
+@@ -104,6 +104,11 @@ QString getScreenshotSaveDirectory() {
+         savePath = getConsoleAgents()
+                            ->settings->android_cmdLineOptions()
+                            ->save_path;
++        // The manager names a folder (Pictures\ModAVD, ModAVD#231) that may
++        // not be there yet.
++        if (!savePath.isEmpty() && !QDir(savePath).exists()) {
++            QDir().mkpath(savePath);
++        }
+     } else {
+         savePath = settings.value(Ui::Settings::SAVE_PATH, "").toString();
+     }
+diff --git a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+index abe56c909..6e186a63d 100644
+--- a/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-window/CMakeLists.txt
+@@ -5,12 +5,14 @@ android_add_library(
+   LICENSE Apache-2.0
+   SOURCE_DIR src
+   INCLUDES include
+-  SRC android/instance-window-title.c android/lean-window-frame.cpp)
++  SRC android/instance-window-title.c android/lean-title-bar-logic.cpp
++      android/lean-window-frame.cpp)
+ 
+ android_add_test(
+   TARGET aemu-ui-lean-window_unittests
+   SOURCE_DIR test
+   SRC android/instance-window-title_unittest.cpp
++      android/lean-title-bar-logic_unittest.cpp
+       android/lean-window-frame_unittest.cpp
+   DEPS aemu-ui-lean-window gmock_main)
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+new file mode 100644
+index 000000000..aa57fbf7c
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+@@ -0,0 +1,101 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++// What the lean window's title bar shows and how its volume control talks to
++// the guest (ModAVD#231 screenshot, ModAVD#226 volume), without any windowing
++// system, so that it can be tested on its own.
++namespace android {
++namespace lean_title_bar {
++
++// The title bar's buttons, left to right, after the icon and the title.
++enum class Item {
++    Screenshot,
++    Volume,
++    Back,
++    Home,
++    Divider,
++    Minimize,
++    Maximize,
++    Close,
++};
++
++// The title bar's items in order: screenshot, then volume when it is shown,
++// right next to back, then home, a divider and the window buttons.
++std::vector<Item> items(bool volumeShown);
++
++// Whether the title bar has the volume button: only while the emulator plays
++// sound, that is neither -audio none nor -no-audio / -noaudio. |audioBackend|
++// is the -audio value, null when not given.
++bool volumeButtonShown(const char* audioBackend, bool noAudio);
++
++// Whether ANDROID_ADB_SERVER_PORT (|value|, null when not set) names an adb
++// server the volume control may talk to: a decimal port in 1..65535 other than
++// adb's default 5037, which the emulator must neither use nor start.
++bool adbServerPortUsable(const char* value);
++
++// The left edge of a popup |popupWidth| wide that opens under a button whose
++// left edge is at |anchorLeft|: aligned with the button, moved left so that it
++// ends at |screenRight| when it would not fit, but never left of |screenLeft|.
++int popupLeft(int anchorLeft, int popupWidth, int screenLeft, int screenRight);
++
++// The guest's media volume (STREAM_MUSIC) as `cmd media_session volume` gives
++// it.
++struct StreamVolume {
++    int index = 0;
++    int min = 0;
++    int max = 0;
++
++    bool muted() const { return index <= min; }
++};
++
++// The adb arguments that read and set the guest's media volume.
++std::vector<std::string> getMusicVolumeArgs();
++std::vector<std::string> setMusicVolumeArgs(int index);
++
++// Reads "volume is 5 in range [0..15]" from the output of
++// getMusicVolumeArgs(), which has other lines around it ("[V] Connected to
++// AudioService"). Nothing when no line has it or it does not add up.
++std::optional<StreamVolume> parseStreamVolume(std::string_view output);
++
++// The index the speaker button unmutes to: the last one above |min| it saw
++// (|remembered|) when that is in range, else half way up.
++int unmuteIndex(int remembered, int min, int max);
++
++// Sends the slider's volume to the guest one adb command at a time: while one
++// runs, only the newest value waits, so a drag does not start an adb process
++// for every pixel and the guest ends at where the slider stopped.
++class VolumeSender {
++public:
++    // The slider is at |index|. Returns the index to send now, or nothing if a
++    // command runs (|index| then waits for it).
++    std::optional<int> request(int index);
++    // The running command finished. Returns the waiting index to send now, if
++    // it differs from the one just sent.
++    std::optional<int> finished();
++    bool busy() const { return mBusy; }
++
++private:
++    bool mBusy = false;
++    int mSent = 0;
++    std::optional<int> mWaiting;
++};
++
++}  // namespace lean_title_bar
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+new file mode 100644
+index 000000000..749af24d6
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -0,0 +1,169 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/lean-title-bar-logic.h"
++
++#include <algorithm>
++#include <cstring>
++
++namespace android {
++namespace lean_title_bar {
++
++namespace {
++
++// adb's own default server port.
++constexpr long kDefaultAdbServerPort = 5037;
++// AudioSystem.STREAM_MUSIC.
++constexpr char kMusicStream[] = "3";
++
++// Reads a decimal number, maybe negative, at |*pos| of |text| and moves past
++// it.
++bool readInt(std::string_view text, size_t* pos, int* value) {
++    size_t i = *pos;
++    bool negative = false;
++    if (i < text.size() && text[i] == '-') {
++        negative = true;
++        ++i;
++    }
++    const size_t digits = i;
++    long result = 0;
++    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
++        result = result * 10 + (text[i] - '0');
++        if (result > 1000000) {
++            return false;
++        }
++        ++i;
++    }
++    if (i == digits) {
++        return false;
++    }
++    *value = static_cast<int>(negative ? -result : result);
++    *pos = i;
++    return true;
++}
++
++bool readText(std::string_view text, size_t* pos, std::string_view expected) {
++    if (text.substr(*pos, expected.size()) != expected) {
++        return false;
++    }
++    *pos += expected.size();
++    return true;
++}
++
++}  // namespace
++
++std::vector<Item> items(bool volumeShown) {
++    std::vector<Item> result = {Item::Screenshot};
++    if (volumeShown) {
++        result.push_back(Item::Volume);
++    }
++    result.insert(result.end(), {Item::Back, Item::Home, Item::Divider,
++                                 Item::Minimize, Item::Maximize, Item::Close});
++    return result;
++}
++
++bool volumeButtonShown(const char* audioBackend, bool noAudio) {
++    if (noAudio) {
++        return false;
++    }
++    return !audioBackend || std::strcmp(audioBackend, "none") != 0;
++}
++
++bool adbServerPortUsable(const char* value) {
++    if (!value || !*value) {
++        return false;
++    }
++    long port = 0;
++    for (const char* c = value; *c; ++c) {
++        if (*c < '0' || *c > '9') {
++            return false;
++        }
++        port = port * 10 + (*c - '0');
++        if (port > 65535) {
++            return false;
++        }
++    }
++    return port >= 1 && port != kDefaultAdbServerPort;
++}
++
++int popupLeft(int anchorLeft, int popupWidth, int screenLeft, int screenRight) {
++    int left = anchorLeft;
++    if (left + popupWidth > screenRight) {
++        left = screenRight - popupWidth;
++    }
++    return std::max(left, screenLeft);
++}
++
++std::vector<std::string> getMusicVolumeArgs() {
++    return {"shell", "cmd", "media_session", "volume", "--stream",
++            kMusicStream, "--get"};
++}
++
++std::vector<std::string> setMusicVolumeArgs(int index) {
++    return {"shell", "cmd",    "media_session", "volume", "--stream",
++            kMusicStream, "--set", std::to_string(index)};
++}
++
++std::optional<StreamVolume> parseStreamVolume(std::string_view output) {
++    constexpr std::string_view kStart = "volume is ";
++    for (size_t at = output.find(kStart); at != std::string_view::npos;
++         at = output.find(kStart, at + 1)) {
++        size_t pos = at + kStart.size();
++        StreamVolume volume;
++        if (readInt(output, &pos, &volume.index) &&
++            readText(output, &pos, " in range [") &&
++            readInt(output, &pos, &volume.min) &&
++            readText(output, &pos, "..") &&
++            readInt(output, &pos, &volume.max) && readText(output, &pos, "]") &&
++            volume.min < volume.max && volume.index >= volume.min &&
++            volume.index <= volume.max) {
++            return volume;
++        }
++    }
++    return std::nullopt;
++}
++
++int unmuteIndex(int remembered, int min, int max) {
++    if (remembered > min && remembered <= max) {
++        return remembered;
++    }
++    return std::max(min + 1, (min + max + 1) / 2);
++}
++
++std::optional<int> VolumeSender::request(int index) {
++    if (mBusy) {
++        mWaiting = index;
++        return std::nullopt;
++    }
++    mBusy = true;
++    mSent = index;
++    mWaiting.reset();
++    return index;
++}
++
++std::optional<int> VolumeSender::finished() {
++    std::optional<int> next;
++    if (mWaiting && *mWaiting != mSent) {
++        next = mWaiting;
++    }
++    mWaiting.reset();
++    if (next) {
++        mSent = *next;
++        return next;
++    }
++    mBusy = false;
++    return std::nullopt;
++}
++
++}  // namespace lean_title_bar
++}  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+new file mode 100644
+index 000000000..1c63653ab
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -0,0 +1,185 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/lean-title-bar-logic.h"
++
++#include <gtest/gtest.h>
++
++namespace tb = android::lean_title_bar;
++using tb::Item;
++
++TEST(LeanTitleBarLogic, ItemsWithVolume) {
++    const std::vector<Item> expected = {
++            Item::Screenshot, Item::Volume,   Item::Back,     Item::Home,
++            Item::Divider,    Item::Minimize, Item::Maximize, Item::Close};
++    EXPECT_EQ(tb::items(true), expected);
++}
++
++TEST(LeanTitleBarLogic, ItemsWithoutVolume) {
++    const std::vector<Item> expected = {Item::Screenshot, Item::Back,
++                                        Item::Home,       Item::Divider,
++                                        Item::Minimize,   Item::Maximize,
++                                        Item::Close};
++    EXPECT_EQ(tb::items(false), expected);
++}
++
++TEST(LeanTitleBarLogic, VolumeButtonShown) {
++    // The manager leaves -audio out when the instance's sound is on.
++    EXPECT_TRUE(tb::volumeButtonShown(nullptr, false));
++    EXPECT_TRUE(tb::volumeButtonShown("", false));
++    EXPECT_TRUE(tb::volumeButtonShown("dsound", false));
++    // ... and passes -audio none when it is off.
++    EXPECT_FALSE(tb::volumeButtonShown("none", false));
++    EXPECT_FALSE(tb::volumeButtonShown(nullptr, true));
++    EXPECT_FALSE(tb::volumeButtonShown("dsound", true));
++    EXPECT_TRUE(tb::volumeButtonShown("nonex", false));
++}
++
++TEST(LeanTitleBarLogic, AdbServerPortUsable) {
++    EXPECT_TRUE(tb::adbServerPortUsable("20089"));
++    EXPECT_TRUE(tb::adbServerPortUsable("1"));
++    EXPECT_TRUE(tb::adbServerPortUsable("65535"));
++    EXPECT_TRUE(tb::adbServerPortUsable("5038"));
++    EXPECT_FALSE(tb::adbServerPortUsable(nullptr));
++    EXPECT_FALSE(tb::adbServerPortUsable(""));
++    EXPECT_FALSE(tb::adbServerPortUsable("5037"));
++    EXPECT_FALSE(tb::adbServerPortUsable("05037"));
++    EXPECT_FALSE(tb::adbServerPortUsable("0"));
++    EXPECT_FALSE(tb::adbServerPortUsable("65536"));
++    EXPECT_FALSE(tb::adbServerPortUsable("123456789012"));
++    EXPECT_FALSE(tb::adbServerPortUsable("-1"));
++    EXPECT_FALSE(tb::adbServerPortUsable("0x4E89"));
++    EXPECT_FALSE(tb::adbServerPortUsable(" 20089"));
++    EXPECT_FALSE(tb::adbServerPortUsable("20089 "));
++}
++
++TEST(LeanTitleBarLogic, PopupLeft) {
++    // Aligned with the button when it fits.
++    EXPECT_EQ(tb::popupLeft(100, 200, 0, 1920), 100);
++    EXPECT_EQ(tb::popupLeft(1720, 200, 0, 1920), 1720);
++    // Ends at the screen's right edge when it would not.
++    EXPECT_EQ(tb::popupLeft(1721, 200, 0, 1920), 1720);
++    EXPECT_EQ(tb::popupLeft(1900, 200, 0, 1920), 1720);
++    // But never left of the screen.
++    EXPECT_EQ(tb::popupLeft(-50, 200, 0, 1920), 0);
++    EXPECT_EQ(tb::popupLeft(50, 300, 0, 200), 0);
++    // A screen left of the primary one.
++    EXPECT_EQ(tb::popupLeft(-300, 200, -1920, 0), -300);
++    EXPECT_EQ(tb::popupLeft(-100, 200, -1920, 0), -200);
++}
++
++TEST(LeanTitleBarLogic, VolumeArgs) {
++    EXPECT_EQ(tb::getMusicVolumeArgs(),
++              (std::vector<std::string>{"shell", "cmd", "media_session",
++                                        "volume", "--stream", "3", "--get"}));
++    EXPECT_EQ(tb::setMusicVolumeArgs(7),
++              (std::vector<std::string>{"shell", "cmd", "media_session",
++                                        "volume", "--stream", "3", "--set",
++                                        "7"}));
++    EXPECT_EQ(tb::setMusicVolumeArgs(0).back(), "0");
++}
++
++TEST(LeanTitleBarLogic, ParseStreamVolume) {
++    const auto volume = tb::parseStreamVolume(
++            "[V] will get volume\r\n"
++            "[V] Connected to AudioService\r\n"
++            "[V] volume is 5 in range [0..15]\r\n");
++    ASSERT_TRUE(volume);
++    EXPECT_EQ(volume->index, 5);
++    EXPECT_EQ(volume->min, 0);
++    EXPECT_EQ(volume->max, 15);
++    EXPECT_FALSE(volume->muted());
++
++    const auto bare = tb::parseStreamVolume("volume is 0 in range [0..25]");
++    ASSERT_TRUE(bare);
++    EXPECT_EQ(bare->index, 0);
++    EXPECT_EQ(bare->max, 25);
++    EXPECT_TRUE(bare->muted());
++
++    const auto top = tb::parseStreamVolume("volume is 15 in range [0..15]\n");
++    ASSERT_TRUE(top);
++    EXPECT_EQ(top->index, 15);
++
++    const auto lowMin = tb::parseStreamVolume("volume is 1 in range [1..7]");
++    ASSERT_TRUE(lowMin);
++    EXPECT_TRUE(lowMin->muted());
++    EXPECT_EQ(lowMin->min, 1);
++}
++
++TEST(LeanTitleBarLogic, ParseStreamVolumeSkipsWhatDoesNotAddUp) {
++    EXPECT_FALSE(tb::parseStreamVolume(""));
++    EXPECT_FALSE(tb::parseStreamVolume("Error: no valid stream"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is  in range [0..15]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [0..15"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [0.15]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 of range [0..15]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 16 in range [0..15]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is -1 in range [0..15]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 3 in range [5..5]"));
++    // A range with nothing to slide over.
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [5..5]"));
++    EXPECT_FALSE(tb::parseStreamVolume("volume is 3 in range [9..5]"));
++    EXPECT_FALSE(
++            tb::parseStreamVolume("volume is 99999999999 in range [0..15]"));
++    // A later line that adds up wins over an earlier one that does not.
++    const auto later = tb::parseStreamVolume(
++            "volume is x\nvolume is 4 in range [0..15]\n");
++    ASSERT_TRUE(later);
++    EXPECT_EQ(later->index, 4);
++}
++
++TEST(LeanTitleBarLogic, UnmuteIndex) {
++    EXPECT_EQ(tb::unmuteIndex(9, 0, 15), 9);
++    EXPECT_EQ(tb::unmuteIndex(15, 0, 15), 15);
++    EXPECT_EQ(tb::unmuteIndex(1, 0, 15), 1);
++    // Nothing remembered: half way up.
++    EXPECT_EQ(tb::unmuteIndex(0, 0, 15), 8);
++    EXPECT_EQ(tb::unmuteIndex(-1, 0, 15), 8);
++    // Remembered from a range the guest no longer has.
++    EXPECT_EQ(tb::unmuteIndex(20, 0, 15), 8);
++    EXPECT_EQ(tb::unmuteIndex(0, 0, 1), 1);
++    EXPECT_EQ(tb::unmuteIndex(2, 2, 3), 3);
++}
++
++TEST(LeanTitleBarLogic, VolumeSenderSendsAtOnceWhenIdle) {
++    tb::VolumeSender sender;
++    EXPECT_FALSE(sender.busy());
++    EXPECT_EQ(sender.request(5), 5);
++    EXPECT_TRUE(sender.busy());
++    EXPECT_EQ(sender.finished(), std::nullopt);
++    EXPECT_FALSE(sender.busy());
++    EXPECT_EQ(sender.request(6), 6);
++}
++
++TEST(LeanTitleBarLogic, VolumeSenderKeepsOnlyTheNewest) {
++    tb::VolumeSender sender;
++    EXPECT_EQ(sender.request(5), 5);
++    EXPECT_EQ(sender.request(6), std::nullopt);
++    EXPECT_EQ(sender.request(7), std::nullopt);
++    EXPECT_EQ(sender.request(8), std::nullopt);
++    EXPECT_EQ(sender.finished(), 8);
++    EXPECT_TRUE(sender.busy());
++    EXPECT_EQ(sender.finished(), std::nullopt);
++    EXPECT_FALSE(sender.busy());
++}
++
++TEST(LeanTitleBarLogic, VolumeSenderSkipsWhatWasJustSent) {
++    tb::VolumeSender sender;
++    EXPECT_EQ(sender.request(5), 5);
++    EXPECT_EQ(sender.request(6), std::nullopt);
++    EXPECT_EQ(sender.request(5), std::nullopt);
++    // Dragged away and back: the guest already has 5.
++    EXPECT_EQ(sender.finished(), std::nullopt);
++    EXPECT_FALSE(sender.busy());
++    EXPECT_EQ(sender.request(5), 5);
++}

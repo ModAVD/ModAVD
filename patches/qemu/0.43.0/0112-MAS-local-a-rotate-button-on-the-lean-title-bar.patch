@@ -1,0 +1,889 @@
+From 7ac7b96ed8fb93fa257ee716e6edd4b1552ee886 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 21 Nov 2026 17:39:42 +0100
+Subject: [PATCH 112/116] MAS local: a rotate button on the lean title bar
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The lean window was always landscape: the manager fixes the guest's
+display to user_rotation 0 (`wm fixed-to-user-rotation enabled`), so a
+portrait app sat small between black bars, and the emulator's own rotate
+(`emu rotate`, the full toolbar's rotate keys) turned the window but not
+the picture. The title bar now has 旋转屏幕 right left of back (after
+screenshot and volume): a click turns between landscape (0) and a quarter
+turn clockwise, and back.
+
+- The window turns the way the full toolbar's ROTATE_LEFT / ROTATE_RIGHT
+  turn it: the device's coarse orientation through the sensors agent,
+  which the virtual sensors page passes on to rotateSkin. From 180 or 270
+  (console rotate) the button goes back to 0.
+- The guest's picture turns with it over adb, `settings put system
+  user_rotation N` (ROTATION_270 for the quarter turn clockwise, 0 back),
+  on the AdbInterface's own thread. The display stays fixed to the user
+  rotation: it still follows neither the sensors nor apps, only the
+  button. Nothing is kept across boots: the emulator starts at 0 from
+  hw.initialOrientation and the manager sets user_rotation 0 at each
+  boot.
+- adb as for the volume button: only the server ANDROID_ADB_SERVER_PORT
+  names, never 5037; without it, or without adb, the button is disabled
+  and says why on hover. Otherwise no hover tip, as for the other title
+  bar buttons; its accessible name is 旋转屏幕.
+- The window turns with the guest screen at the same scale, keeps its
+  centre, is scaled down when it no longer fits the screen's work area,
+  and is moved back onto it (fitInto() and placeKeepingCenter() in
+  lean-window-frame). A maximized or snapped window keeps its place and
+  has the turned guest screen fitted into it, as before.
+
+The full toolbar (ANDROID_EMU_FULL_TOOLBAR=1) is unchanged.
+
+Test: aemu-ui-lean-window_unittests (55, 10 new: the items' order, the
+button's target, the user rotation, the adb arguments, fitting and
+placing the turned window).
+
+Refs ModAVD/ModAVD#225
+
+Change-Id: If63c4345341dbfcc3492b569ecee6e37f4f9377d
+---
+ .../modules/aemu-ui-qt/CMakeLists.txt         |  1 +
+ .../android/skin/qt/emulator-qt-window.cpp    | 77 +++++++++++++++-
+ .../src/android/skin/qt/emulator-qt-window.h  | 17 ++++
+ .../src/android/skin/qt/lean-rotate.cpp       | 80 ++++++++++++++++
+ .../src/android/skin/qt/lean-rotate.h         | 60 ++++++++++++
+ .../src/android/skin/qt/lean-title-bar.cpp    | 16 ++++
+ .../src/android/skin/qt/lean-title-bar.h      | 10 +-
+ .../src/android/skin/qt/tool-window.cpp       | 28 ++++++
+ .../src/android/skin/qt/tool-window.h         |  4 +
+ .../include/android/lean-title-bar-logic.h    | 31 ++++++-
+ .../include/android/lean-window-frame.h       | 16 ++++
+ .../src/android/lean-title-bar-logic.cpp      | 17 +++-
+ .../src/android/lean-window-frame.cpp         | 38 ++++++++
+ .../android/lean-title-bar-logic_unittest.cpp | 55 +++++++++--
+ .../android/lean-window-frame_unittest.cpp    | 92 +++++++++++++++++++
+ 15 files changed, 529 insertions(+), 13 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+ create mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+index cbcc7e06c..9d1a2834f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
++++ b/android/android-ui/modules/aemu-ui-qt/CMakeLists.txt
+@@ -29,6 +29,7 @@ android_qt_lib(
+       android/skin/qt/FramelessDetector.cpp
+       android/skin/qt/GlassesStatusOverlay.cpp
+       android/skin/qt/init-qt.cpp
++      android/skin/qt/lean-rotate.cpp
+       android/skin/qt/lean-title-bar.cpp
+       android/skin/qt/lean-volume.cpp
+       android/skin/qt/left-hand-dialog.cpp
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index e2323ba50..4c6ce7336 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -36,6 +36,7 @@
+ #include "android/emulator-safe-shutdown.h"
+ #include "android/emulator-window.h"
+ #include "android/hw-sensors.h"
++#include "android/lean-window-frame.h"
+ #include "android/metrics/DependentMetrics.h"
+ #include "android/metrics/PeriodicReporter.h"
+ #include "android/metrics/studio_stats_wrapper.pb.h"
+@@ -101,6 +102,7 @@
+ #include <QElapsedTimer>
+ #include <QFileDialog>
+ #include <QFontMetrics>
++#include <QGuiApplication>
+ #include <QIcon>
+ #include <QInputDevice>
+ #include <QInputMethod>
+@@ -2833,13 +2835,26 @@ void EmulatorQtWindow::resizeContainerForGuest(const QSize& guest,
+     // it, and a window manager may give it any size. Then the window leads,
+     // and the guest screen is fitted into it: it was not around the guest
+     // screen before this, or the system holds its size.
++    // The rotate button's turn (ModAVD#225) turns the window too, unless the
++    // system holds it.
++    const bool turned = mLeanRotation.pending &&
++                        (guest.width() > guest.height()) !=
++                                mLeanRotation.wideBefore &&
++                        !mContainer.heldBySystem();
+     const bool windowLeads =
+-            mContainer.letterboxes() && !mFirstShowWindowCall &&
++            !turned && mContainer.letterboxes() && !mFirstShowWindowCall &&
+             (mContainer.heldBySystem() || !within(area, guestBefore, 1));
+     if (!windowLeads) {
+         mContainer.resize(guest + chrome);
++        placeAfterLeanRotation(guest);
+         return;
+     }
++    if (mLeanRotation.pending &&
++        (guest.width() > guest.height()) != mLeanRotation.wideBefore) {
++        // Maximized or snapped: the window stays, the turned guest screen is
++        // fitted into it below.
++        mLeanRotation.pending = false;
++    }
+     // The largest guest screen in the window touches two opposite edges.
+     const QSize bars = area - guest;
+     const bool fitted = bars.width() >= -1 && bars.height() >= -1 &&
+@@ -2866,6 +2881,66 @@ void EmulatorQtWindow::resizeContainerForGuest(const QSize& guest,
+     }
+ }
+ 
++void EmulatorQtWindow::prepareLeanRotation() {
++    mLeanRotation = LeanRotation();
++    if (!ToolWindow::inWindowNav() || mInZoomMode) {
++        return;
++    }
++    mLeanRotation.pending = true;
++    mLeanRotation.frameBefore = mContainer.frameGeometry();
++    mLeanRotation.wideBefore = width() > height();
++}
++
++void EmulatorQtWindow::placeAfterLeanRotation(const QSize& guest) {
++    if (!mLeanRotation.pending ||
++        (guest.width() > guest.height()) == mLeanRotation.wideBefore) {
++        // Not the rotate button's turn, or the guest screen has not turned
++        // yet.
++        return;
++    }
++    namespace lw = android::lean_window;
++    const auto toRect = [](const QRect& r) {
++        return lw::Rect{r.left(), r.top(), r.left() + r.width(),
++                        r.top() + r.height()};
++    };
++    const QRect before = mLeanRotation.frameBefore;
++    QScreen* screen = QGuiApplication::screenAt(before.center());
++    if (!screen) {
++        screen = mContainer.screen();
++    }
++    if (!screen) {
++        mLeanRotation.pending = false;
++        return;
++    }
++    const lw::Rect work = toRect(screen->availableGeometry());
++    // Around the guest screen: the title bar, and whatever frame the system
++    // keeps around the window.
++    const QSize margins =
++            mContainer.frameGeometry().size() - mContainer.geometry().size();
++    const QSize around = ToolWindow::windowChrome() + margins;
++    const lw::Size fitted = lw::fitInto({guest.width(), guest.height()},
++                                        {around.width(), around.height()},
++                                        work);
++    if (!mLeanRotation.shrunk &&
++        (fitted.width < guest.width() || fitted.height < guest.height())) {
++        // Too large for the screen now that it is turned: scale it down to
++        // fit, which comes back here with the smaller guest screen.
++        mLeanRotation.shrunk = true;
++        const QSize smaller(fitted.width, fitted.height);
++        QTimer::singleShot(0, this, [this, smaller] {
++            if (!mInZoomMode) {
++                doResize(smaller);
++            }
++        });
++        return;
++    }
++    mLeanRotation.pending = false;
++    const QSize frame = guest + around;
++    const lw::Rect placed = lw::placeKeepingCenter(
++            toRect(before), frame.width(), frame.height(), work);
++    mContainer.move(placed.left, placed.top);
++}
++
+ void EmulatorQtWindow::onScreenChanged(QScreen* newScreen) {
+     if (newScreen != mCurrentScreen) {
+         D("%s: kEventScreenChanged", __FUNCTION__);
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index c6ece2d49..9d466e58a 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -253,6 +253,11 @@ public:
+     bool queryEndSession(bool critical);
+     void endSession(bool ending);
+     EmulatorContainer* containerWindow();
++    // The lean title bar's rotate button is about to turn the guest screen
++    // (ModAVD#225): once it has turned, the window keeps its centre, shrinks
++    // when it no longer fits the screen and stays on it. A maximized or
++    // snapped window keeps its place and has the guest screen fitted in.
++    void prepareLeanRotation();
+     QSize guestAreaSize() const;
+     bool isInZoomMode() const;
+     bool isWindowMinimized() const { return mWindowIsMinimized; }
+@@ -565,6 +570,8 @@ private:
+     // |guest|, or leaves the window as it is and has the guest screen fitted
+     // into it.
+     void resizeContainerForGuest(const QSize& guest, const QSize& guestBefore);
++    // After prepareLeanRotation(), with the window just sized around |guest|.
++    void placeAfterLeanRotation(const QSize& guest);
+     bool hasFrame() const;
+     bool hasSkin() const;
+ 
+@@ -729,6 +736,16 @@ private:
+     // The room the guest screen was last asked to fit into again; see
+     // resizeContainerForGuest().
+     QSize mRefitGuestArea;
++    // The rotate button's turn (ModAVD#225) waiting for the turned guest
++    // screen: the window's frame before it, whether the guest screen was wider
++    // than high then, and whether it has already been shrunk to fit.
++    struct LeanRotation {
++        bool pending = false;
++        QRect frameBefore;
++        bool wideBefore = false;
++        bool shrunk = false;
++    };
++    LeanRotation mLeanRotation;
+     // Some events may arrive after closing the main window (e.g. async screen
+     // redraw requests); we want to ignore those when exiting.
+     bool mClosed = false;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+new file mode 100644
+index 000000000..8ac1013d2
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+@@ -0,0 +1,80 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#include "android/skin/qt/lean-rotate.h"
++
++#include <QPushButton>
++#include <QString>
++
++#include <string>
++#include <utility>
++
++#include "android/base/system/System.h"
++#include "android/emulation/control/adb/AdbInterface.h"
++#include "android/lean-title-bar-logic.h"
++#include "android/skin/qt/lean-title-bar.h"
++
++namespace tb = android::lean_title_bar;
++using android::emulation::AdbInterface;
++using android::emulation::OptionalAdbCommandResult;
++
++namespace {
++
++constexpr int kAdbTimeoutMs = 5000;
++
++}  // namespace
++
++LeanRotateControl::LeanRotateControl(LeanTitleBar* titleBar,
++                                     AdbGetter adb,
++                                     WindowRotator rotateWindow)
++    : QObject(titleBar),
++      mTitleBar(titleBar),
++      mAdb(std::move(adb)),
++      mRotateWindow(std::move(rotateWindow)) {
++    connect(mTitleBar->rotateButton(), &QPushButton::clicked, this,
++            &LeanRotateControl::rotate);
++
++    const std::string port =
++            android::base::System::get()->envGet("ANDROID_ADB_SERVER_PORT");
++    if (!tb::adbServerPortUsable(port.empty() ? nullptr : port.c_str())) {
++        mTitleBar->setRotateAvailable(
++                false, QString::fromUtf8("旋转屏幕：没有可用的 adb 服务，转不了"));
++    }
++}
++
++void LeanRotateControl::checkAvailable() {
++    if (!mTitleBar->rotateAvailable()) {
++        return;
++    }
++    AdbInterface* adb = mAdb ? mAdb() : nullptr;
++    if (!adb || adb->detectedAdbPath().empty()) {
++        mTitleBar->setRotateAvailable(
++                false, QString::fromUtf8("旋转屏幕：没找到 adb，转不了"));
++    }
++}
++
++void LeanRotateControl::rotate() {
++    AdbInterface* adb = mAdb ? mAdb() : nullptr;
++    if (!adb || !mRotateWindow) {
++        return;
++    }
++    const int to = mRotateWindow();
++    if (to < 0) {
++        return;
++    }
++    // The picture turns with the window: the guest draws it at the user
++    // rotation, the only one it follows.
++    adb->runAdbCommand(tb::setUserRotationArgs(tb::guestUserRotation(to)),
++                       [](const OptionalAdbCommandResult&) {}, kAdbTimeoutMs,
++                       false);
++}
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+new file mode 100644
+index 000000000..b7e3b86ec
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+@@ -0,0 +1,60 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <QObject>
++
++#include <functional>
++
++class LeanTitleBar;
++
++namespace android {
++namespace emulation {
++class AdbInterface;
++}  // namespace emulation
++}  // namespace android
++
++// The rotate button's control (ModAVD#225): a click turns the window between
++// landscape and portrait the way the full toolbar's rotate does, and sets the
++// guest's display rotation to match over adb (`settings put system
++// user_rotation`), since the manager fixes the display to the user rotation
++// and the guest does not follow the sensors. adb runs on the AdbInterface's own
++// thread and talks only to the adb server that ANDROID_ADB_SERVER_PORT names,
++// as the volume button's: without one, or without adb, the button is disabled
++// and says why.
++class LeanRotateControl : public QObject {
++    Q_OBJECT
++
++public:
++    using AdbGetter = std::function<android::emulation::AdbInterface*()>;
++    // Turns the window and gives the SkinRotation it turns to, or -1 when it
++    // does not turn.
++    using WindowRotator = std::function<int()>;
++
++    LeanRotateControl(LeanTitleBar* titleBar,
++                      AdbGetter adb,
++                      WindowRotator rotateWindow);
++
++    // Disables the button when there is no adb or no adb server of the
++    // manager's to talk to; called once the window is up, as the volume
++    // control's.
++    void checkAvailable();
++
++private:
++    void rotate();
++
++    LeanTitleBar* mTitleBar;
++    AdbGetter mAdb;
++    WindowRotator mRotateWindow;
++};
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+index b12449b05..1fbc5756a 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -87,6 +87,8 @@ LeanTitleBar::LeanTitleBar(QWidget* window, bool volumeShown)
+         mVolume = addButton("volume_up", QString::fromUtf8("音量"),
+                             kWindowIconSize);
+     }
++    mRotate = addButton("screen_rotation_right", QString::fromUtf8("旋转屏幕"),
++                        kWindowIconSize);
+     mBack = addButton("back", QString::fromUtf8("返回"), kNavIconSize);
+     mHome = addButton("home", QString::fromUtf8("桌面"), kNavIconSize);
+     mDivider = new QFrame(this);
+@@ -106,6 +108,9 @@ LeanTitleBar::LeanTitleBar(QWidget* window, bool volumeShown)
+             case Item::Volume:
+                 layout->addWidget(mVolume);
+                 break;
++            case Item::Rotate:
++                layout->addWidget(mRotate);
++                break;
+             case Item::Back:
+                 layout->addWidget(mBack);
+                 break;
+@@ -155,6 +160,7 @@ int LeanTitleBar::buttonsLeft() const {
+     // The first button shown; back or home may be hidden for some AVDs.
+     for (QWidget* widget : {static_cast<QWidget*>(mScreenshot),
+                             static_cast<QWidget*>(mVolume),
++                            static_cast<QWidget*>(mRotate),
+                             static_cast<QWidget*>(mBack),
+                             static_cast<QWidget*>(mHome),
+                             static_cast<QWidget*>(mDivider)}) {
+@@ -174,6 +180,7 @@ void LeanTitleBar::setButtonsEnabled(bool enabled) {
+     if (mVolume) {
+         mVolume->setEnabled(enabled && mVolumeAvailable);
+     }
++    mRotate->setEnabled(enabled && mRotateAvailable);
+     if (!enabled) {
+         setMaximizeButtonMouse(false, false);
+     }
+@@ -190,6 +197,15 @@ void LeanTitleBar::setVolumeAvailable(bool available, const QString& reason) {
+     mVolume->setAccessibleName(available ? QString::fromUtf8("音量") : reason);
+ }
+ 
++void LeanTitleBar::setRotateAvailable(bool available, const QString& reason) {
++    mRotateAvailable = available;
++    mRotate->setEnabled(mButtonsEnabled && available);
++    // As the volume button: only a greyed-out button says why on hover.
++    mRotate->setToolTip(available ? QString() : reason);
++    mRotate->setAccessibleName(available ? QString::fromUtf8("旋转屏幕")
++                                         : reason);
++}
++
+ void LeanTitleBar::showScreenshotNotice(const QString& text) {
+     constexpr int kNoticeMs = 4000;
+     QToolTip::showText(
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+index 40371d231..e84637f20 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -26,7 +26,8 @@ class QResizeEvent;
+ 
+ // The title bar the lean window draws itself (ModAVD#58), at the top of the
+ // emulator window: the window's icon and title on the left, then screenshot
+-// (ModAVD#231), volume while the emulator plays sound (ModAVD#226), back,
++// (ModAVD#231), volume while the emulator plays sound (ModAVD#226), rotate
++// (ModAVD#225), back,
+ // home, a divider, minimize, maximize / restore (ModAVD#185) and close on the
+ // right (lean_title_bar::items()). It shows the title and icon of the window
+ // it sits in. Moving the window by the title bar, and the system menu, are
+@@ -54,6 +55,11 @@ public:
+     // A short note under the screenshot button that goes away by itself, as
+     // when a screenshot was not saved; it does not stop anything.
+     void showScreenshotNotice(const QString& text);
++    QPushButton* rotateButton() const { return mRotate; }
++    // Whether the rotate button can be used, as setVolumeAvailable(): it
++    // turns the guest's picture over adb.
++    void setRotateAvailable(bool available, const QString& reason);
++    bool rotateAvailable() const { return mRotateAvailable; }
+     QPushButton* backButton() const { return mBack; }
+     QPushButton* homeButton() const { return mHome; }
+     QPushButton* minimizeButton() const { return mMinimize; }
+@@ -86,6 +92,8 @@ private:
+     QPushButton* mScreenshot = nullptr;
+     QPushButton* mVolume = nullptr;
+     bool mVolumeAvailable = true;
++    QPushButton* mRotate = nullptr;
++    bool mRotateAvailable = true;
+     bool mButtonsEnabled = true;
+     QPushButton* mBack = nullptr;
+     QPushButton* mHome = nullptr;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index 65e448d78..477ac25c6 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -93,6 +93,7 @@
+ #include "android/skin/qt/extended-pages/virtual-sensors-page.h"
+ #include "android/skin/qt/extended-window.h"
+ #include "android/lean-title-bar-logic.h"
++#include "android/skin/qt/lean-rotate.h"
+ #include "android/skin/qt/lean-title-bar.h"
+ #include "android/skin/qt/lean-volume.h"
+ #include "android/skin/qt/posture-selection-dialog.h"
+@@ -1004,6 +1005,16 @@ void ToolWindow::createLeanTitleBar() {
+         QTimer::singleShot(0, volume, [volume] { volume->checkAvailable(); });
+     }
+ 
++    // Landscape / portrait (ModAVD#225): the window turns as with the full
++    // toolbar's rotate, and the guest's picture with it.
++    {
++        EmulatorQtWindow* window = mEmulatorWindow;
++        auto* rotate = new LeanRotateControl(
++                mLeanTitleBar, [window] { return window->getAdbInterface(); },
++                [this] { return rotateLeanWindow(); });
++        QTimer::singleShot(0, rotate, [rotate] { rotate->checkAvailable(); });
++    }
++
+     QPushButton* back = mLeanTitleBar->backButton();
+     back->setVisible(!mToolsUi->back_button->isHidden());
+     QObject::connect(back, &QPushButton::pressed, this,
+@@ -1043,6 +1054,23 @@ void ToolWindow::createLeanTitleBar() {
+     positionLeanTitleBar();
+ }
+ 
++int ToolWindow::rotateLeanWindow() {
++    if (!sUiEmuAgent || !sUiEmuAgent->window || !sUiEmuAgent->sensors) {
++        return -1;
++    }
++    const int from = sUiEmuAgent->window->getRotation();
++    const auto to = static_cast<SkinRotation>(
++            android::lean_title_bar::rotateButtonTarget(from));
++    // The window keeps its centre and stays on the screen once it has turned.
++    mEmulatorWindow->prepareLeanRotation();
++    // The way ROTATE_LEFT / ROTATE_RIGHT turn it: the device's orientation,
++    // which the virtual sensors page passes on to the window (rotateSkin).
++    sUiEmuAgent->sensors->setCoarseOrientation(
++            skin_rotation_to_coarse_orientation(to));
++    skin_winsys_touch_qt_extended_virtual_sensors();
++    return to;
++}
++
+ void ToolWindow::positionLeanTitleBar() {
+     if (!mLeanTitleBar || !inWindowNav()) {
+         return;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index 3e6a6b2a8..ee26877cd 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -230,6 +230,10 @@ private:
+     virtual void hideEvent(QHideEvent* event) override;
+     void rebuildBackingStoreIfStale();
+     void createLeanTitleBar();
++    // The title bar's rotate button (ModAVD#225): turns the window between
++    // landscape and portrait and gives the SkinRotation it turns to, -1 when
++    // it cannot.
++    int rotateLeanWindow();
+     void positionLeanTitleBar();
+     void syncLeanTitleBarEnabled();
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+index be078d761..57c373c43 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+@@ -16,9 +16,10 @@
+ #include <string>
+ #include <vector>
+ 
+-// What the lean window's title bar shows and what its volume button asks of
+-// the guest (ModAVD#231 screenshot, ModAVD#226 volume), without any windowing
+-// system, so that it can be tested on its own.
++// What the lean window's title bar shows and what its volume and rotate
++// buttons ask of the guest (ModAVD#231 screenshot, ModAVD#226 volume,
++// ModAVD#225 rotate), without any windowing system, so that it can be tested
++// on its own.
+ namespace android {
+ namespace lean_title_bar {
+ 
+@@ -26,6 +27,7 @@ namespace lean_title_bar {
+ enum class Item {
+     Screenshot,
+     Volume,
++    Rotate,
+     Back,
+     Home,
+     Divider,
+@@ -34,7 +36,7 @@ enum class Item {
+     Close,
+ };
+ 
+-// The title bar's items in order: screenshot, then volume when it is shown,
++// The title bar's items in order: screenshot, volume when it is shown, rotate
+ // right next to back, then home, a divider and the window buttons.
+ std::vector<Item> items(bool volumeShown);
+ 
+@@ -53,5 +55,26 @@ bool adbServerPortUsable(const char* value);
+ // click does.
+ std::vector<std::string> showVolumePanelArgs();
+ 
++// The rotate button (ModAVD#225) turns the window between the AVD's natural
++// orientation (landscape for ModAVD's AVDs) and a quarter turn clockwise.
++// Rotations are SkinRotation values: 0, 1, 2, 3 for 0, 90, 180 and 270
++// degrees clockwise. From 0 the button goes to 1; from any other rotation
++// (180 or 270 come only from the console's rotate or the full toolbar) it
++// goes back to 0.
++int rotateButtonTarget(int skinRotation);
++
++// Android's display rotation (Settings.System.USER_ROTATION, Surface.ROTATION_*)
++// that draws the picture upright in a window turned by |skinRotation|: the
++// window turned clockwise is the device turned clockwise, which Android
++// answers by turning its picture the other way (ROTATION_270 for a quarter
++// turn). The display is fixed to the user rotation (the manager's `wm
++// fixed-to-user-rotation enabled`), so it follows only this, never the
++// sensors.
++int guestUserRotation(int skinRotation);
++
++// The adb arguments that set the guest's display rotation to |userRotation|,
++// as the rotate button's click does. The shell may write system settings.
++std::vector<std::string> setUserRotationArgs(int userRotation);
++
+ }  // namespace lean_title_bar
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index 0f3239ceb..3912e711b 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -146,5 +146,21 @@ Rect sizingRect(const Rect& proposed,
+ // |work| of its screen by the width of that frame on every side.
+ Rect visiblePart(const Rect& window, const Rect& work);
+ 
++struct Size {
++    int width;
++    int height;
++};
++
++// After the guest screen turned (ModAVD#225): the largest guest screen of the
++// ratio of |guest|, at most |guest| itself, that leaves the window, |chrome|
++// (the title bar) added, inside the work area |work|. At least 1 x 1.
++Size fitInto(const Size& guest, const Size& chrome, const Rect& work);
++
++// Where a window of |width| x |height| goes when it takes the place of
++// |before|: with the same centre, moved as little as it takes to stay inside
++// the work area |work|; a window larger than |work| keeps to its top-left.
++Rect placeKeepingCenter(const Rect& before, int width, int height,
++                        const Rect& work);
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+index f065aefc6..902ad3c7d 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -32,7 +32,8 @@ std::vector<Item> items(bool volumeShown) {
+     if (volumeShown) {
+         result.push_back(Item::Volume);
+     }
+-    result.insert(result.end(), {Item::Back, Item::Home, Item::Divider,
++    result.insert(result.end(), {Item::Rotate, Item::Back, Item::Home,
++                                 Item::Divider,
+                                  Item::Minimize, Item::Maximize, Item::Close});
+     return result;
+ }
+@@ -77,5 +78,19 @@ std::vector<std::string> showVolumePanelArgs() {
+             "--stream", kMusicStream, "--adj", "same"};
+ }
+ 
++int rotateButtonTarget(int skinRotation) {
++    return skinRotation == 0 ? 1 : 0;
++}
++
++int guestUserRotation(int skinRotation) {
++    const int turns = ((skinRotation % 4) + 4) % 4;
++    return (4 - turns) % 4;
++}
++
++std::vector<std::string> setUserRotationArgs(int userRotation) {
++    return {"shell", "settings", "put", "system", "user_rotation",
++            std::to_string(((userRotation % 4) + 4) % 4)};
++}
++
+ }  // namespace lean_title_bar
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index 80144ff89..e568ebe34 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -175,5 +175,43 @@ Rect visiblePart(const Rect& window, const Rect& work) {
+     return r.width() > 0 && r.height() > 0 ? r : window;
+ }
+ 
++Size fitInto(const Size& guest, const Size& chrome, const Rect& work) {
++    const long long gw = std::max(1, guest.width);
++    const long long gh = std::max(1, guest.height);
++    const long long roomW = std::max(1, work.width() - chrome.width);
++    const long long roomH = std::max(1, work.height() - chrome.height);
++    if (gw <= roomW && gh <= roomH) {
++        return {static_cast<int>(gw), static_cast<int>(gh)};
++    }
++    // The tighter of the two sides sets the scale: roomW / gw against
++    // roomH / gh, cross-multiplied.
++    long long w = 0;
++    long long h = 0;
++    if (roomW * gh <= roomH * gw) {
++        w = roomW;
++        h = gh * roomW / gw;
++    } else {
++        h = roomH;
++        w = gw * roomH / gh;
++    }
++    return {static_cast<int>(std::max(1LL, w)),
++            static_cast<int>(std::max(1LL, h))};
++}
++
++Rect placeKeepingCenter(const Rect& before, int width, int height,
++                        const Rect& work) {
++    // Half the difference, rounded down also when the window grows.
++    const auto start = [](int from, int oldLength, int newLength) {
++        const int diff = oldLength - newLength;
++        return from + (diff >= 0 ? diff / 2 : -((-diff + 1) / 2));
++    };
++    int left = start(before.left, before.width(), width);
++    int top = start(before.top, before.height(), height);
++    // Inside the work area; when it does not fit, its top-left is.
++    left = std::max(std::min(left, work.right - width), work.left);
++    top = std::max(std::min(top, work.bottom - height), work.top);
++    return {left, top, left + width, top + height};
++}
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index f8722a7ee..72e98f19d 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -20,16 +20,18 @@ using tb::Item;
+ 
+ TEST(LeanTitleBarLogic, ItemsWithVolume) {
+     const std::vector<Item> expected = {
+-            Item::Screenshot, Item::Volume,   Item::Back,     Item::Home,
+-            Item::Divider,    Item::Minimize, Item::Maximize, Item::Close};
++            Item::Screenshot, Item::Volume,   Item::Rotate,
++            Item::Back,       Item::Home,     Item::Divider,
++            Item::Minimize,   Item::Maximize, Item::Close};
+     EXPECT_EQ(tb::items(true), expected);
+ }
+ 
+ TEST(LeanTitleBarLogic, ItemsWithoutVolume) {
+-    const std::vector<Item> expected = {Item::Screenshot, Item::Back,
+-                                        Item::Home,       Item::Divider,
+-                                        Item::Minimize,   Item::Maximize,
+-                                        Item::Close};
++    // Rotate stays right next to back.
++    const std::vector<Item> expected = {Item::Screenshot, Item::Rotate,
++                                        Item::Back,       Item::Home,
++                                        Item::Divider,    Item::Minimize,
++                                        Item::Maximize,   Item::Close};
+     EXPECT_EQ(tb::items(false), expected);
+ }
+ 
+@@ -73,3 +75,44 @@ TEST(LeanTitleBarLogic, ShowVolumePanelArgs) {
+                       "media_session", "volume", "--show", "--stream", "3",
+                       "--adj", "same"}));
+ }
++
++TEST(LeanTitleBarLogic, RotateButtonTarget) {
++    // Landscape to a quarter turn clockwise and back.
++    EXPECT_EQ(tb::rotateButtonTarget(0), 1);
++    EXPECT_EQ(tb::rotateButtonTarget(1), 0);
++    // 180 / 270 (console rotate, full toolbar) go back to landscape.
++    EXPECT_EQ(tb::rotateButtonTarget(2), 0);
++    EXPECT_EQ(tb::rotateButtonTarget(3), 0);
++}
++
++TEST(LeanTitleBarLogic, GuestUserRotation) {
++    // The window turned clockwise: Android turns its picture the other way.
++    EXPECT_EQ(tb::guestUserRotation(0), 0);
++    EXPECT_EQ(tb::guestUserRotation(1), 3);
++    EXPECT_EQ(tb::guestUserRotation(2), 2);
++    EXPECT_EQ(tb::guestUserRotation(3), 1);
++    // Out of range wraps round.
++    EXPECT_EQ(tb::guestUserRotation(4), 0);
++    EXPECT_EQ(tb::guestUserRotation(5), 3);
++    EXPECT_EQ(tb::guestUserRotation(-1), 1);
++}
++
++TEST(LeanTitleBarLogic, SetUserRotationArgs) {
++    EXPECT_EQ(tb::setUserRotationArgs(3),
++              (std::vector<std::string>{"shell", "settings", "put", "system",
++                                        "user_rotation", "3"}));
++    EXPECT_EQ(tb::setUserRotationArgs(0),
++              (std::vector<std::string>{"shell", "settings", "put", "system",
++                                        "user_rotation", "0"}));
++    EXPECT_EQ(tb::setUserRotationArgs(5).back(), "1");
++    EXPECT_EQ(tb::setUserRotationArgs(-1).back(), "3");
++    // The button's two states, end to end.
++    EXPECT_EQ(tb::setUserRotationArgs(
++                      tb::guestUserRotation(tb::rotateButtonTarget(0)))
++                      .back(),
++              "3");
++    EXPECT_EQ(tb::setUserRotationArgs(
++                      tb::guestUserRotation(tb::rotateButtonTarget(1)))
++                      .back(),
++              "0");
++}
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index d75609e3e..f522f8af7 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -471,3 +471,95 @@ TEST(LeanWindowFrame, MaxButtonTrackerDoubleClick) {
+     t.press(Hit::MaxButton);
+     EXPECT_TRUE(t.release(Hit::MaxButton));
+ }
++
++TEST(LeanWindowFrame, FitIntoLeavesAFittingGuestAlone) {
++    // 1280x720 turned at scale 0.5: 360x640 under a 32 px title bar fits a
++    // 1920x1040 work area.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Size s = lw::fitInto({360, 640}, {0, 32}, work);
++    EXPECT_EQ(s.width, 360);
++    EXPECT_EQ(s.height, 640);
++    // Exactly the room is still a fit.
++    const lw::Size e = lw::fitInto({360, 1008}, {0, 32}, work);
++    EXPECT_EQ(e.width, 360);
++    EXPECT_EQ(e.height, 1008);
++}
++
++TEST(LeanWindowFrame, FitIntoShrinksATallGuest) {
++    // 1280x720 at scale 1 turned: 720x1280 with the title bar is taller than
++    // the screen; the height sets the scale, the ratio stays.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Size s = lw::fitInto({720, 1280}, {0, 32}, work);
++    EXPECT_EQ(s.height, 1008);
++    EXPECT_EQ(s.width, 567);  // 720 * 1008 / 1280, rounded down
++    EXPECT_LE(s.height + 32, work.height());
++}
++
++TEST(LeanWindowFrame, FitIntoShrinksAWideGuest) {
++    // Back to landscape on a portrait screen: the width sets the scale.
++    const lw::Rect work = {100, 0, 1180, 1880};
++    const lw::Size s = lw::fitInto({1920, 1080}, {16, 32}, work);
++    EXPECT_EQ(s.width, 1064);
++    EXPECT_EQ(s.height, 598);  // 1080 * 1064 / 1920, rounded down
++}
++
++TEST(LeanWindowFrame, FitIntoNeverBelowOnePixel) {
++    const lw::Size s = lw::fitInto({1000, 10}, {0, 32}, {0, 0, 5, 40});
++    EXPECT_EQ(s.width, 5);
++    EXPECT_EQ(s.height, 1);
++    const lw::Size z = lw::fitInto({0, 0}, {0, 0}, {0, 0, 0, 0});
++    EXPECT_EQ(z.width, 1);
++    EXPECT_EQ(z.height, 1);
++}
++
++TEST(LeanWindowFrame, PlaceKeepingCenter) {
++    const lw::Rect work = {0, 0, 1920, 1040};
++    // A 640x392 landscape window centred at (960, 500) turned to 360x672.
++    const lw::Rect before = {640, 304, 1280, 696};
++    const lw::Rect r = lw::placeKeepingCenter(before, 360, 672, work);
++    EXPECT_EQ(r.left, 780);
++    EXPECT_EQ(r.top, 164);
++    EXPECT_EQ(r.right, 1140);
++    EXPECT_EQ(r.bottom, 836);
++    EXPECT_EQ((r.left + r.right) / 2, (before.left + before.right) / 2);
++    EXPECT_EQ((r.top + r.bottom) / 2, (before.top + before.bottom) / 2);
++}
++
++TEST(LeanWindowFrame, PlaceKeepingCenterStaysOnTheScreen) {
++    const lw::Rect work = {0, 0, 1920, 1040};
++    // Near the bottom-right corner: pulled back in.
++    const lw::Rect r = lw::placeKeepingCenter({1500, 800, 1900, 1020}, 300,
++                                              600, work);
++    // Across, the centre (1700) is kept: it fits.
++    EXPECT_EQ(r.left, 1550);
++    EXPECT_EQ(r.right, 1850);
++    // Down it would end at 1210: moved up to the bottom of the work area.
++    EXPECT_EQ(r.bottom, 1040);
++    EXPECT_EQ(r.top, 440);
++    // Near the top-left corner of a second screen to the left.
++    const lw::Rect left = {-1920, 0, 0, 1040};
++    const lw::Rect l = lw::placeKeepingCenter({-1900, 10, -1500, 230}, 300,
++                                              600, left);
++    EXPECT_EQ(l.left, -1900 + 50);
++    EXPECT_EQ(l.top, 0);
++    // Larger than the work area: its top-left is on the screen.
++    const lw::Rect big = lw::placeKeepingCenter({100, 100, 500, 400}, 2000,
++                                                1200, work);
++    EXPECT_EQ(big.left, 0);
++    EXPECT_EQ(big.top, 0);
++    EXPECT_EQ(big.right, 2000);
++    EXPECT_EQ(big.bottom, 1200);
++}
++
++TEST(LeanWindowFrame, PlaceKeepingCenterOddDifference) {
++    // An odd difference rounds the same way growing and shrinking.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Rect grow = lw::placeKeepingCenter({100, 100, 200, 200}, 101,
++                                                 101, work);
++    EXPECT_EQ(grow.left, 99);
++    EXPECT_EQ(grow.top, 99);
++    const lw::Rect shrink = lw::placeKeepingCenter({100, 100, 201, 201}, 100,
++                                                   100, work);
++    EXPECT_EQ(shrink.left, 100);
++    EXPECT_EQ(shrink.top, 100);
++}

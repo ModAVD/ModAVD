@@ -1,0 +1,448 @@
+From 7432bb3cc5105f6705b2ea753155383b15cde2de Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 21 Nov 2026 19:27:45 +0100
+Subject: [PATCH 114/116] MAS local: turn the window only once the guest has
+ taken the rotation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A click on the rotate button while Android was still booting turned the
+window, but `settings put system user_rotation` failed with no guest to
+take it and was not tried again: from then on the window and the picture
+were a quarter turn apart.
+
+- The button is disabled, saying 旋转屏幕：等安卓开机完成 on hover, until the
+  boot's setting of the display rotation has gone through and Android has
+  booted (the boot script now also waits for sys.boot_completed=1). A boot
+  sync that fails (adb lost, a boot past its limit) is tried again after
+  5 s.
+- A click sets the guest's display rotation first and turns the window
+  only once the guest has taken it; a guest that does not leaves both as
+  they were (and says so in the log). One click at a time.
+
+Test: aemu-ui-lean-window_unittests (57), aemu-ui-safe-shutdown_unittests
+(17).
+
+Refs ModAVD/ModAVD#225
+
+Change-Id: Ic14ad0c8ec74ae7b1f37ef70dc0b3f224c8bf9c3
+---
+ .../src/android/skin/qt/lean-rotate.cpp       | 120 ++++++++++++++----
+ .../src/android/skin/qt/lean-rotate.h         |  43 ++++---
+ .../src/android/skin/qt/tool-window.cpp       |  32 +++--
+ .../src/android/skin/qt/tool-window.h         |   7 +-
+ .../include/android/lean-title-bar-logic.h    |   3 +-
+ .../src/android/lean-title-bar-logic.cpp      |  13 +-
+ .../android/lean-title-bar-logic_unittest.cpp |  10 +-
+ 7 files changed, 158 insertions(+), 70 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+index 4848f2011..6eb346b28 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+@@ -13,8 +13,12 @@
+ // limitations under the License.
+ #include "android/skin/qt/lean-rotate.h"
+ 
++#include <QCoreApplication>
++#include <QMetaObject>
++#include <QPointer>
+ #include <QPushButton>
+ #include <QString>
++#include <QTimer>
+ 
+ #include <string>
+ #include <utility>
+@@ -23,6 +27,7 @@
+ #include "android/emulation/control/adb/AdbInterface.h"
+ #include "android/lean-title-bar-logic.h"
+ #include "android/skin/qt/lean-title-bar.h"
++#include "android/utils/debug.h"
+ 
+ namespace tb = android::lean_title_bar;
+ using android::emulation::AdbInterface;
+@@ -31,19 +36,37 @@ using android::emulation::OptionalAdbCommandResult;
+ namespace {
+ 
+ constexpr int kAdbTimeoutMs = 5000;
+-// adbd comes up some seconds into the boot, the settings service later; the
+-// script itself gives up a minute after adbd.
++// adbd comes up some seconds into the boot, the settings service later, and
++// then the rest of the boot.
+ constexpr int kBootSyncTimeoutMs = 180000;
++// After a boot sync that failed (adb lost, a boot slower than its limit).
++constexpr int kBootSyncRetryMs = 5000;
++
++// Runs |task| with |control| on the UI thread, if it is still there by then.
++// adb's callbacks come on the AdbInterface's thread.
++void postToUi(QPointer<LeanRotateControl> control,
++              std::function<void(LeanRotateControl&)> task) {
++    QMetaObject::invokeMethod(
++            QCoreApplication::instance(),
++            [control, task = std::move(task)] {
++                if (control) {
++                    task(*control);
++                }
++            },
++            Qt::QueuedConnection);
++}
+ 
+ }  // namespace
+ 
+ LeanRotateControl::LeanRotateControl(LeanTitleBar* titleBar,
+                                      AdbGetter adb,
++                                     TargetGetter target,
+                                      WindowRotator rotateWindow,
+                                      InitialRotation initialRotation)
+     : QObject(titleBar),
+       mTitleBar(titleBar),
+       mAdb(std::move(adb)),
++      mTarget(std::move(target)),
+       mRotateWindow(std::move(rotateWindow)),
+       mInitialRotation(std::move(initialRotation)) {
+     connect(mTitleBar->rotateButton(), &QPushButton::clicked, this,
+@@ -52,50 +75,101 @@ LeanRotateControl::LeanRotateControl(LeanTitleBar* titleBar,
+     const std::string port =
+             android::base::System::get()->envGet("ANDROID_ADB_SERVER_PORT");
+     if (!tb::adbServerPortUsable(port.empty() ? nullptr : port.c_str())) {
++        mAdbUsable = false;
+         mTitleBar->setRotateAvailable(
+                 false, QString::fromUtf8("旋转屏幕：没有可用的 adb 服务，转不了"));
++        return;
+     }
++    mTitleBar->setRotateAvailable(
++            false, QString::fromUtf8("旋转屏幕：等安卓开机完成"));
+ }
+ 
+ void LeanRotateControl::checkAvailable() {
+-    if (!mTitleBar->rotateAvailable()) {
++    if (!mAdbUsable) {
+         return;
+     }
+     AdbInterface* adb = mAdb ? mAdb() : nullptr;
+     if (!adb || adb->detectedAdbPath().empty()) {
++        mAdbUsable = false;
+         mTitleBar->setRotateAvailable(
+                 false, QString::fromUtf8("旋转屏幕：没找到 adb，转不了"));
+         return;
+     }
+-    // Android starts at the display rotation the button may have left in its
+-    // settings last time; the window starts at hw.initialOrientation. Make
+-    // Android's match the window's as early as it can be set.
+-    if (mInitialRotation) {
+-        mBootSync = adb->runAdbCommand(
+-                tb::bootUserRotationArgs(
+-                        tb::guestUserRotation(mInitialRotation())),
+-                [](const OptionalAdbCommandResult&) {}, kBootSyncTimeoutMs,
+-                false);
++    startBootSync();
++}
++
++// Android starts at the display rotation the button may have left in its
++// settings last time; the window starts at hw.initialOrientation. Make
++// Android's match the window's as early as it can be set, then wait for the
++// boot to finish.
++void LeanRotateControl::startBootSync() {
++    AdbInterface* adb = mAdb ? mAdb() : nullptr;
++    if (!adb || !mInitialRotation) {
++        return;
++    }
++    QPointer<LeanRotateControl> self(this);
++    auto command = adb->runAdbCommand(
++            tb::bootUserRotationArgs(tb::guestUserRotation(mInitialRotation())),
++            [self](const OptionalAdbCommandResult& result) {
++                const bool success = result && result->exit_code == 0;
++                postToUi(self, [success](LeanRotateControl& control) {
++                    control.bootSyncDone(success);
++                });
++            },
++            kBootSyncTimeoutMs, false);
++    if (!command) {
++        bootSyncDone(false);
++    }
++}
++
++void LeanRotateControl::bootSyncDone(bool success) {
++    if (success) {
++        mReady = true;
++        mTitleBar->setRotateAvailable(true, QString());
++        return;
+     }
++    dwarning("Rotate button: the guest's display rotation is not set yet; "
++             "trying again");
++    QTimer::singleShot(kBootSyncRetryMs, this,
++                       &LeanRotateControl::startBootSync);
+ }
+ 
+ void LeanRotateControl::rotate() {
++    if (!mReady || mRotating || !mTarget || !mRotateWindow) {
++        return;
++    }
+     AdbInterface* adb = mAdb ? mAdb() : nullptr;
+-    if (!adb || !mRotateWindow) {
++    if (!adb) {
+         return;
+     }
+-    const int to = mRotateWindow();
++    const int to = mTarget();
+     if (to < 0) {
+         return;
+     }
+-    // A click during the boot wins over the boot's setting.
+-    if (mBootSync && mBootSync->inFlight()) {
+-        mBootSync->cancel();
++    // The guest first: the window turns once the guest has taken the new
++    // display rotation, so a guest that does not leaves both as they were.
++    mRotating = true;
++    QPointer<LeanRotateControl> self(this);
++    auto command = adb->runAdbCommand(
++            tb::setUserRotationArgs(tb::guestUserRotation(to)),
++            [self, to](const OptionalAdbCommandResult& result) {
++                const bool success = result && result->exit_code == 0;
++                postToUi(self, [to, success](LeanRotateControl& control) {
++                    control.guestRotated(to, success);
++                });
++            },
++            kAdbTimeoutMs, false);
++    if (!command) {
++        guestRotated(to, false);
++    }
++}
++
++void LeanRotateControl::guestRotated(int to, bool success) {
++    mRotating = false;
++    if (!success) {
++        dwarning("Rotate button: the guest did not take the display rotation; "
++                 "the window stays as it is");
++        return;
+     }
+-    mBootSync.reset();
+-    // The picture turns with the window: the guest draws it at the user
+-    // rotation, the only one it follows.
+-    adb->runAdbCommand(tb::setUserRotationArgs(tb::guestUserRotation(to)),
+-                       [](const OptionalAdbCommandResult&) {}, kAdbTimeoutMs,
+-                       false);
++    mRotateWindow(to);
+ }
+\ No newline at end of file
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+index 152f6ea6a..1ba68282e 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+@@ -28,8 +28,8 @@ class AdbInterface;
+ }  // namespace android
+ 
+ // The rotate button's control (ModAVD#225): a click turns the window between
+-// landscape and portrait the way the full toolbar's rotate does, and sets the
+-// guest's display rotation to match over adb (`settings put system
++// landscape and portrait the way the full toolbar's rotate does, and the
++// guest's display rotation with it over adb (`settings put system
+ // user_rotation`), since the manager fixes the display to the user rotation
+ // and the guest does not follow the sensors. adb runs on the AdbInterface's own
+ // thread and talks only to the adb server that ANDROID_ADB_SERVER_PORT names,
+@@ -37,38 +37,51 @@ class AdbInterface;
+ // and says why.
+ //
+ // The button turns between the orientation the window started at
+-// (hw.initialOrientation) and the other one. As the guest boots it also sets
+-// the display rotation to the start's, which a turn left in Android's settings
+-// may have changed (see bootUserRotationArgs()).
++// (hw.initialOrientation) and the other one. As the guest boots the control
++// sets the display rotation to the start's, which a turn left in Android's
++// settings may have changed (see bootUserRotationArgs()); until that is done
++// and Android has booted, the button is disabled and says so. A click turns
++// the guest first and the window only once the guest has taken it, so the
++// two never part.
+ class LeanRotateControl : public QObject {
+     Q_OBJECT
+ 
+ public:
+     using AdbGetter = std::function<android::emulation::AdbInterface*()>;
+-    // Turns the window and gives the SkinRotation it turns to, or -1 when it
+-    // does not turn.
+-    using WindowRotator = std::function<int()>;
++    // The SkinRotation a click turns the window to, or -1 when it cannot.
++    using TargetGetter = std::function<int()>;
++    // Turns the window to the SkinRotation given.
++    using WindowRotator = std::function<void(int)>;
+     // The SkinRotation the window started at.
+     using InitialRotation = std::function<int()>;
+ 
+     LeanRotateControl(LeanTitleBar* titleBar,
+                       AdbGetter adb,
++                      TargetGetter target,
+                       WindowRotator rotateWindow,
+                       InitialRotation initialRotation);
+ 
+-    // Disables the button when there is no adb or no adb server of the
+-    // manager's to talk to; called once the window is up, as the volume
+-    // control's. When the button can be used, it starts setting the guest's
+-    // display rotation to the start's.
++    // Disables the button for good when there is no adb or no adb server of
++    // the manager's to talk to; called once the window is up, as the volume
++    // control's. Otherwise starts setting the guest's display rotation to the
++    // start's, which enables the button once Android has booted.
+     void checkAvailable();
+ 
+ private:
++    void startBootSync();
++    void bootSyncDone(bool success);
+     void rotate();
++    void guestRotated(int to, bool success);
+ 
+     LeanTitleBar* mTitleBar;
+     AdbGetter mAdb;
++    TargetGetter mTarget;
+     WindowRotator mRotateWindow;
+     InitialRotation mInitialRotation;
+-    // The boot's setting of the display rotation, while it may run.
+-    std::shared_ptr<android::emulation::AdbCommand> mBootSync;
+-};
++    // There is an adb server of the manager's to talk to.
++    bool mAdbUsable = true;
++    // The guest is at the start's display rotation and has booted.
++    bool mReady = false;
++    // A click's guest command has not come back yet.
++    bool mRotating = false;
++};
+\ No newline at end of file
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+index b17ee4c29..058f2093f 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.cpp
+@@ -1012,7 +1012,12 @@ void ToolWindow::createLeanTitleBar() {
+         EmulatorQtWindow* window = mEmulatorWindow;
+         auto* rotate = new LeanRotateControl(
+                 mLeanTitleBar, [window] { return window->getAdbInterface(); },
+-                [this] { return rotateLeanWindow(); },
++                [window] {
++                    return android::lean_title_bar::rotateButtonTarget(
++                            window->skinRotation(),
++                            window->initialSkinRotation());
++                },
++                [this](int to) { rotateLeanWindow(to); },
+                 [window] {
+                     return static_cast<int>(window->initialSkinRotation());
+                 });
+@@ -1058,30 +1063,23 @@ void ToolWindow::createLeanTitleBar() {
+     positionLeanTitleBar();
+ }
+ 
+-int ToolWindow::rotateLeanWindow() {
+-    if (!sUiEmuAgent || !sUiEmuAgent->window || !sUiEmuAgent->sensors) {
+-        return -1;
+-    }
+-    // What the window shows, not the sensors: at a portrait start they may
+-    // still say otherwise.
+-    const int from = mEmulatorWindow->skinRotation();
+-    const auto to = static_cast<SkinRotation>(
+-            android::lean_title_bar::rotateButtonTarget(
+-                    from, mEmulatorWindow->initialSkinRotation()));
+-    if (to == from) {
+-        return -1;
++void ToolWindow::rotateLeanWindow(int rotation) {
++    // The guest has taken the display rotation that goes with |rotation|:
++    // the safe shutdown puts it back to the start's.
++    mEmulatorWindow->noteLeanGuestUserRotation(
++            android::lean_title_bar::guestUserRotation(rotation));
++    if (!sUiEmuAgent || !sUiEmuAgent->sensors ||
++        rotation == mEmulatorWindow->skinRotation()) {
++        return;
+     }
++    const auto to = static_cast<SkinRotation>(rotation);
+     // The window keeps its centre and stays on the screen once it has turned.
+     mEmulatorWindow->prepareLeanRotation();
+-    // The safe shutdown puts Android's display rotation back to the start's.
+-    mEmulatorWindow->noteLeanGuestUserRotation(
+-            android::lean_title_bar::guestUserRotation(to));
+     // The way ROTATE_LEFT / ROTATE_RIGHT turn it: the device's orientation,
+     // which the virtual sensors page passes on to the window (rotateSkin).
+     sUiEmuAgent->sensors->setCoarseOrientation(
+             skin_rotation_to_coarse_orientation(to));
+     skin_winsys_touch_qt_extended_virtual_sensors();
+-    return to;
+ }
+ 
+ void ToolWindow::positionLeanTitleBar() {
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+index ee26877cd..1e099060b 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/tool-window.h
+@@ -230,10 +230,9 @@ private:
+     virtual void hideEvent(QHideEvent* event) override;
+     void rebuildBackingStoreIfStale();
+     void createLeanTitleBar();
+-    // The title bar's rotate button (ModAVD#225): turns the window between
+-    // landscape and portrait and gives the SkinRotation it turns to, -1 when
+-    // it cannot.
+-    int rotateLeanWindow();
++    // The title bar's rotate button (ModAVD#225), once the guest has taken
++    // the display rotation: turns the window to the SkinRotation |rotation|.
++    void rotateLeanWindow(int rotation);
+     void positionLeanTitleBar();
+     void syncLeanTitleBarEnabled();
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+index 17b6c7add..d97084c4c 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+@@ -93,7 +93,8 @@ std::vector<std::string> resetUserRotationWords(int lastSet, int initial);
+ // whatever the button set. So as the guest boots, the window sets
+ // USER_ROTATION to |userRotation| (what goes with hw.initialOrientation) as
+ // soon as Android's settings service answers, before the lock screen shows: it
+-// waits for adbd, then tries every quarter second for up to a minute. It turns
++// waits for adbd, then tries every quarter second for up to a minute, then
++// waits for the boot to finish (the rotate button is usable from then). It turns
+ // nothing: the window is at that orientation already, and so is Android
+ // unless the button left it otherwise. The adb arguments.
+ std::vector<std::string> bootUserRotationArgs(int userRotation);
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+index cb9131b98..78e70121e 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -106,15 +106,16 @@ std::vector<std::string> resetUserRotationWords(int lastSet, int initial) {
+ }
+ 
+ // One argument, the whole guest script: adb shell hands it to the guest's sh
+-// as it is. `settings` fails until the settings service is up.
++// as it is. `settings` fails until the settings service is up; the boot is
++// over at sys.boot_completed=1 (an empty getprop makes the test fail too).
+ std::vector<std::string> bootUserRotationArgs(int userRotation) {
+     const std::string value = std::to_string(((userRotation % 4) + 4) % 4);
+     return {"wait-for-device", "shell",
+-            "i=0; while [ $i -lt 240 ]; do settings put system user_rotation " +
+-                    value +
+-                    " >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 0.25; "
+-                    "done; exit 1"};
++            "i=0; until settings put system user_rotation " + value +
++                    " >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 240 ] || "
++                    "exit 1; sleep 0.25; done; until [ "
++                    "x$(getprop sys.boot_completed) = x1 ]; do sleep 0.5; "
++                    "done"};
+ }
+-
+ }  // namespace lean_title_bar
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index 73df8b13c..a3ffce139 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -142,11 +142,13 @@ TEST(LeanTitleBarLogic, BootUserRotationArgs) {
+     ASSERT_EQ(args.size(), 3u);
+     EXPECT_EQ(args[0], "wait-for-device");
+     EXPECT_EQ(args[1], "shell");
+-    // One script: tries until the settings service answers, a minute at most.
++    // One script: tries until the settings service answers, a minute at most,
++    // then waits for the boot to finish.
+     EXPECT_EQ(args[2],
+-              "i=0; while [ $i -lt 240 ]; do settings put system user_rotation "
+-              "0 >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 0.25; done; "
+-              "exit 1");
++              "i=0; until settings put system user_rotation 0 >/dev/null 2>&1; "
++              "do i=$((i+1)); [ $i -lt 240 ] || exit 1; sleep 0.25; done; "
++              "until [ x$(getprop sys.boot_completed) = x1 ]; do sleep 0.5; "
++              "done");
+     EXPECT_NE(tb::bootUserRotationArgs(3)[2].find("user_rotation 3 "),
+               std::string::npos);
+     EXPECT_NE(tb::bootUserRotationArgs(-1)[2].find("user_rotation 3 "),
