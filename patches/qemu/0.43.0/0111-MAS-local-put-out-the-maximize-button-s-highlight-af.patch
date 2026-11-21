@@ -1,0 +1,177 @@
+From 6a9854c9f3f62ebe3d7ba6a6dab6d9feae63cc78 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 21 Nov 2026 17:25:28 +0100
+Subject: [PATCH 111/116] MAS local: put out the maximize button's highlight
+ after a click
+
+The lean window's maximize / restore button is HTMAXBUTTON to Windows, so
+the window works out its highlight from the non-client mouse messages and
+asks for WM_NCMOUSELEAVE (TrackMouseEvent, TME_LEAVE | TME_NONCLIENT) to
+put it out. It asked only on WM_NCMOUSEMOVE. A WM_NCLBUTTONDOWN,
+WM_NCLBUTTONDBLCLK or WM_NCLBUTTONUP over the button with no move before
+it lights the button too, and then no leave message came: the highlight
+stayed after the mouse had gone onto the guest screen or another window.
+
+The window now asks for the leave message after any of these messages
+that leaves the button lit (needsLeaveNotice() in lean-window-frame). The
+snap layouts of Windows 11 over the button are unchanged: WM_NCHITTEST
+still answers HTMAXBUTTON there.
+
+Refs ModAVD/ModAVD#214
+
+Change-Id: Ie5bddd28a3b40c111d24ffdac92ffd5f0febdcfb
+---
+ .../android/skin/qt/windows-lean-frame.cpp    | 25 +++++++++++-----
+ .../src/android/skin/qt/windows-lean-frame.h  |  2 ++
+ .../include/android/lean-window-frame.h       |  7 +++++
+ .../src/android/lean-window-frame.cpp         |  4 +++
+ .../android/lean-window-frame_unittest.cpp    | 29 +++++++++++++++++++
+ 5 files changed, 60 insertions(+), 7 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+index b66750385..0fb10d125 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.cpp
+@@ -218,6 +218,21 @@ void WindowsLeanFrame::reportMaxButton(const lw::MaxButtonTracker& before,
+     }
+ }
+ 
++void WindowsLeanFrame::watchForLeave(WId wid) {
++    if (!lw::needsLeaveNotice(mMaxButtonTracker)) {
++        return;
++    }
++    // WM_NCMOUSELEAVE once the mouse leaves the non-client part, onto the
++    // other buttons, the guest screen or another window. Asked for whenever
++    // the button lights up, not only on WM_NCMOUSEMOVE: a press or a release
++    // over it can come first (ModAVD#214), and the highlight would stay.
++    TRACKMOUSEEVENT track = {};
++    track.cbSize = sizeof(track);
++    track.dwFlags = TME_LEAVE | TME_NONCLIENT;
++    track.hwndTrack = reinterpret_cast<HWND>(wid);
++    TrackMouseEvent(&track);
++}
++
+ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+     MSG* msg = static_cast<MSG*>(message);
+     HWND hwnd = msg->hwnd;
+@@ -282,17 +297,11 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             const lw::MaxButtonTracker before = mMaxButtonTracker;
+             const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
+             mMaxButtonTracker.move(hit);
++            watchForLeave(reinterpret_cast<WId>(hwnd));
+             reportMaxButton(before, false);
+             if (hit != lw::Hit::MaxButton) {
+                 return false;
+             }
+-            // WM_NCMOUSELEAVE once the mouse leaves the non-client part,
+-            // onto the other buttons, the guest screen or another window.
+-            TRACKMOUSEEVENT track = {};
+-            track.cbSize = sizeof(track);
+-            track.dwFlags = TME_LEAVE | TME_NONCLIENT;
+-            track.hwndTrack = hwnd;
+-            TrackMouseEvent(&track);
+             *result = 0;
+             return true;
+         }
+@@ -314,6 +323,7 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             const lw::MaxButtonTracker before = mMaxButtonTracker;
+             const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
+             mMaxButtonTracker.press(hit);
++            watchForLeave(reinterpret_cast<WId>(hwnd));
+             reportMaxButton(before, false);
+             if (hit != lw::Hit::MaxButton) {
+                 return false;
+@@ -326,6 +336,7 @@ bool WindowsLeanFrame::handleMessage(void* message, qintptr* result) {
+             const lw::MaxButtonTracker before = mMaxButtonTracker;
+             const lw::Hit hit = static_cast<lw::Hit>(msg->wParam);
+             const bool clicked = mMaxButtonTracker.release(hit);
++            watchForLeave(reinterpret_cast<WId>(hwnd));
+             reportMaxButton(before, clicked);
+             if (hit != lw::Hit::MaxButton) {
+                 return false;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+index c4b75bef1..703ac657b 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/windows-lean-frame.h
+@@ -111,6 +111,8 @@ private:
+     // Passes the maximize button's state on, if |clicked| or if it changed.
+     void reportMaxButton(const android::lean_window::MaxButtonTracker& before,
+                          bool clicked);
++    // Asks Windows for WM_NCMOUSELEAVE while the button is lit.
++    void watchForLeave(WId wid);
+ 
+     std::function<Geometry()> mGeometry;
+     std::function<void()> mSizeMoveDone;
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index 6479aebca..0f3239ceb 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -114,6 +114,13 @@ struct MaxButtonTracker {
+     void leave();
+ };
+ 
++// Whether the window has to ask for WM_NCMOUSELEAVE (TrackMouseEvent with
++// TME_LEAVE | TME_NONCLIENT) after a message: whenever the button is lit,
++// whichever message lit it. A press or a release over the button can come
++// without a WM_NCMOUSEMOVE before it, and without the request no leave
++// message comes to put the highlight out (ModAVD#214).
++bool needsLeaveNotice(const MaxButtonTracker& tracker);
++
+ // Whether |hit| resizes the window.
+ bool isResize(Hit hit);
+ 
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index c16a0aaa3..80144ff89 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -103,6 +103,10 @@ void MaxButtonTracker::leave() {
+     down = false;
+ }
+ 
++bool needsLeaveNotice(const MaxButtonTracker& tracker) {
++    return tracker.hot || tracker.down;
++}
++
+ bool isResize(Hit hit) {
+     return static_cast<int>(hit) >= static_cast<int>(Hit::Left) &&
+            static_cast<int>(hit) <= static_cast<int>(Hit::BottomRight);
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index e585f6810..d75609e3e 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -432,6 +432,35 @@ TEST(LeanWindowFrame, MaxButtonTrackerPressLeavesTheButton) {
+     EXPECT_FALSE(t.down);
+ }
+ 
++TEST(LeanWindowFrame, MaxButtonTrackerLitWithoutMoveWantsLeave) {
++    // ModAVD#214: a press or a release over the button with no
++    // WM_NCMOUSEMOVE before it lights the button too, and the window has to
++    // ask for WM_NCMOUSELEAVE then as well, or the highlight stays.
++    lw::MaxButtonTracker t;
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++    EXPECT_FALSE(t.release(Hit::MaxButton));
++    EXPECT_TRUE(t.hot);
++    EXPECT_TRUE(lw::needsLeaveNotice(t));
++    t.leave();
++    EXPECT_FALSE(t.hot);
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++
++    t.press(Hit::MaxButton);
++    EXPECT_TRUE(lw::needsLeaveNotice(t));
++    t.leave();
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++
++    t.move(Hit::MaxButton);
++    EXPECT_TRUE(lw::needsLeaveNotice(t));
++    // Off the button onto the title bar: nothing lit, nothing to watch.
++    t.move(Hit::Caption);
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++    t.press(Hit::Caption);
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++    EXPECT_FALSE(t.release(Hit::Caption));
++    EXPECT_FALSE(lw::needsLeaveNotice(t));
++}
++
+ TEST(LeanWindowFrame, MaxButtonTrackerDoubleClick) {
+     // The second press of a double click comes as WM_NCLBUTTONDBLCLK, also a
+     // press: two clicks, maximized and restored again, as with the system's

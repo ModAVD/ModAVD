@@ -1,6 +1,15 @@
 [
   {
     "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
+    "dir": "qemu/0.43.0",
+    "head": "30139c404f59c9f312292466c2fc5fcc65efeae0",
+    "repo": "external/qemu",
+    "upstream": "platform/external/qemu",
+    "count": 116,
+    "tree": "917cba0186493777fea44b682095acb17a815e69"
+  },
+  {
+    "base": "f0c183f1cc7456ecd6f3607f2f47893768ae4334",
     "dir": "qemu/0.42.0",
     "head": "0bb19e599a66c71d0ffbbbdadad52c1c12c9c5b1",
     "repo": "external/qemu",

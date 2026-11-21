@@ -1,0 +1,152 @@
+From 7a21e66938765a751a02bd62406d3e70d88b2a57 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 21 Nov 2026 19:56:43 +0100
+Subject: [PATCH 115/116] MAS local: keep hw.initialOrientation for an AVD's
+ own magic skin
+
+A portrait instance (ModAVDManager keeps the 1280x720 / 1920x1080 screen
+and sets hw.initialOrientation=portrait) started with a landscape window:
+the AVD has no skin.name, so avdInfo makes it a magic skin from its own
+hw.lcd.width / height, "1280x720", and parse_skin_files() then set
+hw.initialOrientation to that skin's shape (b/307180733), landscape. The
+window started at 0, the boot setting of the rotate button wrote
+user_rotation 0, the manager then set 3, and the picture lay on its side
+in a landscape window.
+
+A magic skin of the AVD's own screen now leaves an orientation config.ini
+gives alone (magic_skin_overrides_orientation()); a -skin of another shape
+still overrides it, as upstream. With portrait kept the skin picks its
+auto-generated "portrait" layout (90 on a landscape screen), the window
+starts portrait, the device's coarse orientation is set to it, the rotate
+button's boot setting writes user_rotation 3 and the button turns between
+portrait and landscape. Landscape instances are unchanged.
+
+Test: aemu-ui-lean-window_unittests (58), aemu-ui-safe-shutdown_unittests
+(17).
+
+Refs ModAVD/ModAVD#225
+
+Change-Id: I5067f46dc8fa8cb3df3ad9e2dfbd269189f13e6e
+---
+ .../include/android/magic-skin-orientation.h  | 36 +++++++++++++++++++
+ .../src/android/skin/user-config.c            | 28 ++++++++++-----
+ .../android/lean-title-bar-logic_unittest.cpp | 13 +++++++
+ 3 files changed, 68 insertions(+), 9 deletions(-)
+ create mode 100644 android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
+
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h b/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
+new file mode 100644
+index 000000000..cf00391f1
+--- /dev/null
++++ b/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
+@@ -0,0 +1,36 @@
++// Copyright 2026 qiyinxi
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++#pragma once
++
++#include <stdbool.h>
++
++// A "magic" skin, "<width>x<height>", has no layout file. Upstream
++// (b/307180733) sets hw.initialOrientation to the magic skin's own shape, so
++// that `-skin 1080x1920` on a landscape AVD starts upright. An AVD without
++// skin.name gets a magic skin made from its own hw.lcd.width / height
++// (avdInfo), and then that override threw away the orientation config.ini
++// asks for: ModAVD keeps a 1280x720 or 1920x1080 screen and sets
++// hw.initialOrientation=portrait for a portrait instance (ModAVD#225), which
++// started landscape anyway.
++//
++// Whether the magic skin overrides hw.initialOrientation: not when it is the
++// AVD's own screen and config.ini gives an orientation.
++static inline bool magic_skin_overrides_orientation(int skinWidth,
++                                                    int skinHeight,
++                                                    int lcdWidth,
++                                                    int lcdHeight,
++                                                    bool orientationGiven) {
++    const bool ownScreen = skinWidth == lcdWidth && skinHeight == lcdHeight;
++    return !(ownScreen && orientationGiven);
++}
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c b/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
+index adbfe82ae..0607d42fa 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
++++ b/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
+@@ -23,6 +23,7 @@
+ #include "android/cmdline-definitions.h"
+ #include "android/console.h"
+ #include "android/emulation/control/globals_agent.h"
++#include "android/magic-skin-orientation.h"
+ #include "android/skin/charmap.h"
+ #include "android/skin/rect.h"
+ #include "android/skin/resource.h"
+@@ -348,15 +349,24 @@ void parse_skin_files(const char* skinDirPath,
+ 
+             // change initialOrientation to match magic skin
+             // b/307180733
+-
+-            if (hwConfig->hw_initialOrientation) {
+-                free(hwConfig->hw_initialOrientation);
+-            }
+-
+-            if (width > height) {
+-                hwConfig->hw_initialOrientation = strdup("landscape");
+-            } else {
+-                hwConfig->hw_initialOrientation = strdup("portrait");
++            // ... unless the magic skin is the AVD's own screen and
++            // config.ini gives an orientation (ModAVD#225).
++            const char* given = hwConfig->hw_initialOrientation;
++            const bool orientationGiven =
++                    given && (!strcasecmp(given, "portrait") ||
++                              !strcasecmp(given, "landscape"));
++            if (magic_skin_overrides_orientation(
++                        width, height, hwConfig->hw_lcd_width,
++                        hwConfig->hw_lcd_height, orientationGiven)) {
++                if (hwConfig->hw_initialOrientation) {
++                    free(hwConfig->hw_initialOrientation);
++                }
++
++                if (width > height) {
++                    hwConfig->hw_initialOrientation = strdup("landscape");
++                } else {
++                    hwConfig->hw_initialOrientation = strdup("portrait");
++                }
+             }
+             snprintf(tmp, sizeof tmp,
+                      "display {\n  width %d\n  height %d\n bpp %d}\n", width,
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index a3ffce139..078116e2f 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ #include "android/lean-title-bar-logic.h"
++#include "android/magic-skin-orientation.h"
+ 
+ #include <gtest/gtest.h>
+ 
+@@ -158,3 +159,15 @@ TEST(LeanTitleBarLogic, BootUserRotationArgs) {
+                       "user_rotation 3 "),
+               std::string::npos);
+ }
++
++TEST(LeanTitleBarLogic, MagicSkinOverridesOrientation) {
++    // No skin.name: the magic skin is the AVD's own screen, and config.ini's
++    // hw.initialOrientation stands (a portrait instance on 1280x720).
++    EXPECT_FALSE(magic_skin_overrides_orientation(1280, 720, 1280, 720, true));
++    EXPECT_FALSE(magic_skin_overrides_orientation(1920, 1080, 1920, 1080, true));
++    // Without an orientation it takes the skin's shape, as upstream.
++    EXPECT_TRUE(magic_skin_overrides_orientation(1280, 720, 1280, 720, false));
++    // -skin of another shape (b/307180733): the skin's shape wins.
++    EXPECT_TRUE(magic_skin_overrides_orientation(720, 1280, 1280, 720, true));
++    EXPECT_TRUE(magic_skin_overrides_orientation(1920, 1080, 1280, 720, true));
++}

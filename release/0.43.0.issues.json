@@ -1,0 +1,71 @@
+{
+  "version": "0.43.0",
+  "manager": "0.43.0",
+  "issues": [
+    {
+      "issue": 247,
+      "prs": [
+        "ModAVDManager#200",
+        "ModAVDManager#201"
+      ],
+      "kind": "close",
+      "note": "管理器 0.43.0 的实例设置可以设 DPI 和横竖屏；模拟器这边是 qemu/0.43.0 的 0115、0116（竖屏实例窗口一开始就是竖的，开机动画期间先横着）。"
+    },
+    {
+      "issue": 240,
+      "prs": [
+        "ModAVDManager#197"
+      ],
+      "kind": "close",
+      "note": ""
+    },
+    {
+      "issue": 239,
+      "prs": [
+        "ModAVDManager#199"
+      ],
+      "kind": "close",
+      "note": ""
+    },
+    {
+      "issue": 230,
+      "prs": [
+        "ModAVDManager#196"
+      ],
+      "kind": "close",
+      "note": ""
+    },
+    {
+      "issue": 225,
+      "prs": [
+        "ModAVD#246"
+      ],
+      "kind": "close",
+      "note": "模拟器源码补丁 qemu/0.43.0 的 0112–0114、0116。"
+    },
+    {
+      "issue": 215,
+      "prs": [
+        "ModAVDManager#195"
+      ],
+      "kind": "close",
+      "note": ""
+    },
+    {
+      "issue": 214,
+      "prs": [
+        "ModAVD#245"
+      ],
+      "kind": "close",
+      "note": "模拟器源码补丁 qemu/0.43.0 的 0111。Windows 11 贴靠布局浮窗要真实鼠标悬停，回归里没测。"
+    },
+    {
+      "issue": 165,
+      "prs": [
+        "ModAVDManager#192"
+      ],
+      "kind": "close",
+      "note": ""
+    }
+  ]
+}

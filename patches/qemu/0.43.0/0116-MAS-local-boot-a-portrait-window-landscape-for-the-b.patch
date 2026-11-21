@@ -1,0 +1,335 @@
+From 30139c404f59c9f312292466c2fc5fcc65efeae0 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Sat, 21 Nov 2026 20:19:13 +0100
+Subject: [PATCH 116/116] MAS local: boot a portrait window landscape for the
+ boot animation
+
+A portrait instance's window came up portrait, but Android draws its boot
+animation in the screen's own shape (SurfaceFlinger's install orientation,
+ROTATION_0 on a 1280x720 screen) whatever the display rotation: the Google
+logo and the first frames after it lay on their side until the display
+rotation of the start took over. bootanimation's own
+ro.bootanim.set_orientation_<display> is not a ro.boot.* property, so the
+emulator cannot hand it in on the kernel command line, and changing
+ro.surface_flinger.primary_display_orientation would change what
+user_rotation means after the boot.
+
+So the window boots in the screen's shape again, as upstream sets
+hw.initialOrientation for a magic skin, and turns to the orientation
+config.ini asked for once the boot animation is over:
+
+- parse_skin_files() keeps that orientation aside when the magic skin is
+  the AVD's own screen (skin_configured_initial_orientation()), and the
+  window takes it as the start for the rotate button.
+- The boot setting of the display rotation now waits, after `settings put`,
+  until init has stopped the boot animation (init.svc.bootanim=stopped) or
+  the boot has completed; then the window turns to the start the way the
+  button does (keeping its centre, on the screen), and the button is enabled.
+
+Landscape instances do not turn at all.
+
+Test: aemu-ui-lean-window_unittests (58), aemu-ui-safe-shutdown_unittests
+(17).
+
+Refs ModAVD/ModAVD#225
+
+Change-Id: Ife405ab48e04f51e3004b236841030f0e9f69ee3
+---
+ .../android/skin/qt/emulator-qt-window.cpp    | 16 +++++++-
+ .../src/android/skin/qt/lean-rotate.cpp       |  6 +++
+ .../src/android/skin/qt/lean-rotate.h         |  5 ++-
+ .../include/android/lean-title-bar-logic.h    |  9 ++--
+ .../include/android/magic-skin-orientation.h  | 29 ++++++++-----
+ .../include/android/skin/user-config.h        |  7 ++++
+ .../src/android/lean-title-bar-logic.cpp      |  8 ++--
+ .../src/android/skin/user-config.c            | 41 ++++++++++++-------
+ .../android/lean-title-bar-logic_unittest.cpp | 32 +++++++++------
+ 9 files changed, 105 insertions(+), 48 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 31b10a65a..778dab4c2 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -68,6 +68,7 @@
+ #include "android/skin/qt/screen-mask.h"
+ #include "android/skin/qt/winsys-qt.h"
+ #include "android/skin/rect.h"
++#include "android/skin/user-config.h"
+ #include "android/skin/winsys.h"
+ #include "android/snapshot/Snapshotter.h"
+ #include "android/test/checkboot.h"
+@@ -753,8 +754,21 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
+                                : SKIN_ROTATION_90;
+     }
+     // The rotate button turns between this and the other orientation
+-    // (ModAVD#225).
++    // (ModAVD#225). The AVD's own magic skin boots in the screen's shape,
++    // upright for the boot animation, and keeps the orientation config.ini
++    // asked for aside: that one is the start, which the lean window turns to
++    // once the boot animation is over.
+     mInitialOrientation = mOrientation;
++    if (const char* configured = skin_configured_initial_orientation()) {
++        const bool landscape = !strcasecmp(configured, "landscape");
++        if (EmulatorSkin::getInstance()->isPortrait()) {
++            mInitialOrientation =
++                    landscape ? SKIN_ROTATION_270 : SKIN_ROTATION_0;
++        } else {
++            mInitialOrientation =
++                    landscape ? SKIN_ROTATION_0 : SKIN_ROTATION_90;
++        }
++    }
+ 
+     android::base::ThreadLooper::setLooper(mLooper, true);
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+index 6eb346b28..b47bfd0a2 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.cpp
+@@ -124,6 +124,12 @@ void LeanRotateControl::startBootSync() {
+ 
+ void LeanRotateControl::bootSyncDone(bool success) {
+     if (success) {
++        // The boot animation is over and Android is at the start's display
++        // rotation: the window, booted in the screen's own shape, turns to
++        // the start too (nothing to do for a landscape instance).
++        if (mInitialRotation && mRotateWindow) {
++            mRotateWindow(mInitialRotation());
++        }
+         mReady = true;
+         mTitleBar->setRotateAvailable(true, QString());
+         return;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+index 1ba68282e..7165f86f1 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-rotate.h
+@@ -39,8 +39,9 @@ class AdbInterface;
+ // The button turns between the orientation the window started at
+ // (hw.initialOrientation) and the other one. As the guest boots the control
+ // sets the display rotation to the start's, which a turn left in Android's
+-// settings may have changed (see bootUserRotationArgs()); until that is done
+-// and Android has booted, the button is disabled and says so. A click turns
++// settings may have changed (see bootUserRotationArgs()). The window boots in
++// the screen's own shape, upright for the boot animation, and turns to the
++// start once that is over; until then the button is disabled and says so. A click turns
+ // the guest first and the window only once the guest has taken it, so the
+ // two never part.
+ class LeanRotateControl : public QObject {
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+index d97084c4c..547396a85 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+@@ -93,10 +93,11 @@ std::vector<std::string> resetUserRotationWords(int lastSet, int initial);
+ // whatever the button set. So as the guest boots, the window sets
+ // USER_ROTATION to |userRotation| (what goes with hw.initialOrientation) as
+ // soon as Android's settings service answers, before the lock screen shows: it
+-// waits for adbd, then tries every quarter second for up to a minute, then
+-// waits for the boot to finish (the rotate button is usable from then). It turns
+-// nothing: the window is at that orientation already, and so is Android
+-// unless the button left it otherwise. The adb arguments.
++// waits for adbd, then tries every quarter second for up to a minute. Then it
++// waits for the boot animation to be over (init has stopped it, or the boot
++// has completed): the window, booted in the screen's own shape for it, turns
++// to hw.initialOrientation then, and the rotate button is usable from then.
++// The adb arguments.
+ std::vector<std::string> bootUserRotationArgs(int userRotation);
+ 
+ }  // namespace lean_title_bar
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h b/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
+index cf00391f1..ae7f9e2fa 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/magic-skin-orientation.h
+@@ -19,18 +19,25 @@
+ // (b/307180733) sets hw.initialOrientation to the magic skin's own shape, so
+ // that `-skin 1080x1920` on a landscape AVD starts upright. An AVD without
+ // skin.name gets a magic skin made from its own hw.lcd.width / height
+-// (avdInfo), and then that override threw away the orientation config.ini
++// (avdInfo), and then that override throws away the orientation config.ini
+ // asks for: ModAVD keeps a 1280x720 or 1920x1080 screen and sets
+-// hw.initialOrientation=portrait for a portrait instance (ModAVD#225), which
+-// started landscape anyway.
++// hw.initialOrientation=portrait for a portrait instance (ModAVD#225).
+ //
+-// Whether the magic skin overrides hw.initialOrientation: not when it is the
+-// AVD's own screen and config.ini gives an orientation.
+-static inline bool magic_skin_overrides_orientation(int skinWidth,
+-                                                    int skinHeight,
+-                                                    int lcdWidth,
+-                                                    int lcdHeight,
+-                                                    bool orientationGiven) {
++// The window still boots in the skin's shape: Android draws its boot
++// animation in the screen's own shape (SurfaceFlinger's install orientation,
++// whatever the display rotation), so it is upright only there. The
++// orientation config.ini asked for is kept aside, and the lean window turns to
++// it once the boot animation is over.
++//
++// Whether to keep it: when the magic skin is the AVD's own screen and
++// config.ini gives an orientation. A -skin of another shape replaces it, as
++// upstream.
++static inline bool magic_skin_keeps_configured_orientation(
++        int skinWidth,
++        int skinHeight,
++        int lcdWidth,
++        int lcdHeight,
++        bool orientationGiven) {
+     const bool ownScreen = skinWidth == lcdWidth && skinHeight == lcdHeight;
+-    return !(ownScreen && orientationGiven);
++    return ownScreen && orientationGiven;
+ }
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/skin/user-config.h b/android/android-ui/modules/aemu-ui-window/include/android/skin/user-config.h
+index e547f2a3f..cf32e0b1d 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/skin/user-config.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/skin/user-config.h
+@@ -47,4 +47,11 @@ void parse_skin_files(const char* skinDirPath,
+                       AndroidHwConfig* hwConfig,
+                       AConfig** skinConfig,
+                       char** skinPath);
++
++/* ModAVD#225: the hw.initialOrientation config.ini asked for, when
++ * parse_skin_files() set it to the shape of the AVD's own magic skin (so the
++ * window boots that way, upright for the boot animation); NULL otherwise.
++ * The lean window turns to it once the boot animation is over.
++ */
++const char* skin_configured_initial_orientation(void);
+ ANDROID_END_HEADER
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+index 78e70121e..2c8399130 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -106,15 +106,17 @@ std::vector<std::string> resetUserRotationWords(int lastSet, int initial) {
+ }
+ 
+ // One argument, the whole guest script: adb shell hands it to the guest's sh
+-// as it is. `settings` fails until the settings service is up; the boot is
+-// over at sys.boot_completed=1 (an empty getprop makes the test fail too).
++// as it is. `settings` fails until the settings service is up. The boot
++// animation is over when init has stopped it, or, without one, at
++// sys.boot_completed=1 (an empty getprop makes the tests fail too).
+ std::vector<std::string> bootUserRotationArgs(int userRotation) {
+     const std::string value = std::to_string(((userRotation % 4) + 4) % 4);
+     return {"wait-for-device", "shell",
+             "i=0; until settings put system user_rotation " + value +
+                     " >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 240 ] || "
+                     "exit 1; sleep 0.25; done; until [ "
+-                    "x$(getprop sys.boot_completed) = x1 ]; do sleep 0.5; "
++                    "x$(getprop init.svc.bootanim) = xstopped ] || [ "
++                    "x$(getprop sys.boot_completed) = x1 ]; do sleep 0.2; "
+                     "done"};
+ }
+ }  // namespace lean_title_bar
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c b/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
+index 0607d42fa..798acbfda 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
++++ b/android/android-ui/modules/aemu-ui-window/src/android/skin/user-config.c
+@@ -285,6 +285,13 @@ bool emulator_initMinimalSkinConfig(int lcd_width,
+     return true;
+ }
+ 
++// See skin_configured_initial_orientation().
++static char* s_configuredInitialOrientation = NULL;
++
++const char* skin_configured_initial_orientation(void) {
++    return s_configuredInitialOrientation;
++}
++
+ void parse_skin_files(const char* skinDirPath,
+                       const char* skinName,
+                       struct AndroidOptions* opts,
+@@ -347,26 +354,32 @@ void parse_skin_files(const char* skinDirPath,
+                 bpp = atoi(y + 1);
+             }
+ 
+-            // change initialOrientation to match magic skin
+-            // b/307180733
+-            // ... unless the magic skin is the AVD's own screen and
+-            // config.ini gives an orientation (ModAVD#225).
++            // ModAVD#225: the AVD's own screen keeps the orientation
++            // config.ini asks for, for the lean window to turn to once the
++            // boot animation, drawn in the screen's own shape, is over.
+             const char* given = hwConfig->hw_initialOrientation;
+             const bool orientationGiven =
+                     given && (!strcasecmp(given, "portrait") ||
+                               !strcasecmp(given, "landscape"));
+-            if (magic_skin_overrides_orientation(
++            free(s_configuredInitialOrientation);
++            s_configuredInitialOrientation = NULL;
++            if (magic_skin_keeps_configured_orientation(
+                         width, height, hwConfig->hw_lcd_width,
+                         hwConfig->hw_lcd_height, orientationGiven)) {
+-                if (hwConfig->hw_initialOrientation) {
+-                    free(hwConfig->hw_initialOrientation);
+-                }
+-
+-                if (width > height) {
+-                    hwConfig->hw_initialOrientation = strdup("landscape");
+-                } else {
+-                    hwConfig->hw_initialOrientation = strdup("portrait");
+-                }
++                s_configuredInitialOrientation = strdup(given);
++            }
++
++            // change initialOrientation to match magic skin
++            // b/307180733
++
++            if (hwConfig->hw_initialOrientation) {
++                free(hwConfig->hw_initialOrientation);
++            }
++
++            if (width > height) {
++                hwConfig->hw_initialOrientation = strdup("landscape");
++            } else {
++                hwConfig->hw_initialOrientation = strdup("portrait");
+             }
+             snprintf(tmp, sizeof tmp,
+                      "display {\n  width %d\n  height %d\n bpp %d}\n", width,
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index 078116e2f..f752aa523 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -144,12 +144,12 @@ TEST(LeanTitleBarLogic, BootUserRotationArgs) {
+     EXPECT_EQ(args[0], "wait-for-device");
+     EXPECT_EQ(args[1], "shell");
+     // One script: tries until the settings service answers, a minute at most,
+-    // then waits for the boot to finish.
++    // then waits for the boot animation to be over.
+     EXPECT_EQ(args[2],
+               "i=0; until settings put system user_rotation 0 >/dev/null 2>&1; "
+               "do i=$((i+1)); [ $i -lt 240 ] || exit 1; sleep 0.25; done; "
+-              "until [ x$(getprop sys.boot_completed) = x1 ]; do sleep 0.5; "
+-              "done");
++              "until [ x$(getprop init.svc.bootanim) = xstopped ] || "
++              "[ x$(getprop sys.boot_completed) = x1 ]; do sleep 0.2; done");
+     EXPECT_NE(tb::bootUserRotationArgs(3)[2].find("user_rotation 3 "),
+               std::string::npos);
+     EXPECT_NE(tb::bootUserRotationArgs(-1)[2].find("user_rotation 3 "),
+@@ -160,14 +160,20 @@ TEST(LeanTitleBarLogic, BootUserRotationArgs) {
+               std::string::npos);
+ }
+ 
+-TEST(LeanTitleBarLogic, MagicSkinOverridesOrientation) {
++TEST(LeanTitleBarLogic, MagicSkinKeepsConfiguredOrientation) {
+     // No skin.name: the magic skin is the AVD's own screen, and config.ini's
+-    // hw.initialOrientation stands (a portrait instance on 1280x720).
+-    EXPECT_FALSE(magic_skin_overrides_orientation(1280, 720, 1280, 720, true));
+-    EXPECT_FALSE(magic_skin_overrides_orientation(1920, 1080, 1920, 1080, true));
+-    // Without an orientation it takes the skin's shape, as upstream.
+-    EXPECT_TRUE(magic_skin_overrides_orientation(1280, 720, 1280, 720, false));
+-    // -skin of another shape (b/307180733): the skin's shape wins.
+-    EXPECT_TRUE(magic_skin_overrides_orientation(720, 1280, 1280, 720, true));
+-    EXPECT_TRUE(magic_skin_overrides_orientation(1920, 1080, 1280, 720, true));
+-}
++    // hw.initialOrientation is kept for the window to turn to after the boot
++    // animation (a portrait instance on 1280x720).
++    EXPECT_TRUE(magic_skin_keeps_configured_orientation(1280, 720, 1280, 720,
++                                                        true));
++    EXPECT_TRUE(magic_skin_keeps_configured_orientation(1920, 1080, 1920,
++                                                        1080, true));
++    // Without an orientation there is nothing to keep.
++    EXPECT_FALSE(magic_skin_keeps_configured_orientation(1280, 720, 1280, 720,
++                                                         false));
++    // -skin of another shape (b/307180733): the skin's shape is all there is.
++    EXPECT_FALSE(magic_skin_keeps_configured_orientation(720, 1280, 1280, 720,
++                                                         true));
++    EXPECT_FALSE(magic_skin_keeps_configured_orientation(1920, 1080, 1280,
++                                                         720, true));
++}
+\ No newline at end of file
