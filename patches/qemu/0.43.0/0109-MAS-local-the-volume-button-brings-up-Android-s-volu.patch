@@ -1,0 +1,882 @@
+From cc39dfd0c46302fddf52c7484840666b2e5d6fb7 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 17 Nov 2026 16:19:52 +0100
+Subject: [PATCH 109/116] MAS local: the volume button brings up Android's
+ volume panel
+
+The title bar's volume button opened a bar of its own under itself, as
+MuMu has it. It now brings up Android's own volume panel instead, as a
+volume key does: a click runs `cmd media_session volume --show --stream 3
+--adj same` over adb, which shows the system's panel for the media
+stream and leaves the volume where it is. The shell's own cmd
+media_session is turned down by AppOps on API 34, so the command runs
+through `su 0` first and falls back to the plain shell where there is
+no su. adb runs on the AdbInterface's own thread, so the window does not
+wait for it.
+
+When the button is shown (only while the emulator plays sound), its tool
+tip, and its being disabled without the manager's adb server or without
+adb, are unchanged.
+
+Gone with the bar: LeanVolumePopup, reading and parsing the volume, the
+one at a time sender, the unmute index, where the bar opens on the
+screen, the title bar's buttonsDisabled signal, the muted speaker icon,
+and their tests.
+
+Test: aemu-ui-lean-window_unittests (44), android-emu-adb-interface_unittests
+(26). On flow-a (API 34) `su 0 cmd media_session volume --show --stream 3
+--adj same` brings up VolumeDialogImpl and keeps the volume.
+
+Refs ModAVD/ModAVD#226
+
+Change-Id: Icf8dbaa385e762cc716b5f4726e9d20aeb542a12
+---
+ .../images/dark/ic_volume_off_lean_16px.svg   |   4 -
+ .../src/android/skin/qt/lean-title-bar.cpp    |   1 -
+ .../src/android/skin/qt/lean-title-bar.h      |   4 -
+ .../src/android/skin/qt/lean-volume.cpp       | 275 +-----------------
+ .../src/android/skin/qt/lean-volume.h         |  80 +----
+ .../src/android/skin/qt/resources.qrc         |   2 -
+ .../include/android/lean-title-bar-logic.h    |  54 +---
+ .../src/android/lean-title-bar-logic.cpp      | 124 +-------
+ .../android/lean-title-bar-logic_unittest.cpp | 128 +-------
+ 9 files changed, 43 insertions(+), 629 deletions(-)
+ delete mode 100644 android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
+deleted file mode 100644
+index 4539c9241..000000000
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/images/dark/ic_volume_off_lean_16px.svg
++++ /dev/null
+@@ -1,4 +0,0 @@
+-<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+-<path d="M4.52808 6.1H4.73932L4.88657 5.94854L7.52808 3.23157L7.52808 12.7684L4.88657 10.0515L4.73932 9.9H4.52808H2.02808C1.75193 9.9 1.52808 9.67614 1.52808 9.4V6.6C1.52808 6.32386 1.75193 6.1 2.02808 6.1H4.52808Z" stroke="white"/>
+-<path d="M10 5.75L14 9.75M14 5.75L10 9.75" stroke="white" stroke-linecap="round"/>
+-</svg>
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+index dfac93083..4b4255b95 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -182,7 +182,6 @@ void LeanTitleBar::setButtonsEnabled(bool enabled) {
+     }
+     if (!enabled) {
+         setMaximizeButtonMouse(false, false);
+-        emit buttonsDisabled();
+     }
+ }
+ 
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+index 594def07c..2a3d02c28 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -72,10 +72,6 @@ public:
+     // |down|, with its tool tip after a while.
+     void setMaximizeButtonMouse(bool hot, bool down);
+ 
+-signals:
+-    // setButtonsEnabled(false), as the safe shutdown begins.
+-    void buttonsDisabled();
+-
+ protected:
+     bool eventFilter(QObject* watched, QEvent* event) override;
+     void resizeEvent(QResizeEvent* event) override;
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
+index e8b7c5646..bedc8b312 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.cpp
+@@ -13,26 +13,15 @@
+ // limitations under the License.
+ #include "android/skin/qt/lean-volume.h"
+ 
+-#include <QApplication>
+-#include <QHBoxLayout>
+-#include <QHideEvent>
+-#include <QIcon>
+-#include <QLabel>
+-#include <QMetaObject>
+-#include <QMouseEvent>
+ #include <QPushButton>
+-#include <QRect>
+-#include <QScreen>
+-#include <QShowEvent>
+-#include <QSignalBlocker>
+-#include <QSize>
+-#include <QSlider>
++#include <QString>
+ 
+-#include <sstream>
++#include <string>
+ #include <utility>
+ 
+ #include "android/base/system/System.h"
+ #include "android/emulation/control/adb/AdbInterface.h"
++#include "android/lean-title-bar-logic.h"
+ #include "android/skin/qt/lean-title-bar.h"
+ 
+ namespace tb = android::lean_title_bar;
+@@ -41,160 +30,14 @@ using android::emulation::OptionalAdbCommandResult;
+ 
+ namespace {
+ 
+-// The lean title bar's palette (lean-title-bar.cpp).
+-constexpr char kStyle[] =
+-        "#leanVolumePopup { background: #20212D; border: 1px solid #3B3D52; }"
+-        "#leanVolumePopup QLabel { color: #E8E8EC; background: transparent; }"
+-        "#leanVolumePopup QPushButton { background: #20212D; border: 0; }"
+-        "#leanVolumePopup QPushButton:hover { background: #303142; }"
+-        "#leanVolumePopup QPushButton:pressed { background: #3B3D52; }"
+-        "#leanVolumePopup QSlider::groove:horizontal {"
+-        " height: 4px; background: #3B3D52; border-radius: 2px; }"
+-        "#leanVolumePopup QSlider::sub-page:horizontal {"
+-        " background: #E8E8EC; border-radius: 2px; }"
+-        "#leanVolumePopup QSlider::handle:horizontal {"
+-        " background: #E8E8EC; width: 12px; margin: -4px 0; border-radius: 6px; }"
+-        "#leanVolumePopup QSlider::sub-page:horizontal:disabled {"
+-        " background: #3B3D52; }"
+-        "#leanVolumePopup QSlider::handle:horizontal:disabled {"
+-        " background: #5A5C70; }";
+-
+-constexpr int kHeight = 40;
+-constexpr int kSpeakerSize = 32;
+-constexpr int kIconSize = 16;
+-constexpr int kSliderWidth = 160;
+ constexpr int kAdbTimeoutMs = 5000;
+ 
+ }  // namespace
+ 
+-LeanVolumePopup::LeanVolumePopup(QWidget* parent)
+-    : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint |
+-                             Qt::NoDropShadowWindowHint) {
+-    setObjectName(QStringLiteral("leanVolumePopup"));
+-    setAttribute(Qt::WA_StyledBackground);
+-    setStyleSheet(QString::fromLatin1(kStyle));
+-    setFixedHeight(kHeight);
+-
+-    auto* layout = new QHBoxLayout(this);
+-    layout->setContentsMargins(4, 0, 12, 0);
+-    layout->setSpacing(8);
+-
+-    mSpeaker = new QPushButton(this);
+-    mSpeaker->setFocusPolicy(Qt::NoFocus);
+-    mSpeaker->setFlat(true);
+-    mSpeaker->setFixedSize(kSpeakerSize, kSpeakerSize);
+-    mSpeaker->setIconSize(QSize(kIconSize, kIconSize));
+-    layout->addWidget(mSpeaker, 0, Qt::AlignVCenter);
+-
+-    mSlider = new QSlider(Qt::Horizontal, this);
+-    mSlider->setFocusPolicy(Qt::NoFocus);
+-    mSlider->setFixedWidth(kSliderWidth);
+-    mSlider->setTracking(true);
+-    mSlider->setAccessibleName(QString::fromUtf8("媒体音量"));
+-    layout->addWidget(mSlider, 0, Qt::AlignVCenter);
+-
+-    mStatus = new QLabel(this);
+-    mStatus->setFixedWidth(kSliderWidth);
+-    mStatus->hide();
+-    layout->addWidget(mStatus, 0, Qt::AlignVCenter);
+-
+-    connect(mSpeaker, &QPushButton::clicked, this,
+-            &LeanVolumePopup::muteClicked);
+-    connect(mSlider, &QSlider::valueChanged, this,
+-            &LeanVolumePopup::volumeDragged);
+-    showMuted(false);
+-    adjustSize();
+-}
+-
+-void LeanVolumePopup::openUnder(QPushButton* anchor) {
+-    mAnchor = anchor;
+-    mStatus->hide();
+-    mSlider->show();
+-    mSlider->setEnabled(false);
+-    mSpeaker->setEnabled(false);
+-    adjustSize();
+-
+-    const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height()));
+-    int left = below.x();
+-    if (QScreen* screen = anchor->screen()) {
+-        const QRect area = screen->availableGeometry();
+-        left = tb::popupLeft(below.x(), width(), area.left(),
+-                             area.left() + area.width());
+-    }
+-    move(left, below.y());
+-    show();
+-    raise();
+-}
+-
+-void LeanVolumePopup::showVolume(const tb::StreamVolume& volume) {
+-    mStatus->hide();
+-    mSlider->show();
+-    const QSignalBlocker blocker(mSlider);
+-    mSlider->setRange(volume.min, volume.max);
+-    mSlider->setPageStep(1);
+-    mSlider->setValue(volume.index);
+-    mSlider->setEnabled(true);
+-    mSpeaker->setEnabled(true);
+-    showMuted(volume.muted());
+-}
+-
+-void LeanVolumePopup::showMuted(bool muted) {
+-    mSpeaker->setIcon(QIcon(muted ? QStringLiteral(":/dark/volume_off_lean")
+-                                  : QStringLiteral(":/dark/volume_up")));
+-    const QString tip =
+-            muted ? QString::fromUtf8("取消静音") : QString::fromUtf8("静音");
+-    mSpeaker->setToolTip(tip);
+-    mSpeaker->setAccessibleName(tip);
+-}
+-
+-void LeanVolumePopup::setSliderValue(int index) {
+-    const QSignalBlocker blocker(mSlider);
+-    mSlider->setValue(index);
+-}
+-
+-void LeanVolumePopup::showUnavailable(const QString& text) {
+-    mSlider->hide();
+-    mSpeaker->setEnabled(false);
+-    mStatus->setText(text);
+-    mStatus->show();
+-}
+-
+-void LeanVolumePopup::mousePressEvent(QMouseEvent* event) {
+-    if (!rect().contains(event->position().toPoint())) {
+-        // A click on the volume button closes the bar and goes no further,
+-        // or the button would open it again at once.
+-        if (mAnchor && mAnchor->isVisible() &&
+-            QRect(mAnchor->mapToGlobal(QPoint(0, 0)), mAnchor->size())
+-                    .contains(event->globalPosition().toPoint())) {
+-            setAttribute(Qt::WA_NoMouseReplay, true);
+-        }
+-        close();
+-        return;
+-    }
+-    QFrame::mousePressEvent(event);
+-}
+-
+-void LeanVolumePopup::showEvent(QShowEvent* event) {
+-    setAttribute(Qt::WA_NoMouseReplay, false);
+-    QFrame::showEvent(event);
+-}
+-
+-void LeanVolumePopup::hideEvent(QHideEvent* event) {
+-    QFrame::hideEvent(event);
+-    emit closed();
+-}
+-
+ LeanVolumeControl::LeanVolumeControl(LeanTitleBar* titleBar, AdbGetter adb)
+     : QObject(titleBar), mTitleBar(titleBar), mAdb(std::move(adb)) {
+-    QPushButton* button = mTitleBar->volumeButton();
+-    mPopup = new LeanVolumePopup(button->window());
+-    connect(button, &QPushButton::clicked, this, &LeanVolumeControl::toggle);
+-    connect(mPopup, &LeanVolumePopup::volumeDragged, this,
+-            &LeanVolumeControl::onDragged);
+-    connect(mPopup, &LeanVolumePopup::muteClicked, this,
+-            &LeanVolumeControl::onMuteClicked);
+-    connect(mTitleBar, &LeanTitleBar::buttonsDisabled, mPopup,
+-            &QWidget::close);
++    connect(mTitleBar->volumeButton(), &QPushButton::clicked, this,
++            &LeanVolumeControl::showPanel);
+ 
+     const std::string port =
+             android::base::System::get()->envGet("ANDROID_ADB_SERVER_PORT");
+@@ -215,111 +58,13 @@ void LeanVolumeControl::checkAvailable() {
+     }
+ }
+ 
+-void LeanVolumeControl::toggle() {
+-    if (mPopup->isVisible()) {
+-        mPopup->close();
+-        return;
+-    }
+-    mPopup->openUnder(mTitleBar->volumeButton());
+-    readVolume();
+-}
+-
+-void LeanVolumeControl::readVolume() {
+-    const int generation = ++mReadGeneration;
+-    mVolume.reset();
+-    runAdb(tb::getMusicVolumeArgs(), true,
+-           [this, generation](bool ok, const std::string& output) {
+-               if (generation != mReadGeneration || !mPopup->isVisible()) {
+-                   return;
+-               }
+-               const auto volume =
+-                       ok ? tb::parseStreamVolume(output) : std::nullopt;
+-               if (!volume) {
+-                   mPopup->showUnavailable(
+-                           QString::fromUtf8("读不到安卓的音量"));
+-                   return;
+-               }
+-               mVolume = volume;
+-               if (!volume->muted()) {
+-                   mRemembered = volume->index;
+-               }
+-               mPopup->showVolume(*volume);
+-           });
+-}
+-
+-void LeanVolumeControl::onDragged(int index) {
+-    if (!mVolume) {
+-        return;
+-    }
+-    mVolume->index = index;
+-    if (!mVolume->muted()) {
+-        mRemembered = index;
+-    }
+-    mPopup->showMuted(mVolume->muted());
+-    send(mSender.request(index));
+-}
+-
+-void LeanVolumeControl::onMuteClicked() {
+-    if (!mVolume) {
+-        return;
+-    }
+-    // Muting sets the minimum and unmuting the last index above it: setting
+-    // a stream's volume above zero unmutes it, and the guest keeps the index
+-    // across boots.
+-    const int index =
+-            mVolume->muted()
+-                    ? tb::unmuteIndex(mRemembered, mVolume->min, mVolume->max)
+-                    : mVolume->min;
+-    mVolume->index = index;
+-    mPopup->setSliderValue(index);
+-    mPopup->showMuted(mVolume->muted());
+-    send(mSender.request(index));
+-}
+-
+-void LeanVolumeControl::send(std::optional<int> index) {
+-    if (!index) {
+-        return;
+-    }
+-    runAdb(tb::setMusicVolumeArgs(*index), false,
+-           [this](bool, const std::string&) { send(mSender.finished()); });
+-}
+-
+-void LeanVolumeControl::runAdb(
+-        const std::vector<std::string>& args,
+-        bool wantOutput,
+-        std::function<void(bool ok, const std::string& output)> done) {
+-    // The answer comes back on the UI thread, and only while this lives.
+-    QPointer<LeanVolumeControl> self(this);
+-    auto answer = [self, done = std::move(done)](bool ok, std::string output) {
+-        QMetaObject::invokeMethod(
+-                qApp,
+-                [self, done, ok, output = std::move(output)] {
+-                    if (self) {
+-                        done(ok, output);
+-                    }
+-                },
+-                Qt::QueuedConnection);
+-    };
++void LeanVolumeControl::showPanel() {
+     AdbInterface* adb = mAdb ? mAdb() : nullptr;
+     if (!adb) {
+-        answer(false, std::string());
+         return;
+     }
+-    auto command = adb->runAdbCommand(
+-            args,
+-            [answer, wantOutput](const OptionalAdbCommandResult& result) {
+-                const bool ok = result && result->exit_code == 0;
+-                std::string output;
+-                if (ok && wantOutput && result->output) {
+-                    std::ostringstream text;
+-                    text << result->output->rdbuf();
+-                    output = text.str();
+-                }
+-                answer(ok, std::move(output));
+-            },
+-            kAdbTimeoutMs, wantOutput);
+-    if (!command) {
+-        // Not running Android, so no adb.
+-        answer(false, std::string());
+-    }
++    // The panel is the answer; the command's own result says nothing more.
++    adb->runAdbCommand(tb::showVolumePanelArgs(),
++                       [](const OptionalAdbCommandResult&) {}, kAdbTimeoutMs,
++                       false);
+ }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
+index 44b719231..8126babcc 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-volume.h
+@@ -13,24 +13,10 @@
+ // limitations under the License.
+ #pragma once
+ 
+-#include <QFrame>
+ #include <QObject>
+-#include <QPointer>
+-#include <QString>
+ 
+ #include <functional>
+-#include <optional>
+-#include <string>
+-#include <vector>
+ 
+-#include "android/lean-title-bar-logic.h"
+-
+-class QHideEvent;
+-class QLabel;
+-class QMouseEvent;
+-class QPushButton;
+-class QShowEvent;
+-class QSlider;
+ class LeanTitleBar;
+ 
+ namespace android {
+@@ -39,49 +25,12 @@ class AdbInterface;
+ }  // namespace emulation
+ }  // namespace android
+ 
+-// The bar the lean title bar's volume button opens under itself (ModAVD#226),
+-// as MuMu has it: a speaker that mutes and unmutes on the left, a slider on
+-// the right. A click anywhere outside it, the volume button included, closes
+-// it.
+-class LeanVolumePopup : public QFrame {
+-    Q_OBJECT
+-
+-public:
+-    explicit LeanVolumePopup(QWidget* parent);
+-
+-    // Opens under |anchor|, the volume button, with the slider disabled until
+-    // showVolume() or showUnavailable().
+-    void openUnder(QPushButton* anchor);
+-    void showVolume(const android::lean_title_bar::StreamVolume& volume);
+-    // Shows the speaker as muted or not, the slider where it is.
+-    void showMuted(bool muted);
+-    void setSliderValue(int index);
+-    void showUnavailable(const QString& text);
+-
+-signals:
+-    void volumeDragged(int index);
+-    void muteClicked();
+-    void closed();
+-
+-protected:
+-    void mousePressEvent(QMouseEvent* event) override;
+-    void showEvent(QShowEvent* event) override;
+-    void hideEvent(QHideEvent* event) override;
+-
+-private:
+-    QPointer<QPushButton> mAnchor;
+-    QPushButton* mSpeaker = nullptr;
+-    QSlider* mSlider = nullptr;
+-    QLabel* mStatus = nullptr;
+-};
+-
+-// The volume button's control: reads the guest's media volume when the bar
+-// opens and sets it while the slider moves, over adb (`cmd media_session
+-// volume --stream 3`). adb runs on the AdbInterface's own thread and answers
+-// on the UI thread; the slider sends one command at a time and only its
+-// newest value waits. It talks only to the adb server that
+-// ANDROID_ADB_SERVER_PORT names (the manager's own), never to 5037: without
+-// one, or without adb, the button is disabled and says why.
++// The volume button's control (ModAVD#226): a click brings up Android's own
++// volume panel for the media stream, as a volume key does, over adb (`cmd
++// media_session volume --show --adj same`). adb runs on the AdbInterface's own
++// thread, so the window does not wait for it. It talks only to the adb server
++// that ANDROID_ADB_SERVER_PORT names (the manager's own), never to 5037:
++// without one, or without adb, the button is disabled and says why.
+ class LeanVolumeControl : public QObject {
+     Q_OBJECT
+ 
+@@ -96,23 +45,8 @@ public:
+     void checkAvailable();
+ 
+ private:
+-    void toggle();
+-    void readVolume();
+-    void onDragged(int index);
+-    void onMuteClicked();
+-    void send(std::optional<int> index);
+-    void runAdb(const std::vector<std::string>& args,
+-                bool wantOutput,
+-                std::function<void(bool ok, const std::string& output)> done);
++    void showPanel();
+ 
+     LeanTitleBar* mTitleBar;
+     AdbGetter mAdb;
+-    LeanVolumePopup* mPopup = nullptr;
+-    android::lean_title_bar::VolumeSender mSender;
+-    std::optional<android::lean_title_bar::StreamVolume> mVolume;
+-    // The last index above the minimum, for unmuting.
+-    int mRemembered = -1;
+-    // Bumped whenever the bar opens, so a late answer to an older read is
+-    // dropped.
+-    int mReadGeneration = 0;
+ };
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+index 7e71672ff..d97a46c31 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/resources.qrc
+@@ -289,8 +289,6 @@
+         <!-- The lean title bar's maximize / restore button (ModAVD#185) -->
+         <file alias="window_maximize">images/dark/ic_window_maximize_white_48dp.svg</file>
+         <file alias="window_restore">images/dark/ic_window_restore_white_48dp.svg</file>
+-        <!-- The lean volume popup's speaker while muted (ModAVD#226) -->
+-        <file alias="volume_off_lean">images/dark/ic_volume_off_lean_16px.svg</file>
+         <file alias="more">images/dark/ic_more_horiz_white_48dp.svg</file>
+         <file alias="overview">images/dark/System_Overview_white.svg</file>
+         <file alias="meta">images/dark/meta.svg</file>
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+index aa57fbf7c..be078d761 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-title-bar-logic.h
+@@ -13,12 +13,10 @@
+ // limitations under the License.
+ #pragma once
+ 
+-#include <optional>
+ #include <string>
+-#include <string_view>
+ #include <vector>
+ 
+-// What the lean window's title bar shows and how its volume control talks to
++// What the lean window's title bar shows and what its volume button asks of
+ // the guest (ModAVD#231 screenshot, ModAVD#226 volume), without any windowing
+ // system, so that it can be tested on its own.
+ namespace android {
+@@ -50,52 +48,10 @@ bool volumeButtonShown(const char* audioBackend, bool noAudio);
+ // adb's default 5037, which the emulator must neither use nor start.
+ bool adbServerPortUsable(const char* value);
+ 
+-// The left edge of a popup |popupWidth| wide that opens under a button whose
+-// left edge is at |anchorLeft|: aligned with the button, moved left so that it
+-// ends at |screenRight| when it would not fit, but never left of |screenLeft|.
+-int popupLeft(int anchorLeft, int popupWidth, int screenLeft, int screenRight);
+-
+-// The guest's media volume (STREAM_MUSIC) as `cmd media_session volume` gives
+-// it.
+-struct StreamVolume {
+-    int index = 0;
+-    int min = 0;
+-    int max = 0;
+-
+-    bool muted() const { return index <= min; }
+-};
+-
+-// The adb arguments that read and set the guest's media volume.
+-std::vector<std::string> getMusicVolumeArgs();
+-std::vector<std::string> setMusicVolumeArgs(int index);
+-
+-// Reads "volume is 5 in range [0..15]" from the output of
+-// getMusicVolumeArgs(), which has other lines around it ("[V] Connected to
+-// AudioService"). Nothing when no line has it or it does not add up.
+-std::optional<StreamVolume> parseStreamVolume(std::string_view output);
+-
+-// The index the speaker button unmutes to: the last one above |min| it saw
+-// (|remembered|) when that is in range, else half way up.
+-int unmuteIndex(int remembered, int min, int max);
+-
+-// Sends the slider's volume to the guest one adb command at a time: while one
+-// runs, only the newest value waits, so a drag does not start an adb process
+-// for every pixel and the guest ends at where the slider stopped.
+-class VolumeSender {
+-public:
+-    // The slider is at |index|. Returns the index to send now, or nothing if a
+-    // command runs (|index| then waits for it).
+-    std::optional<int> request(int index);
+-    // The running command finished. Returns the waiting index to send now, if
+-    // it differs from the one just sent.
+-    std::optional<int> finished();
+-    bool busy() const { return mBusy; }
+-
+-private:
+-    bool mBusy = false;
+-    int mSent = 0;
+-    std::optional<int> mWaiting;
+-};
++// The adb arguments that bring up Android's own volume panel for the media
++// stream (STREAM_MUSIC) without changing the volume, as the volume button's
++// click does.
++std::vector<std::string> showVolumePanelArgs();
+ 
+ }  // namespace lean_title_bar
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+index 6db65dfed..f065aefc6 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-title-bar-logic.cpp
+@@ -13,7 +13,6 @@
+ // limitations under the License.
+ #include "android/lean-title-bar-logic.h"
+ 
+-#include <algorithm>
+ #include <cstring>
+ 
+ namespace android {
+@@ -26,40 +25,6 @@ constexpr long kDefaultAdbServerPort = 5037;
+ // AudioSystem.STREAM_MUSIC.
+ constexpr char kMusicStream[] = "3";
+ 
+-// Reads a decimal number, maybe negative, at |*pos| of |text| and moves past
+-// it.
+-bool readInt(std::string_view text, size_t* pos, int* value) {
+-    size_t i = *pos;
+-    bool negative = false;
+-    if (i < text.size() && text[i] == '-') {
+-        negative = true;
+-        ++i;
+-    }
+-    const size_t digits = i;
+-    long result = 0;
+-    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+-        result = result * 10 + (text[i] - '0');
+-        if (result > 1000000) {
+-            return false;
+-        }
+-        ++i;
+-    }
+-    if (i == digits) {
+-        return false;
+-    }
+-    *value = static_cast<int>(negative ? -result : result);
+-    *pos = i;
+-    return true;
+-}
+-
+-bool readText(std::string_view text, size_t* pos, std::string_view expected) {
+-    if (text.substr(*pos, expected.size()) != expected) {
+-        return false;
+-    }
+-    *pos += expected.size();
+-    return true;
+-}
+-
+ }  // namespace
+ 
+ std::vector<Item> items(bool volumeShown) {
+@@ -96,81 +61,20 @@ bool adbServerPortUsable(const char* value) {
+     return port >= 1 && port != kDefaultAdbServerPort;
+ }
+ 
+-int popupLeft(int anchorLeft, int popupWidth, int screenLeft, int screenRight) {
+-    int left = anchorLeft;
+-    if (left + popupWidth > screenRight) {
+-        left = screenRight - popupWidth;
+-    }
+-    return std::max(left, screenLeft);
+-}
+-
+-std::vector<std::string> getMusicVolumeArgs() {
+-    return {"shell", "cmd", "media_session", "volume", "--stream",
+-            kMusicStream, "--get"};
+-}
+-
+-// On API 34 the shell's own `cmd media_session volume --set` is turned down
+-// (AppOps: com.android.server.media from uid 2000 may not
+-// AUDIO_MEDIA_VOLUME), while reading works. So the set goes through su first
+-// and falls back to the shell only where there is no su. adb shell joins the
+-// words and runs them in the guest's sh, so the || is the guest's.
+-std::vector<std::string> setMusicVolumeArgs(int index) {
+-    const std::string value = std::to_string(index);
+-    return {"shell",  "su",           "0",      "cmd",      "media_session",
+-            "volume", "--stream",     kMusicStream, "--set", value,
+-            "||",     "cmd",          "media_session", "volume", "--stream",
+-            kMusicStream, "--set",    value};
+-}
+-
+-std::optional<StreamVolume> parseStreamVolume(std::string_view output) {
+-    constexpr std::string_view kStart = "volume is ";
+-    for (size_t at = output.find(kStart); at != std::string_view::npos;
+-         at = output.find(kStart, at + 1)) {
+-        size_t pos = at + kStart.size();
+-        StreamVolume volume;
+-        if (readInt(output, &pos, &volume.index) &&
+-            readText(output, &pos, " in range [") &&
+-            readInt(output, &pos, &volume.min) &&
+-            readText(output, &pos, "..") &&
+-            readInt(output, &pos, &volume.max) && readText(output, &pos, "]") &&
+-            volume.min < volume.max && volume.index >= volume.min &&
+-            volume.index <= volume.max) {
+-            return volume;
+-        }
+-    }
+-    return std::nullopt;
+-}
+-
+-int unmuteIndex(int remembered, int min, int max) {
+-    if (remembered > min && remembered <= max) {
+-        return remembered;
+-    }
+-    return std::max(min + 1, (min + max + 1) / 2);
+-}
+-
+-std::optional<int> VolumeSender::request(int index) {
+-    if (mBusy) {
+-        mWaiting = index;
+-        return std::nullopt;
+-    }
+-    mBusy = true;
+-    mSent = index;
+-    mWaiting.reset();
+-    return index;
+-}
+-
+-std::optional<int> VolumeSender::finished() {
+-    std::optional<int> next;
+-    if (mWaiting && *mWaiting != mSent) {
+-        next = mWaiting;
+-    }
+-    mWaiting.reset();
+-    if (next) {
+-        mSent = *next;
+-        return next;
+-    }
+-    mBusy = false;
+-    return std::nullopt;
++// `cmd media_session volume --adj same` adjusts by nothing and, with --show,
++// brings up the system's volume panel, as a volume key does. On API 34 the
++// shell's own `cmd media_session volume` is turned down by AppOps
++// (com.android.server.media from uid 2000 may not AUDIO_MEDIA_VOLUME), so it
++// goes through su first and falls back to the shell only where there is no
++// su. adb shell joins the words and runs them in the guest's sh, so the || is
++// the guest's.
++std::vector<std::string> showVolumePanelArgs() {
++    return {"shell",
++            "su", "0", "cmd", "media_session", "volume", "--show",
++            "--stream", kMusicStream, "--adj", "same",
++            "||",
++            "cmd", "media_session", "volume", "--show",
++            "--stream", kMusicStream, "--adj", "same"};
+ }
+ 
+ }  // namespace lean_title_bar
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+index 35a4edb63..f8722a7ee 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-title-bar-logic_unittest.cpp
+@@ -63,127 +63,13 @@ TEST(LeanTitleBarLogic, AdbServerPortUsable) {
+     EXPECT_FALSE(tb::adbServerPortUsable("20089 "));
+ }
+ 
+-TEST(LeanTitleBarLogic, PopupLeft) {
+-    // Aligned with the button when it fits.
+-    EXPECT_EQ(tb::popupLeft(100, 200, 0, 1920), 100);
+-    EXPECT_EQ(tb::popupLeft(1720, 200, 0, 1920), 1720);
+-    // Ends at the screen's right edge when it would not.
+-    EXPECT_EQ(tb::popupLeft(1721, 200, 0, 1920), 1720);
+-    EXPECT_EQ(tb::popupLeft(1900, 200, 0, 1920), 1720);
+-    // But never left of the screen.
+-    EXPECT_EQ(tb::popupLeft(-50, 200, 0, 1920), 0);
+-    EXPECT_EQ(tb::popupLeft(50, 300, 0, 200), 0);
+-    // A screen left of the primary one.
+-    EXPECT_EQ(tb::popupLeft(-300, 200, -1920, 0), -300);
+-    EXPECT_EQ(tb::popupLeft(-100, 200, -1920, 0), -200);
+-}
+-
+-TEST(LeanTitleBarLogic, VolumeArgs) {
+-    EXPECT_EQ(tb::getMusicVolumeArgs(),
+-              (std::vector<std::string>{"shell", "cmd", "media_session",
+-                                        "volume", "--stream", "3", "--get"}));
+-    // su first (the shell's own set is refused on API 34), the shell after.
+-    EXPECT_EQ(tb::setMusicVolumeArgs(7),
++TEST(LeanTitleBarLogic, ShowVolumePanelArgs) {
++    // su first (the shell's own cmd media_session is refused on API 34), the
++    // shell after; --adj same shows the panel without changing the volume.
++    EXPECT_EQ(tb::showVolumePanelArgs(),
+               (std::vector<std::string>{
+                       "shell", "su", "0", "cmd", "media_session", "volume",
+-                      "--stream", "3", "--set", "7", "||", "cmd",
+-                      "media_session", "volume", "--stream", "3", "--set",
+-                      "7"}));
+-    EXPECT_EQ(tb::setMusicVolumeArgs(0).back(), "0");
+-    EXPECT_EQ(tb::setMusicVolumeArgs(0)[9], "0");
+-}
+-
+-TEST(LeanTitleBarLogic, ParseStreamVolume) {
+-    const auto volume = tb::parseStreamVolume(
+-            "[V] will get volume\r\n"
+-            "[V] Connected to AudioService\r\n"
+-            "[V] volume is 5 in range [0..15]\r\n");
+-    ASSERT_TRUE(volume);
+-    EXPECT_EQ(volume->index, 5);
+-    EXPECT_EQ(volume->min, 0);
+-    EXPECT_EQ(volume->max, 15);
+-    EXPECT_FALSE(volume->muted());
+-
+-    const auto bare = tb::parseStreamVolume("volume is 0 in range [0..25]");
+-    ASSERT_TRUE(bare);
+-    EXPECT_EQ(bare->index, 0);
+-    EXPECT_EQ(bare->max, 25);
+-    EXPECT_TRUE(bare->muted());
+-
+-    const auto top = tb::parseStreamVolume("volume is 15 in range [0..15]\n");
+-    ASSERT_TRUE(top);
+-    EXPECT_EQ(top->index, 15);
+-
+-    const auto lowMin = tb::parseStreamVolume("volume is 1 in range [1..7]");
+-    ASSERT_TRUE(lowMin);
+-    EXPECT_TRUE(lowMin->muted());
+-    EXPECT_EQ(lowMin->min, 1);
+-}
+-
+-TEST(LeanTitleBarLogic, ParseStreamVolumeSkipsWhatDoesNotAddUp) {
+-    EXPECT_FALSE(tb::parseStreamVolume(""));
+-    EXPECT_FALSE(tb::parseStreamVolume("Error: no valid stream"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is  in range [0..15]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [0..15"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [0.15]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 of range [0..15]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 16 in range [0..15]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is -1 in range [0..15]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 3 in range [5..5]"));
+-    // A range with nothing to slide over.
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 5 in range [5..5]"));
+-    EXPECT_FALSE(tb::parseStreamVolume("volume is 3 in range [9..5]"));
+-    EXPECT_FALSE(
+-            tb::parseStreamVolume("volume is 99999999999 in range [0..15]"));
+-    // A later line that adds up wins over an earlier one that does not.
+-    const auto later = tb::parseStreamVolume(
+-            "volume is x\nvolume is 4 in range [0..15]\n");
+-    ASSERT_TRUE(later);
+-    EXPECT_EQ(later->index, 4);
+-}
+-
+-TEST(LeanTitleBarLogic, UnmuteIndex) {
+-    EXPECT_EQ(tb::unmuteIndex(9, 0, 15), 9);
+-    EXPECT_EQ(tb::unmuteIndex(15, 0, 15), 15);
+-    EXPECT_EQ(tb::unmuteIndex(1, 0, 15), 1);
+-    // Nothing remembered: half way up.
+-    EXPECT_EQ(tb::unmuteIndex(0, 0, 15), 8);
+-    EXPECT_EQ(tb::unmuteIndex(-1, 0, 15), 8);
+-    // Remembered from a range the guest no longer has.
+-    EXPECT_EQ(tb::unmuteIndex(20, 0, 15), 8);
+-    EXPECT_EQ(tb::unmuteIndex(0, 0, 1), 1);
+-    EXPECT_EQ(tb::unmuteIndex(2, 2, 3), 3);
+-}
+-
+-TEST(LeanTitleBarLogic, VolumeSenderSendsAtOnceWhenIdle) {
+-    tb::VolumeSender sender;
+-    EXPECT_FALSE(sender.busy());
+-    EXPECT_EQ(sender.request(5), 5);
+-    EXPECT_TRUE(sender.busy());
+-    EXPECT_EQ(sender.finished(), std::nullopt);
+-    EXPECT_FALSE(sender.busy());
+-    EXPECT_EQ(sender.request(6), 6);
+-}
+-
+-TEST(LeanTitleBarLogic, VolumeSenderKeepsOnlyTheNewest) {
+-    tb::VolumeSender sender;
+-    EXPECT_EQ(sender.request(5), 5);
+-    EXPECT_EQ(sender.request(6), std::nullopt);
+-    EXPECT_EQ(sender.request(7), std::nullopt);
+-    EXPECT_EQ(sender.request(8), std::nullopt);
+-    EXPECT_EQ(sender.finished(), 8);
+-    EXPECT_TRUE(sender.busy());
+-    EXPECT_EQ(sender.finished(), std::nullopt);
+-    EXPECT_FALSE(sender.busy());
+-}
+-
+-TEST(LeanTitleBarLogic, VolumeSenderSkipsWhatWasJustSent) {
+-    tb::VolumeSender sender;
+-    EXPECT_EQ(sender.request(5), 5);
+-    EXPECT_EQ(sender.request(6), std::nullopt);
+-    EXPECT_EQ(sender.request(5), std::nullopt);
+-    // Dragged away and back: the guest already has 5.
+-    EXPECT_EQ(sender.finished(), std::nullopt);
+-    EXPECT_FALSE(sender.busy());
+-    EXPECT_EQ(sender.request(5), 5);
++                      "--show", "--stream", "3", "--adj", "same", "||", "cmd",
++                      "media_session", "volume", "--show", "--stream", "3",
++                      "--adj", "same"}));
+ }

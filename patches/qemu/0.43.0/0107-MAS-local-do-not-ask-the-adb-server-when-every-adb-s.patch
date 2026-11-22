@@ -1,0 +1,138 @@
+From 5a8d9e34dafef43333da62228b777553f6841fc0 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 17 Nov 2026 15:28:33 +0100
+Subject: [PATCH 107/116] MAS local: do not ask the adb server when every adb
+ speaks one protocol
+
+AdbInterface::adbPath() asks the adb server for its protocol version on
+every call to pick the matching adb. The call runs on the caller's thread,
+often the UI thread, and on Windows a connect to a stopped server takes a
+second or two, so each title-bar volume command could stall the window.
+
+When all found adb executables report the same protocol the answer cannot
+change the pick, so take the first one without asking.
+
+Refs ModAVD/ModAVD#226
+
+Change-Id: Icd17ea235aa6bff6eecec3ea96c014e020f495c9
+---
+ .../emulation/control/TestAdbInterface.h      |  9 +++-
+ .../emulation/control/adb/AdbInterface.cpp    | 16 +++++++
+ .../control/adb/AdbInterface_unittest.cpp     | 45 +++++++++++++++++++
+ 3 files changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/android/emu/adb/interface/include/android/emulation/control/TestAdbInterface.h b/android/emu/adb/interface/include/android/emulation/control/TestAdbInterface.h
+index 1f4f9b2a0..e85a76310 100644
+--- a/android/emu/adb/interface/include/android/emulation/control/TestAdbInterface.h
++++ b/android/emu/adb/interface/include/android/emulation/control/TestAdbInterface.h
+@@ -46,12 +46,19 @@ public:
+ 
+ class FakeAdbDaemon : public AdbDaemon {
+  public:
+-    Optional<int> getProtocolVersion() override { return mVersion; }
++    Optional<int> getProtocolVersion() override {
++        ++mQueries;
++        return mVersion;
++    }
+ 
+     void setProtocolVersion(Optional<int> version) { mVersion = version; }
+ 
++    // How often the daemon was asked for its version.
++    int queries() const { return mQueries; }
++
+  private:
+     Optional<int> mVersion;
++    int mQueries = 0;
+ };
+ }  // namespace emulation
+ }  // namespace android
+diff --git a/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp b/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp
+index 19564b418..48d3ff3c1 100644
+--- a/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp
++++ b/android/emu/adb/interface/src/android/emulation/control/adb/AdbInterface.cpp
+@@ -15,6 +15,7 @@
+ #include "android/emulation/control/adb/AdbInterface.h"
+ 
+ #include <assert.h>    // for assert
++#include <algorithm>   // for all_of, sort
+ #include <fcntl.h>     // for O_CREAT, O_EXCL, O_RDONLY
+ #include <inttypes.h>  // for PRId64
+ #include <stdint.h>    // for int64_t
+@@ -467,6 +468,21 @@ void AdbInterfaceImpl::selectAdbPath() {
+     Optional<int> adbVersion;
+     std::string adbPath;
+ 
++    // MAS local: when every install speaks the same protocol the daemon
++    // cannot change the pick, so do not ask it. Asking connects to the adb
++    // server on the caller's thread (often the UI thread), and a connect to a
++    // stopped server on Windows takes a second or two.
++    const auto& first = mAvailableAdbInstalls.front();
++    if (std::all_of(mAvailableAdbInstalls.begin(), mAvailableAdbInstalls.end(),
++                    [&first](const AdbEntry& entry) {
++                        return entry.second == first.second;
++                    })) {
++        mAutoAdbPath = first.first;
++        mAdbVersionCurrent =
++                first.second ? *first.second >= kMinAdbProtocol : false;
++        return;
++    }
++
+     // Maybe we can find one matching the current active version.
+     // Even if this might be an ancient adb version.
+     Optional<int> daemon = mDaemon->getProtocolVersion();
+diff --git a/android/emu/adb/interface/test/android/emulation/control/adb/AdbInterface_unittest.cpp b/android/emu/adb/interface/test/android/emulation/control/adb/AdbInterface_unittest.cpp
+index 82beee94f..3b215ba03 100644
+--- a/android/emu/adb/interface/test/android/emulation/control/adb/AdbInterface_unittest.cpp
++++ b/android/emu/adb/interface/test/android/emulation/control/adb/AdbInterface_unittest.cpp
+@@ -248,6 +248,51 @@ TEST_F(AdbInterfaceTest, selectMatchingAdb) {
+ 
+     daemon->setProtocolVersion(android::base::makeOptional(2));
+     EXPECT_EQ("v2", adb->adbPath());
++    // Different protocols: the daemon decides.
++    EXPECT_GT(daemon->queries(), 0);
++}
++
++TEST_F(AdbInterfaceTest, sameProtocolDoesNotAskDaemon) {
++    auto daemon = new FakeAdbDaemon();
++    auto locator = new StaticAdbLocator({{"a", 41}, {"b", 41}});
++    auto adb = AdbInterface::Builder()
++                       .setLooper(mLooper)
++                       .setAdbLocator(locator)
++                       .setAdbDaemon(daemon)
++                       .build();
++
++    daemon->setProtocolVersion(android::base::makeOptional(41));
++    EXPECT_EQ("a", adb->adbPath());
++    EXPECT_EQ("a", adb->adbPath());
++    EXPECT_TRUE(adb->isAdbVersionCurrent());
++    EXPECT_EQ(0, daemon->queries());
++}
++
++TEST_F(AdbInterfaceTest, sameStaleProtocolIsNotCurrent) {
++    auto daemon = new FakeAdbDaemon();
++    auto locator = new StaticAdbLocator({{"a", 31}, {"b", 31}});
++    auto adb = AdbInterface::Builder()
++                       .setLooper(mLooper)
++                       .setAdbLocator(locator)
++                       .setAdbDaemon(daemon)
++                       .build();
++
++    EXPECT_EQ("a", adb->adbPath());
++    EXPECT_FALSE(adb->isAdbVersionCurrent());
++    EXPECT_EQ(0, daemon->queries());
++}
++
++TEST_F(AdbInterfaceTest, minimumProtocolIsCurrent) {
++    auto daemon = new FakeAdbDaemon();
++    auto locator = new StaticAdbLocator({{"a", 32}});
++    auto adb = AdbInterface::Builder()
++                       .setLooper(mLooper)
++                       .setAdbLocator(locator)
++                       .setAdbDaemon(daemon)
++                       .build();
++
++    EXPECT_EQ("a", adb->adbPath());
++    EXPECT_TRUE(adb->isAdbVersionCurrent());
+ }
+ 
+ TEST_F(AdbInterfaceTest, useSerialNumberFromAgent) {

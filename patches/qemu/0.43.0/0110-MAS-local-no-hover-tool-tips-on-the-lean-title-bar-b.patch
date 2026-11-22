@@ -1,0 +1,149 @@
+From 0bb19e599a66c71d0ffbbbdadad52c1c12c9c5b1 Mon Sep 17 00:00:00 2001
+From: qiyinxi <qiyinxi@foxmail.com>
+Date: Tue, 17 Nov 2026 16:29:10 +0100
+Subject: [PATCH 110/116] MAS local: no hover tool tips on the lean title bar
+ buttons
+
+The buttons' icons say what they are, and the small tip under the
+pointer got in the way (screenshot, volume, back, home, minimize,
+maximize / restore, close). Their accessible names stay, so screen
+readers and UI Automation still find them. A greyed-out volume button
+still says why on hover. The maximize button's own tip timer (the frame,
+not Qt, sees the mouse there) goes with it.
+
+Refs ModAVD/ModAVD#231
+Refs ModAVD/ModAVD#226
+
+Change-Id: Ib0e9c230686f97e9835a6e64ef02ac2f1b936e7d
+---
+ .../src/android/skin/qt/lean-title-bar.cpp    | 35 +++----------------
+ .../src/android/skin/qt/lean-title-bar.h      |  7 ++--
+ 2 files changed, 7 insertions(+), 35 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+index 4b4255b95..b12449b05 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.cpp
+@@ -129,13 +129,6 @@ LeanTitleBar::LeanTitleBar(QWidget* window, bool volumeShown)
+         }
+     }
+ 
+-    // The tool tip of the maximize / restore button while the window sees
+-    // the mouse over it: Qt shows none for a widget it gets no mouse events
+-    // for.
+-    mMaximizeTipTimer.setSingleShot(true);
+-    connect(&mMaximizeTipTimer, &QTimer::timeout, this,
+-            &LeanTitleBar::showMaximizeToolTip);
+-
+     mWindow->installEventFilter(this);
+     updateTitle();
+     updateIcon();
+@@ -152,7 +145,8 @@ QPushButton* LeanTitleBar::addButton(const char* icon,
+     // The dark theme's icons are drawn light.
+     button->setIcon(QIcon(QStringLiteral(":/dark/") + QLatin1String(icon)));
+     button->setIconSize(QSize(iconSize, iconSize));
+-    button->setToolTip(tip);
++    // No hover tool tip on the title bar buttons (the icons say it); the
++    // name is still there for screen readers and UI Automation.
+     button->setAccessibleName(tip);
+     return button;
+ }
+@@ -191,9 +185,9 @@ void LeanTitleBar::setVolumeAvailable(bool available, const QString& reason) {
+         return;
+     }
+     mVolume->setEnabled(mButtonsEnabled && available);
+-    const QString tip = available ? QString::fromUtf8("音量") : reason;
+-    mVolume->setToolTip(tip);
+-    mVolume->setAccessibleName(tip);
++    // Only a greyed-out button says why on hover.
++    mVolume->setToolTip(available ? QString() : reason);
++    mVolume->setAccessibleName(available ? QString::fromUtf8("音量") : reason);
+ }
+ 
+ void LeanTitleBar::showScreenshotNotice(const QString& text) {
+@@ -223,12 +217,8 @@ void LeanTitleBar::updateMaximizeButton() {
+     // The dark theme's icons are drawn light, as in addButton().
+     mMaximize->setIcon(QIcon(restore ? QStringLiteral(":/dark/window_restore")
+                                      : QStringLiteral(":/dark/window_maximize")));
+-    mMaximize->setToolTip(tip);
+     // Screen readers and UI Automation hear of the new name.
+     mMaximize->setAccessibleName(tip);
+-    if (QToolTip::isVisible() && mMaximizeHot) {
+-        showMaximizeToolTip();
+-    }
+ }
+ 
+ void LeanTitleBar::setMaximizeButtonMouse(bool hot, bool down) {
+@@ -242,15 +232,6 @@ void LeanTitleBar::setMaximizeButtonMouse(bool hot, bool down) {
+         // A style sheet reads a dynamic property only when polished again.
+         mMaximize->style()->unpolish(mMaximize);
+         mMaximize->style()->polish(mMaximize);
+-        if (hot) {
+-            mMaximizeTipTimer.start(
+-                    style()->styleHint(QStyle::SH_ToolTip_WakeUpDelay));
+-        } else {
+-            mMaximizeTipTimer.stop();
+-            if (QToolTip::isVisible() && QToolTip::text() == mMaximize->toolTip()) {
+-                QToolTip::hideText();
+-            }
+-        }
+     }
+     if (down != mMaximize->isDown()) {
+         mMaximize->setDown(down);
+@@ -258,12 +239,6 @@ void LeanTitleBar::setMaximizeButtonMouse(bool hot, bool down) {
+     mMaximize->update();
+ }
+ 
+-void LeanTitleBar::showMaximizeToolTip() {
+-    if (mMaximizeHot) {
+-        QToolTip::showText(QCursor::pos(), mMaximize->toolTip(), mMaximize);
+-    }
+-}
+-
+ bool LeanTitleBar::eventFilter(QObject* watched, QEvent* event) {
+     if (watched == mWindow) {
+         if (event->type() == QEvent::WindowStateChange ||
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+index 2a3d02c28..40371d231 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/lean-title-bar.h
+@@ -14,7 +14,6 @@
+ #pragma once
+ 
+ #include <QString>
+-#include <QTimer>
+ #include <QWidget>
+ 
+ #include <functional>
+@@ -49,7 +48,7 @@ public:
+     // Null without sound.
+     QPushButton* volumeButton() const { return mVolume; }
+     // Whether the volume button can be used: without adb it is disabled
+-    // and its tool tip says |reason|.
++    // and its tool tip says |reason| (the only title bar button with one).
+     void setVolumeAvailable(bool available, const QString& reason);
+     bool volumeAvailable() const { return mVolumeAvailable; }
+     // A short note under the screenshot button that goes away by itself, as
+@@ -69,7 +68,7 @@ public:
+     void updateMaximizeButton();
+     // The mouse over the maximize / restore button when the window, not Qt,
+     // sees it (WindowsLeanFrame): highlighted while |hot|, pressed while
+-    // |down|, with its tool tip after a while.
++    // |down|.
+     void setMaximizeButtonMouse(bool hot, bool down);
+ 
+ protected:
+@@ -80,7 +79,6 @@ private:
+     QPushButton* addButton(const char* icon, const QString& tip, int iconSize);
+     void updateTitle();
+     void updateIcon();
+-    void showMaximizeToolTip();
+ 
+     QWidget* mWindow;
+     QLabel* mIcon = nullptr;
+@@ -99,5 +97,4 @@ private:
+     // Whether the button shows restore.
+     bool mShowsRestore = false;
+     bool mMaximizeHot = false;
+-    QTimer mMaximizeTipTimer;
+ };
