@@ -1,0 +1,652 @@
+From 3cfa9cab40402e3461af4c22b94d527f478e4cb0 Mon Sep 17 00:00:00 2001
+From: ClozyA <133191303+ClozyA@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 09:35:03 +0800
+Subject: [PATCH] MAS local: keep window size and position across lean
+ rotations
+
+Repeatedly toggling the lean title bar's rotate button shrank the
+window by 1-2 px each turn and let its position drift when one
+orientation had to be pushed onto the screen (ModAVD#249):
+
+- EmulatorQtWindow::doResize() scaled through QSize::scaled(...,
+  Qt::KeepAspectRatio), which truncates to integers, and then took
+  min(widthScale, heightScale). Combined with skin_window_resize()'s
+  ceil(layout * scale), a 1080p window at 1098x618 lost 1-2 px on
+  every doResize round-trip (1098x650 -> 617x1129 -> ... -> 1093x647).
+  Compute the floating-point scale directly in lean_window::scaleToFit()
+  with an IEEE-754 ceil guard, and skip redundant doResize() calls in
+  EmulatorContainer when guestAreaSize() already matches the guest
+  widget size.
+- Remember the pre-rotation frame and guest size in
+  lean_window::RotationMemory across lean turns so turning back
+  restores both the previous size (even if the other orientation was
+  shrunk by fitInto() to fit the screen) and the previous position
+  (even if the other orientation was clamped to a screen edge). Moving
+  the window between turns forgets the saved position; resizing,
+  maximizing or snapping clears the saved state.
+
+Refs ModAVD/ModAVD#249
+---
+ .../android/skin/qt/emulator-container.cpp    |  10 +-
+ .../android/skin/qt/emulator-qt-window.cpp    |  78 ++++---
+ .../src/android/skin/qt/emulator-qt-window.h  |  11 +-
+ .../include/android/lean-window-frame.h       |  50 +++++
+ .../src/android/lean-window-frame.cpp         | 100 +++++++++
+ .../android/lean-window-frame_unittest.cpp    | 203 ++++++++++++++++++
+ 6 files changed, 413 insertions(+), 39 deletions(-)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 917f314..3ec8ddf 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -338,7 +338,10 @@ bool EmulatorContainer::event(QEvent* e) {
+ #endif
+             // clear() deallocates internal buffer, but we need it.
+             mEventBuffer.erase(mEventBuffer.begin(), mEventBuffer.end());
+-            mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
++            const QSize area = mEmulatorWindow->guestAreaSize();
++            if (area != mEmulatorWindow->size()) {
++                mEmulatorWindow->doResize(area);
++            }
+ 
+             // Kill the resize timer to avoid double resizes.
+             stopResizeTimer();
+@@ -833,7 +836,10 @@ void EmulatorContainer::slot_resizeDone() {
+     // are held down. If there are, then the user must not be done resizing
+     // yet.
+     if (numHeldMouseButtons() == 0) {
+-        mEmulatorWindow->doResize(mEmulatorWindow->guestAreaSize());
++        const QSize area = mEmulatorWindow->guestAreaSize();
++        if (area != mEmulatorWindow->size()) {
++            mEmulatorWindow->doResize(area);
++        }
+     } else {
+         startResizeTimer();
+     }
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+index 778dab4..e04ea17 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.cpp
+@@ -2881,6 +2881,7 @@ void EmulatorQtWindow::resizeContainerForGuest(const QSize& guest,
+         // Maximized or snapped: the window stays, the turned guest screen is
+         // fitted into it below.
+         mLeanRotation.pending = false;
++        mLeanRotationMemory.clear();
+     }
+     // The largest guest screen in the window touches two opposite edges.
+     const QSize bars = area - guest;
+@@ -2910,17 +2911,24 @@ void EmulatorQtWindow::resizeContainerForGuest(const QSize& guest,
+ 
+ void EmulatorQtWindow::prepareLeanRotation() {
+     mLeanRotation = LeanRotation();
+-    if (!ToolWindow::inWindowNav() || mInZoomMode) {
++    if (!ToolWindow::inWindowNav() || mInZoomMode ||
++        mContainer.heldBySystem()) {
++        mLeanRotationMemory.clear();
+         return;
+     }
+     mLeanRotation.pending = true;
+     mLeanRotation.frameBefore = mContainer.frameGeometry();
+     mLeanRotation.wideBefore = width() > height();
++    const QRect& before = mLeanRotation.frameBefore;
++    mLeanRotationMemory.beginTurn(
++            {before.left(), before.top(), before.left() + before.width(),
++             before.top() + before.height()},
++            {width(), height()}, mLeanRotation.wideBefore);
+ }
+ 
+ void EmulatorQtWindow::placeAfterLeanRotation(const QSize& guest) {
+-    if (!mLeanRotation.pending ||
+-        (guest.width() > guest.height()) == mLeanRotation.wideBefore) {
++    const bool targetWide = guest.width() > guest.height();
++    if (!mLeanRotation.pending || targetWide == mLeanRotation.wideBefore) {
+         // Not the rotate button's turn, or the guest screen has not turned
+         // yet.
+         return;
+@@ -2931,12 +2939,21 @@ void EmulatorQtWindow::placeAfterLeanRotation(const QSize& guest) {
+                         r.top() + r.height()};
+     };
+     const QRect before = mLeanRotation.frameBefore;
+-    QScreen* screen = QGuiApplication::screenAt(before.center());
++    QScreen* screen = nullptr;
++    if (mLeanRotationMemory.restorePosition) {
++        const lw::Rect& r = mLeanRotationMemory.restoreFrame;
++        screen = QGuiApplication::screenAt(
++                QPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2));
++    }
++    if (!screen) {
++        screen = QGuiApplication::screenAt(before.center());
++    }
+     if (!screen) {
+         screen = mContainer.screen();
+     }
+     if (!screen) {
+         mLeanRotation.pending = false;
++        mLeanRotationMemory.clear();
+         return;
+     }
+     const lw::Rect work = toRect(screen->availableGeometry());
+@@ -2945,27 +2962,29 @@ void EmulatorQtWindow::placeAfterLeanRotation(const QSize& guest) {
+     const QSize margins =
+             mContainer.frameGeometry().size() - mContainer.geometry().size();
+     const QSize around = ToolWindow::windowChrome() + margins;
+-    const lw::Size fitted = lw::fitInto({guest.width(), guest.height()},
+-                                        {around.width(), around.height()},
+-                                        work);
+-    if (!mLeanRotation.shrunk &&
+-        (fitted.width < guest.width() || fitted.height < guest.height())) {
+-        // Too large for the screen now that it is turned: scale it down to
+-        // fit, which comes back here with the smaller guest screen.
+-        mLeanRotation.shrunk = true;
+-        const QSize smaller(fitted.width, fitted.height);
+-        QTimer::singleShot(0, this, [this, smaller] {
++    const lw::Size wanted = mLeanRotationMemory.targetGuest(
++            targetWide, {guest.width(), guest.height()},
++            {around.width(), around.height()}, work);
++    if (!mLeanRotation.resized &&
++        (wanted.width != guest.width() || wanted.height != guest.height())) {
++        // Either too large for the screen now that it is turned, or turning
++        // back to a remembered size: scale once, which comes back here with
++        // the adjusted guest screen.
++        mLeanRotation.resized = true;
++        const QSize targetSize(wanted.width, wanted.height);
++        QTimer::singleShot(0, this, [this, targetSize] {
+             if (!mInZoomMode) {
+-                doResize(smaller);
++                doResize(targetSize);
+             }
+         });
+         return;
+     }
+     mLeanRotation.pending = false;
+     const QSize frame = guest + around;
+-    const lw::Rect placed = lw::placeKeepingCenter(
+-            toRect(before), frame.width(), frame.height(), work);
++    const lw::Rect placed = mLeanRotationMemory.targetFrame(
++            targetWide, toRect(before), frame.width(), frame.height(), work);
+     mContainer.move(placed.left, placed.top);
++    mLeanRotationMemory.finishTurn(placed, targetWide);
+ }
+ 
+ void EmulatorQtWindow::onScreenChanged(QScreen* newScreen) {
+@@ -3217,8 +3236,7 @@ void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
+     int originalWidth = mBackingSurface->bitmap->size().width();
+     int originalHeight = mBackingSurface->bitmap->size().height();
+ 
+-    auto newSize = QSize(originalWidth, originalHeight)
+-                           .scaled(size, Qt::KeepAspectRatio);
++    QSize target = size;
+ 
+     // Make sure the new size is always a little bit smaller than the
+     // screen to prevent keyboard shortcut scaling from making a window
+@@ -3231,29 +3249,23 @@ void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
+ 
+         const QSize screenArea =
+                 screenDimensions.size() - ToolWindow::windowChrome();
+-        if (newSize.width() > screenArea.width() ||
+-            newSize.height() > screenArea.height()) {
+-            newSize.scale(screenArea, Qt::KeepAspectRatio);
+-        }
++        target = target.boundedTo(screenArea);
+     }
+ 
+-    double widthScale = (double)newSize.width() / (double)originalWidth;
+-    double heightScale = (double)newSize.height() / (double)originalHeight;
+-
+-    // On HiDPI screen, newSize is in Qt logical pixel, whle originalWidth/
++    // On HiDPI screen, target is in Qt logical pixel, while originalWidth/
+     // originalHeight are in actual pixel (logical pixel * pixel ratio).
+-    // When HiDPI scaling is disabled, we need to multiply the pixel ratio to
+-    // widthScale/heightScale to make the scale correct.
++    // When HiDPI scaling is disabled, scaleToFit multiplies by the pixel ratio
++    // so skin_window_resize's division by dpr lands within target.
++    double dpr = 1.0;
+     if (getConsoleAgents()
+                 ->settings->android_cmdLineOptions()
+                 ->no_hidpi_scaling) {
+-        double dpr = 1.0;
+         slot_getDevicePixelRatio(&dpr);
+-        widthScale *= dpr;
+-        heightScale *= dpr;
+     }
+ 
+-    simulateSetScale(std::max(.2, std::min(widthScale, heightScale)));
++    simulateSetScale(android::lean_window::scaleToFit(
++            {originalWidth, originalHeight}, {target.width(), target.height()},
++            dpr));
+ 
+     maskWindowFrame();
+ #ifdef __APPLE__
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+index 68331e4..d6b77b5 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-qt-window.h
+@@ -19,6 +19,7 @@
+ #include "android/emulation/control/ApkInstaller.h"
+ #include "android/emulation/control/FilePusher.h"
+ #include "android/emulation/control/ScreenCapturer.h"
++#include "android/lean-window-frame.h"
+ #include "android/metrics/PeriodicReporter.h"
+ #include "android/settings-agent.h"
+ #include "android/skin/event.h"
+@@ -745,16 +746,18 @@ private:
+     // The room the guest screen was last asked to fit into again; see
+     // resizeContainerForGuest().
+     QSize mRefitGuestArea;
+-    // The rotate button's turn (ModAVD#225) waiting for the turned guest
+-    // screen: the window's frame before it, whether the guest screen was wider
+-    // than high then, and whether it has already been shrunk to fit.
++    // The rotate button's turn (ModAVD#225, ModAVD#249) waiting for the turned
++    // guest screen: the window's frame before it, whether the guest screen was
++    // wider than high then, and whether it has already been resized once to
++    // fit or restore the remembered size.
+     struct LeanRotation {
+         bool pending = false;
+         QRect frameBefore;
+         bool wideBefore = false;
+-        bool shrunk = false;
++        bool resized = false;
+     };
+     LeanRotation mLeanRotation;
++    android::lean_window::RotationMemory mLeanRotationMemory;
+     // Some events may arrive after closing the main window (e.g. async screen
+     // redraw requests); we want to ignore those when exiting.
+     bool mClosed = false;
+diff --git a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+index 3912e71..958c844 100644
+--- a/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
++++ b/android/android-ui/modules/aemu-ui-window/include/android/lean-window-frame.h
+@@ -162,5 +162,55 @@ Size fitInto(const Size& guest, const Size& chrome, const Rect& work);
+ Rect placeKeepingCenter(const Rect& before, int width, int height,
+                         const Rect& work);
+ 
++// The scale (>= 0.2) that makes skin_window_resize's ceil(original * scale)
++// fit inside |target| without intermediate integer truncation (ModAVD#249).
++// With |dpr| > 1.0 (when -no-hidpi-scaling divides ceil(original * scale) by
++// |dpr| and ceils again), returns the un-divided scale.
++double scaleToFit(const Size& original, const Size& target, double dpr = 1.0);
++
++// The frame and guest size remembered across turns of the lean window's
++// rotate button (ModAVD#249): turning back restores what was there before
++// instead of keeping a clamped position or a size shrunk to fit the other
++// orientation.
++struct RotationMemory {
++    // What the last completed turn left the window at; used on the next turn
++    // to tell whether the user moved or resized the window in between.
++    bool hasPlaced = false;
++    bool placedWide = false;
++    Rect placedFrame = {0, 0, 0, 0};
++
++    // The frame and guest size of the other orientation before we turned away
++    // from it.
++    bool hasSaved = false;
++    bool savedWide = false;
++    Rect savedFrame = {0, 0, 0, 0};
++    Size savedGuest = {0, 0};
++
++    // State for the turn currently in flight (between beginTurn and
++    // finishTurn).
++    bool restoreSize = false;
++    Size restoreGuest = {0, 0};
++    bool restorePosition = false;
++    Rect restoreFrame = {0, 0, 0, 0};
++    bool pendingWide = false;
++    Rect pendingFrame = {0, 0, 0, 0};
++    Size pendingGuest = {0, 0};
++
++    void beginTurn(const Rect& currentFrame,
++                   const Size& currentGuest,
++                   bool wide);
++    Size targetGuest(bool targetWide,
++                     const Size& guest,
++                     const Size& around,
++                     const Rect& work) const;
++    Rect targetFrame(bool targetWide,
++                     const Rect& before,
++                     int frameWidth,
++                     int frameHeight,
++                     const Rect& work) const;
++    void finishTurn(const Rect& finalFrame, bool wide);
++    void clear();
++};
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+index e568ebe..e3b2a83 100644
+--- a/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
++++ b/android/android-ui/modules/aemu-ui-window/src/android/lean-window-frame.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdlib>
+ 
+ namespace android {
+ namespace lean_window {
+@@ -213,5 +214,104 @@ Rect placeKeepingCenter(const Rect& before, int width, int height,
+     return {left, top, left + width, top + height};
+ }
+ 
++double scaleToFit(const Size& original, const Size& target, double dpr) {
++    constexpr double kMinScale = 0.2;
++    if (original.width <= 0 || original.height <= 0 || target.width <= 0 ||
++        target.height <= 0 || dpr <= 0.0) {
++        return kMinScale;
++    }
++    const double maxW = dpr > 1.0 ? std::floor(target.width * dpr)
++                                  : static_cast<double>(target.width);
++    const double maxH = dpr > 1.0 ? std::floor(target.height * dpr)
++                                  : static_cast<double>(target.height);
++    double scale = std::min(maxW / original.width, maxH / original.height);
++    if (scale <= kMinScale) {
++        return kMinScale;
++    }
++    const auto fits = [&](double s) {
++        double w = std::ceil(original.width * s);
++        double h = std::ceil(original.height * s);
++        if (dpr > 1.0) {
++            w = std::ceil(w / dpr);
++            h = std::ceil(h / dpr);
++        }
++        return static_cast<int>(w) <= target.width &&
++               static_cast<int>(h) <= target.height;
++    };
++    for (int i = 0; i < 4 && scale > kMinScale && !fits(scale); ++i) {
++        scale = std::nextafter(scale, 0.0);
++    }
++    return std::max(kMinScale, scale);
++}
++
++void RotationMemory::beginTurn(const Rect& currentFrame,
++                               const Size& currentGuest,
++                               bool wide) {
++    constexpr int kTolerance = 2;
++    const auto close = [](int a, int b) {
++        return std::abs(a - b) <= kTolerance;
++    };
++    const bool sameAsPlaced = hasPlaced && placedWide == wide;
++    const bool sameSize =
++            sameAsPlaced && close(currentFrame.width(), placedFrame.width()) &&
++            close(currentFrame.height(), placedFrame.height());
++    const bool samePos = sameSize && close(currentFrame.left, placedFrame.left) &&
++                         close(currentFrame.top, placedFrame.top);
++    if (hasSaved && savedWide == !wide && sameSize) {
++        restoreSize = true;
++        restoreGuest = savedGuest;
++        restorePosition = samePos;
++        restoreFrame = samePos ? savedFrame : Rect{0, 0, 0, 0};
++    } else {
++        restoreSize = false;
++        restoreGuest = {0, 0};
++        restorePosition = false;
++        restoreFrame = {0, 0, 0, 0};
++    }
++    pendingWide = wide;
++    pendingFrame = currentFrame;
++    pendingGuest = currentGuest;
++}
++
++Size RotationMemory::targetGuest(bool targetWide,
++                                 const Size& guest,
++                                 const Size& around,
++                                 const Rect& work) const {
++    const Size desired = (restoreSize && hasSaved && savedWide == targetWide)
++                                 ? restoreGuest
++                                 : guest;
++    return fitInto(desired, around, work);
++}
++
++Rect RotationMemory::targetFrame(bool targetWide,
++                                 const Rect& before,
++                                 int frameWidth,
++                                 int frameHeight,
++                                 const Rect& work) const {
++    const Rect anchor =
++            (restorePosition && hasSaved && savedWide == targetWide)
++                    ? restoreFrame
++                    : before;
++    return placeKeepingCenter(anchor, frameWidth, frameHeight, work);
++}
++
++void RotationMemory::finishTurn(const Rect& finalFrame, bool wide) {
++    hasPlaced = true;
++    placedWide = wide;
++    placedFrame = finalFrame;
++
++    hasSaved = true;
++    savedWide = pendingWide;
++    savedFrame = pendingFrame;
++    savedGuest = pendingGuest;
++
++    restoreSize = false;
++    restorePosition = false;
++}
++
++void RotationMemory::clear() {
++    *this = RotationMemory();
++}
++
+ }  // namespace lean_window
+ }  // namespace android
+diff --git a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+index f522f8a..78fec3c 100644
+--- a/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
++++ b/android/android-ui/modules/aemu-ui-window/test/android/lean-window-frame_unittest.cpp
+@@ -13,6 +13,7 @@
+ // limitations under the License.
+ #include "android/lean-window-frame.h"
+ 
++#include <cmath>
+ #include <gtest/gtest.h>
+ 
+ namespace lw = android::lean_window;
+@@ -563,3 +564,205 @@ TEST(LeanWindowFrame, PlaceKeepingCenterOddDifference) {
+     EXPECT_EQ(shrink.left, 100);
+     EXPECT_EQ(shrink.top, 100);
+ }
++
++TEST(LeanWindowFrame, ScaleToFitDoesNotShrinkAcrossRoundTrips) {
++    // 1080p guest starting at 1098x618 (1098x650 with a 32 px title bar,
++    // ModAVD#249): alternating portrait and landscape keeps the exact size.
++    int w = 1098;
++    int h = 618;
++    for (int i = 0; i < 6; ++i) {
++        const lw::Size orig = (i % 2 == 0) ? lw::Size{1080, 1920}
++                                           : lw::Size{1920, 1080};
++        const lw::Size target = {h, w};
++        const double scale = lw::scaleToFit(orig, target);
++        w = static_cast<int>(std::ceil(orig.width * scale));
++        h = static_cast<int>(std::ceil(orig.height * scale));
++        EXPECT_EQ(w, target.width);
++        EXPECT_EQ(h, target.height);
++    }
++    EXPECT_EQ(w, 1098);
++    EXPECT_EQ(h, 618);
++}
++
++TEST(LeanWindowFrame, ScaleToFitNeverOvershootsUnderCeil) {
++    // Cases where target / original can round up by 1 ULP under IEEE-754 and
++    // would overshoot by 1 px under skin_window_resize's ceil().
++    for (const lw::Size target : {lw::Size{481, 271}, lw::Size{496, 279},
++                                  lw::Size{511, 288}, lw::Size{1098, 618}}) {
++        const double scale = lw::scaleToFit({1920, 1080}, target);
++        EXPECT_LE(static_cast<int>(std::ceil(1920 * scale)), target.width);
++        EXPECT_LE(static_cast<int>(std::ceil(1080 * scale)), target.height);
++    }
++    // With -no-hidpi-scaling (dpr > 1), ceil(ceil(original * scale) / dpr)
++    // stays within target too.
++    for (const double dpr : {1.25, 1.5, 1.75, 2.0}) {
++        const double scale = lw::scaleToFit({1920, 1080}, {1098, 618}, dpr);
++        const int w = static_cast<int>(
++                std::ceil(std::ceil(1920 * scale) / dpr));
++        const int h = static_cast<int>(
++                std::ceil(std::ceil(1080 * scale) / dpr));
++        EXPECT_LE(w, 1098);
++        EXPECT_LE(h, 618);
++    }
++    // Floor at 0.2 and guard invalid inputs.
++    EXPECT_DOUBLE_EQ(lw::scaleToFit({1920, 1080}, {100, 100}), 0.2);
++    EXPECT_DOUBLE_EQ(lw::scaleToFit({0, 1080}, {1098, 618}), 0.2);
++}
++
++TEST(LeanWindowFrame, RotationMemoryRestoresClampedPosition) {
++    // Landscape 1098x650 at (100, 100) turned to portrait 618x1130 gets pushed
++    // to top=0; turning back restores (100, 100) instead of drifting down
++    // (ModAVD#249).
++    const lw::Rect work = {0, 0, 2560, 1400};
++    const lw::Size around = {0, 32};
++    const lw::Rect landStart = {100, 100, 1198, 750};
++    const lw::Size landGuest = {1098, 618};
++
++    lw::RotationMemory mem;
++    mem.beginTurn(landStart, landGuest, true);
++    const lw::Size portGuest =
++            mem.targetGuest(false, {618, 1098}, around, work);
++    EXPECT_EQ(portGuest.width, 618);
++    EXPECT_EQ(portGuest.height, 1098);
++    const lw::Rect portFrame =
++            mem.targetFrame(false, landStart, 618, 1130, work);
++    EXPECT_EQ(portFrame.top, 0);
++    mem.finishTurn(portFrame, false);
++
++    // Turn back without moving or resizing portrait.
++    mem.beginTurn(portFrame, portGuest, false);
++    const lw::Size backGuest =
++            mem.targetGuest(true, {1098, 618}, around, work);
++    EXPECT_EQ(backGuest.width, 1098);
++    EXPECT_EQ(backGuest.height, 618);
++    const lw::Rect backFrame =
++            mem.targetFrame(true, portFrame, 1098, 650, work);
++    EXPECT_EQ(backFrame.left, landStart.left);
++    EXPECT_EQ(backFrame.top, landStart.top);
++    EXPECT_EQ(backFrame.right, landStart.right);
++    EXPECT_EQ(backFrame.bottom, landStart.bottom);
++    mem.finishTurn(backFrame, true);
++}
++
++TEST(LeanWindowFrame, RotationMemoryRestoresShrunkSizeAndPosition) {
++    // On a 1920x1040 work area, turning 1098x650 landscape at (100, 100) to
++    // portrait shrinks portrait to 567x1008 (+32 = 1040). Turning back must
++    // restore both 1098x618 and (100, 100), and repeated turns stay steady.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Size around = {0, 32};
++    const lw::Rect landStart = {100, 100, 1198, 750};
++    const lw::Size landGuest = {1098, 618};
++
++    lw::RotationMemory mem;
++    lw::Rect curFrame = landStart;
++    lw::Size curGuest = landGuest;
++    for (int i = 0; i < 3; ++i) {
++        // Landscape -> Portrait.
++        mem.beginTurn(curFrame, curGuest, true);
++        const lw::Size portGuest = mem.targetGuest(
++                false, {curGuest.height, curGuest.width}, around, work);
++        EXPECT_EQ(portGuest.width, 567);
++        EXPECT_EQ(portGuest.height, 1008);
++        const lw::Rect portFrame = mem.targetFrame(
++                false, curFrame, portGuest.width, portGuest.height + 32, work);
++        EXPECT_EQ(portFrame.top, 0);
++        mem.finishTurn(portFrame, false);
++
++        // Portrait -> Landscape (skin starts at portrait's shrunk scale).
++        mem.beginTurn(portFrame, portGuest, false);
++        const lw::Size backGuest = mem.targetGuest(
++                true, {portGuest.height, portGuest.width}, around, work);
++        EXPECT_EQ(backGuest.width, 1098);
++        EXPECT_EQ(backGuest.height, 618);
++        const lw::Rect backFrame = mem.targetFrame(
++                true, portFrame, backGuest.width, backGuest.height + 32, work);
++        EXPECT_EQ(backFrame.left, 100);
++        EXPECT_EQ(backFrame.top, 100);
++        EXPECT_EQ(backFrame.width(), 1098);
++        EXPECT_EQ(backFrame.height(), 650);
++        mem.finishTurn(backFrame, true);
++        curFrame = backFrame;
++        curGuest = backGuest;
++    }
++}
++
++TEST(LeanWindowFrame, RotationMemoryDropsPositionAfterUserMove) {
++    // Moving the portrait window forgets the old landscape position (so turning
++    // back stays near where the user put it), while keeping the unshrunk size.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Size around = {0, 32};
++    const lw::Rect landStart = {100, 100, 1198, 750};
++
++    lw::RotationMemory mem;
++    mem.beginTurn(landStart, {1098, 618}, true);
++    const lw::Size portGuest =
++            mem.targetGuest(false, {618, 1098}, around, work);
++    const lw::Rect portPlaced = mem.targetFrame(
++            false, landStart, portGuest.width, portGuest.height + 32, work);
++    mem.finishTurn(portPlaced, false);
++
++    // User drags portrait right by 700 px without resizing.
++    const lw::Rect portMoved = {portPlaced.left + 700, portPlaced.top,
++                                portPlaced.right + 700, portPlaced.bottom};
++    mem.beginTurn(portMoved, portGuest, false);
++    const lw::Size backGuest = mem.targetGuest(
++            true, {portGuest.height, portGuest.width}, around, work);
++    EXPECT_EQ(backGuest.width, 1098);
++    EXPECT_EQ(backGuest.height, 618);
++    const lw::Rect backFrame =
++            mem.targetFrame(true, portMoved, 1098, 650, work);
++    const lw::Rect centered =
++            lw::placeKeepingCenter(portMoved, 1098, 650, work);
++    EXPECT_EQ(backFrame.left, centered.left);
++    EXPECT_EQ(backFrame.top, centered.top);
++}
++
++TEST(LeanWindowFrame, RotationMemoryForgetsAfterUserResize) {
++    // Resizing the portrait window invalidates both saved size and position.
++    const lw::Rect work = {0, 0, 1920, 1040};
++    const lw::Size around = {0, 32};
++    const lw::Rect landStart = {100, 100, 1198, 750};
++
++    lw::RotationMemory mem;
++    mem.beginTurn(landStart, {1098, 618}, true);
++    const lw::Size portGuest =
++            mem.targetGuest(false, {618, 1098}, around, work);
++    const lw::Rect portPlaced = mem.targetFrame(
++            false, landStart, portGuest.width, portGuest.height + 32, work);
++    mem.finishTurn(portPlaced, false);
++
++    // User shrinks portrait to 360x640 (+32 = 672).
++    const lw::Rect portResized = {portPlaced.left, portPlaced.top,
++                                  portPlaced.left + 360, portPlaced.top + 672};
++    mem.beginTurn(portResized, {360, 640}, false);
++    const lw::Size backGuest =
++            mem.targetGuest(true, {640, 360}, around, work);
++    EXPECT_EQ(backGuest.width, 640);
++    EXPECT_EQ(backGuest.height, 360);
++    const lw::Rect backFrame =
++            mem.targetFrame(true, portResized, 640, 392, work);
++    const lw::Rect centered =
++            lw::placeKeepingCenter(portResized, 640, 392, work);
++    EXPECT_EQ(backFrame.left, centered.left);
++    EXPECT_EQ(backFrame.top, centered.top);
++}
++
++TEST(LeanWindowFrame, RotationMemoryClearResetsState) {
++    const lw::Rect work = {0, 0, 2560, 1400};
++    const lw::Rect landStart = {100, 100, 1198, 750};
++
++    lw::RotationMemory mem;
++    mem.beginTurn(landStart, {1098, 618}, true);
++    const lw::Rect portFrame =
++            mem.targetFrame(false, landStart, 618, 1130, work);
++    mem.finishTurn(portFrame, false);
++
++    mem.clear();
++    mem.beginTurn(portFrame, {618, 1098}, false);
++    const lw::Rect backFrame =
++            mem.targetFrame(true, portFrame, 1098, 650, work);
++    const lw::Rect centered =
++            lw::placeKeepingCenter(portFrame, 1098, 650, work);
++    EXPECT_EQ(backFrame.left, centered.left);
++    EXPECT_EQ(backFrame.top, centered.top);
++}
+-- 
+2.55.0.windows.3
+
