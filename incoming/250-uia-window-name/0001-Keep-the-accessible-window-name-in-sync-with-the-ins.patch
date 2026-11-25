@@ -1,0 +1,27 @@
+From 45f579454ccd6e16983783430ad91152fefc1a3c Mon Sep 17 00:00:00 2001
+From: jinghero <44921326+jinghero@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 12:20:13 +0800
+Subject: [PATCH] Keep the accessible window name in sync with the instance
+ title
+
+Qt reads the empty icon text when the lean window is minimized, so Windows UI Automation falls back to the application name Emulator. Use the window title as the accessible name on every title change.
+
+Refs ModAVD/ModAVD#250
+---
+ .../aemu-ui-qt/src/android/skin/qt/emulator-container.cpp      | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+index 917f3141a8..c833a1132e 100644
+--- a/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
++++ b/android/android-ui/modules/aemu-ui-qt/src/android/skin/qt/emulator-container.cpp
+@@ -150,6 +150,9 @@ EmulatorContainer::EmulatorContainer(EmulatorQtWindow* window)
+             return true;
+         }();
+         (void)accessibleInstalled;
++        // Qt otherwise uses the (empty) icon text when the window is minimized.
++        connect(this, &QWidget::windowTitleChanged,
++                this, &QWidget::setAccessibleName);
+ #endif
+         // Like the system's caption buttons, the title bar's buttons show
+         // their tool tips while the window is not the active one.
