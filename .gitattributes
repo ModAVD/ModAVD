@@ -14,3 +14,6 @@ bridge/** -text
 tools/**/*.py text eol=lf
 # stage-payload.ps1 -UpdateSums 按 LF 写这份固定哈希，再按字节比有没有变
 tools/gate/payload.SHA256SUMS.txt text eol=lf
+
+# Inno Setup 官方仓库的简体中文语言文件，原样保存（CRLF），不做换行符转换
+tools/installer/ChineseSimplified.isl -text
