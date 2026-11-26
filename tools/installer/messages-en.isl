@@ -15,3 +15,4 @@ ErrOneDrive=ModAVD cannot be installed in a folder synced by OneDrive (%1): inst
 ErrExisting=ModAVD is already installed here. Please open ModAVD.exe in this folder and use Update in Settings; Setup will not overwrite it.
 ErrLeftover=This folder holds data left by an earlier ModAVD (mas-avd.json), and Setup will not overwrite it. Please choose an empty folder, or move this folder away first.
 UninstDeleteData=Also delete your instances and game data?%n%nYes: delete the whole folder %1, including all instances, game data and logs. This cannot be undone.%nNo: remove only the program and keep your instances and game data where they are.
+ErrNotEmpty=This folder already has other things in it. Please choose an empty folder or a new one, for example D:\ModAVD.

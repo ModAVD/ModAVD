@@ -15,3 +15,4 @@ ErrOneDrive=不能装在 OneDrive 同步的文件夹（%1）里：实例的磁�
 ErrExisting=这里已经装过 ModAVD。请打开里面的 ModAVD.exe，在「设置」里用「更新」；安装程序不会覆盖它。
 ErrLeftover=这里有以前留下的 ModAVD 数据（mas-avd.json），安装程序不会覆盖它。请换一个空文件夹，或者先把这个文件夹挪走。
 UninstDeleteData=要不要把实例和游戏数据也一起删掉？%n%n选「是」：删掉整个 %1，包括所有实例、游戏数据和日志，删了找不回来。%n选「否」：只删程序，实例和游戏数据留在原处。
+ErrNotEmpty=这个文件夹里已经有别的东西了。请选一个空文件夹或新文件夹，比如 D:\ModAVD。

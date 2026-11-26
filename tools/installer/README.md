@@ -22,7 +22,7 @@ pwsh -NoProfile -File tools/installer/build-installer.ps1 `
 - 不要管理员权限：卸载项写在 HKCU，快捷方式放在当前用户的开始菜单和桌面（桌面那个可以取消勾选）。
 - 推荐目录：有 D 盘就 `D:\ModAVD`，没有 D 有 E 就 `E:\ModAVD`，都没有就 `C:\ModAVD`。只算本地固定硬盘（`GetDriveType` 是 3），U 盘、光驱、网络盘不算。
 - 选目录页写明程序和实例、游戏数据都放在这里，并显示所选盘还剩多少空间。
-- 下面这些目录直接拦住，说清原因：`Program Files`、`Program Files (x86)`、`Windows`、`ProgramData` 之下；盘的根目录；路径里有非 ASCII 字符；路径超过 80 个字符；不是本地固定硬盘；OneDrive 同步目录（环境变量 `OneDrive`、`OneDriveConsumer`、`OneDriveCommercial`）之下；目录里已经有一份 ModAVD（`modavd-manifest.json`，或 `mas-avd.json` 加 `ModAVD.exe`），或者只剩以前留下的数据（`mas-avd.json`）。
+- 下面这些目录直接拦住，说清原因：`Program Files`、`Program Files (x86)`、`Windows`、`ProgramData` 之下；盘的根目录；路径里有非 ASCII 字符；路径超过 80 个字符；不是本地固定硬盘；OneDrive 同步目录（环境变量 `OneDrive`、`OneDriveConsumer`、`OneDriveCommercial`）之下；目录里已经有一份 ModAVD（`modavd-manifest.json`，或 `mas-avd.json` 加 `ModAVD.exe`），或者只剩以前留下的数据（`mas-avd.json`）；已经存在、里面放着别的东西的文件夹（要选空文件夹或新文件夹，免得卸载时「连数据一起删」把别的东西也删掉）。
   - 校验是一个函数 `ValidateInstallDir`：交互时在选目录页点「下一步」时调，静默安装时也会调，`PrepareToInstall` 里再调一次兜底；不合格就失败，原因写进日志，都在写文件之前。
 - 装完可以勾「运行 ModAVD」；静默安装一律不启动。
 
@@ -34,7 +34,7 @@ pwsh -NoProfile -File tools/installer/build-installer.ps1 `
 
 ## 卸载
 
-默认只删程序，不删用户数据。交互卸载时问一句要不要连实例和游戏数据一起删，默认「否」；选「是」才删整个目录。静默卸载（`/SILENT`、`/VERYSILENT`）一律不删数据。
+默认只删程序，不删用户数据。交互卸载时问一句要不要连实例和游戏数据一起删，默认「否」。选「是」也还要过一道保险才删整个目录：目录不是盘根、不在系统目录下，里面已经空了或者还留着 `mas-avd.json` 或 `avd`，而且顶层每一项都是 ModAVD 自己的名字（下表里的，加上卸载程序 `unins*`）；有一项认不出来就整个不删，原因写进卸载日志。静默卸载（`/SILENT`、`/VERYSILENT`）一律不删数据。
 
 管理器自更新以后会多出安装时没有的程序文件，所以卸载时按目录删程序部分（`[UninstallDelete]`）：
 
@@ -57,5 +57,9 @@ pwsh -NoProfile -File tools/installer/build-installer.ps1 `
 
 - 向导自带的标准文字：英文是 Inno 自带的 `Default.isl`；简体中文是 [ChineseSimplified.isl](ChineseSimplified.isl)，原样取自 Inno Setup 官方仓库 [jrsoftware/issrc](https://github.com/jrsoftware/issrc) 的 `Files/Languages/ChineseSimplified.isl`，提交 `6ef32198e`（文件头写着适用 6.5.0+），不改内容（`.gitattributes` 里按原样保存）。和 6.7.3 的 `Default.isl` 比，281 条标准消息、12 条自定义消息一条不差。
 - 我们自己的提示在 `messages-en.isl`、`messages-zh.isl`，两份逐条对应。
+
+## 图标
+
+`modavd.ico` 原样取自 [ModAVDManager](https://github.com/ModAVD/ModAVDManager) 的 `cmd/modavd-gui/modavd.ico`，和 `ModAVD.exe` 的图标相同。
 
 以后加一种语言：加一个 Inno 的 `.isl`、一份 `messages-<语言>.isl`，再在 `modavd.iss` 的 `[Languages]` 加一行。

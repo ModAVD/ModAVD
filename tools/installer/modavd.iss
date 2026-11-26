@@ -58,7 +58,8 @@ DisableWelcomePage=yes
 ShowLanguageDialog=no
 LanguageDetectionMethod=uilanguage
 WizardStyle=modern
-SetupIconFile=compiler:SetupClassicIcon.ico
+; 图标原样取自 ModAVDManager 的 cmd/modavd-gui/modavd.ico（和 ModAVD.exe 的图标相同）。
+SetupIconFile=modavd.ico
 UninstallDisplayIcon={app}\ModAVD.exe
 UninstallDisplayName=ModAVD
 OutputDir=.
@@ -210,6 +211,28 @@ begin
     end;
 end;
 
+{ 目录不存在，或者存在但里面什么都没有。 }
+function DirIsEmptyOrMissing(P: String): Boolean;
+var
+  FindRec: TFindRec;
+begin
+  Result := True;
+  if not DirExists(P) then
+    exit;
+  if FindFirst(AddBackslash(P) + '*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+      begin
+        Result := False;
+        exit;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
 { 交互时在选目录页点「下一步」调，静默安装时在 PrepareToInstall 再调一次。合格返回 True；不合格返回 False，
   Reason 是给用户看的一句话。只读，不建目录也不写文件。 }
 function ValidateInstallDir(Dir: String; var Reason: String): Boolean;
@@ -296,6 +319,14 @@ begin
   if FileExists(P + '\mas-avd.json') then
   begin
     Reason := CustomMessage('ErrLeftover');
+    exit;
+  end;
+
+  { 9. 已有的文件夹里放着别的东西：不装进去。否则卸载时选「连数据一起删」会连带删掉这些东西。
+     不存在的文件夹、空的已有文件夹照常放行。 }
+  if not DirIsEmptyOrMissing(P) then
+  begin
+    Reason := CustomMessage('ErrNotEmpty');
     exit;
   end;
 
@@ -392,10 +423,71 @@ end;
 
 { ---- 卸载 -------------------------------------------------------------------------------------- }
 
+{ 根目录顶层可能出现的 ModAVD 自己的名字：程序、用户数据、管理器运行时写的、卸载程序自己。 }
+function IsKnownTopName(Name: String): Boolean;
+var
+  N: String;
+begin
+  N := Lowercase(Name);
+  Result := (N = 'avd') or (N = 'mas-avd.json') or (N = 'mas-avd.json.lock') or (N = 'logs') or
+    (N = 'shader-cache') or (N = 'guest-patches') or (N = 'downloads') or (N = '.update') or (N = 'sdk') or
+    (N = 'modavd.exe') or (N = 'modavd-manifest.json') or (N = 'tools') or (N = 'components') or
+    (N = 'extras') or (N = 'mumu-shim') or (N = 'licenses') or
+    ((Copy(N, 1, 5) = 'unins') and ((ExtractFileExt(N) = '.exe') or (ExtractFileExt(N) = '.dat')));
+end;
+
+{ 「连数据一起删」之前的保险：App 不是盘根、不在系统目录下；里面已经空了，或者还留着 mas-avd.json 或 avd，
+  而且顶层每一项都是 ModAVD 自己的名字。有一项认不出来就整个不删（Why 里写是哪一项），宁可留下。 }
+function DataDirSafeToDelete(App: String; var Why: String): Boolean;
+var
+  FindRec: TFindRec;
+  HasMarker, IsEmpty: Boolean;
+begin
+  Result := False;
+  Why := '';
+  App := NormalizeDir(App);
+  if not IsDriveLetterPath(App) or (Length(App) <= 3) or IsUnder(App, ExpandConstant('{win}')) or
+     IsUnder(App, ExpandConstant('{commonpf64}')) or IsUnder(App, ExpandConstant('{commonpf32}')) or
+     IsUnder(App, ExpandConstant('{commonappdata}')) then
+  begin
+    Why := 'not a safe folder to delete';
+    exit;
+  end;
+  if not DirExists(App) then
+  begin
+    Why := 'folder is gone';
+    exit;
+  end;
+  IsEmpty := True;
+  if FindFirst(AddBackslash(App) + '*', FindRec) then
+  try
+    repeat
+      if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+      begin
+        IsEmpty := False;
+        if not IsKnownTopName(FindRec.Name) then
+        begin
+          Why := 'unknown item ' + FindRec.Name;
+          exit;
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+  HasMarker := FileExists(App + '\mas-avd.json') or DirExists(App + '\avd');
+  if not (IsEmpty or HasMarker) then
+  begin
+    Why := 'no mas-avd.json or avd';
+    exit;
+  end;
+  Result := True;
+end;
+
 { 只在交互卸载时问；默认「否」。静默卸载一律不删数据。 }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  App: String;
+  App, Why: String;
 begin
   App := NormalizeDir(ExpandConstant('{app}'));
   if CurUninstallStep = usUninstall then
@@ -411,15 +503,14 @@ begin
   end
   else if (CurUninstallStep = usPostUninstall) and DeleteUserData then
   begin
-    { 再核一次不是盘根、不是系统目录，才整个删掉。 }
-    if IsDriveLetterPath(App) and (Length(App) > 3) and not IsUnder(App, ExpandConstant('{win}')) and
-       not IsUnder(App, ExpandConstant('{commonpf64}')) and not IsUnder(App, ExpandConstant('{commonpf32}')) then
+    if DataDirSafeToDelete(App, Why) then
     begin
+      Log('Deleting user data: ' + App);
       if not DelTree(App, True, True, True) then
         Log('Could not delete everything in ' + App);
     end
     else
-      Log('Refusing to delete ' + App);
+      Log('Not deleting user data in ' + App + ': ' + Why);
   end;
 end;
 
@@ -450,9 +541,19 @@ begin
   Expect(Name, Ok = WantOk);
 end;
 
+procedure ExpectDelete(Name, Dir: String; WantOk: Boolean);
+var
+  Why: String;
+  Ok: Boolean;
+begin
+  Ok := DataDirSafeToDelete(Dir, Why);
+  Log('  ' + Dir + ' -> ' + Why);
+  Expect(Name, Ok = WantOk);
+end;
+
 function InitializeSetup: Boolean;
 var
-  D: String;
+  D, W: String;
 begin
   SelfTestFailures := 0;
   { 整个校验用安装程序所在的盘（要是本地固定硬盘）。 }
@@ -482,6 +583,30 @@ begin
   ExpectDir('too long', D + StringOfChar('a', 78), False);
   ExpectDir('max len ok', D + StringOfChar('a', 77), True);
   ExpectDir('program files', ExpandConstant('{commonpf64}') + '\ModAVD', False);
+  { 已有文件夹：空的、不存在的放行，放着别的东西的拦。卸载时「连数据一起删」的保险。
+    临时目录建在自检程序旁边，核完删掉。 }
+  W := ExpandConstant('{src}') + '\selftest-work';
+  ForceDirectories(W + '\empty');
+  ForceDirectories(W + '\full');
+  SaveStringToFile(W + '\full\notes.txt', 'x', False);
+  ExpectDir('empty existing dir', W + '\empty', True);
+  ExpectDir('missing dir', W + '\missing', True);
+  ExpectDir('non-empty unrelated dir', W + '\full', False);
+  ForceDirectories(W + '\del-marker\avd\mas_0.avd');
+  ForceDirectories(W + '\del-marker\logs');
+  SaveStringToFile(W + '\del-marker\mas-avd.json', '{}', False);
+  ForceDirectories(W + '\del-empty');
+  ForceDirectories(W + '\del-unknown\avd');
+  SaveStringToFile(W + '\del-unknown\mas-avd.json', '{}', False);
+  SaveStringToFile(W + '\del-unknown\my-game-saves.zip', 'x', False);
+  ForceDirectories(W + '\del-nomarker\logs');
+  ExpectDelete('delete: marker + known names', W + '\del-marker', True);
+  ExpectDelete('delete: empty', W + '\del-empty', True);
+  ExpectDelete('delete: unknown item', W + '\del-unknown', False);
+  ExpectDelete('delete: no marker', W + '\del-nomarker', False);
+  ExpectDelete('delete: drive root', D, False);
+  ExpectDelete('delete: windows', ExpandConstant('{win}') + '\ModAVD', False);
+  DelTree(W, True, True, True);
   Log('SELFTEST DONE failures=' + IntToStr(SelfTestFailures));
   Result := False;
 end;
