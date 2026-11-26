@@ -22,6 +22,7 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 - [Licenses and source code](#licenses-and-source-code)
 - [Feedback](#feedback)
 - [Privacy](#privacy)
+- [Support](#support)
 - [Disclaimer](#disclaimer)
 - [Icon and artwork](#icon-and-artwork)
 
@@ -115,6 +116,12 @@ Please read [Report a problem](https://modavd.github.io/en/guide/feedback) on th
 - An update check or download that you trigger explicitly in the manager or the CLI is component behavior started by you, and it is not the same as the emulator's own network activity.
 
 For details see [Privacy](https://modavd.github.io/en/guide/privacy) on the docs site.
+
+## Support
+
+ModAVD is free and open source. A donation buys no extra features and no priority support. If it has been useful and you would like to give something, you can donate on Afdian (WeChat Pay and Alipay) to help cover the cost of development: <https://ifdian.net/a/qiyinxi>
+
+<img src="assets/afdian-qiyinxi.png" alt="QR code of https://ifdian.net/a/qiyinxi" width="200">
 
 ## Disclaimer
 
