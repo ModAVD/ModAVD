@@ -64,7 +64,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build 0.42 -Version <版本> -Sd
 - [ ] 把输出 `patches/` 下的新目录和 `BASE.md`、`series.json`（直接覆盖仓库里的，它们就是在仓库那两份上加的）、manifest，以及生成的 Release 说明纳入待审核的发版提交；填完 `BASE.md` 里的「发布前填写」（新补丁按所改文件归许可证、写清新增了什么）；核对 `series.json` 中的基准、数量和树。
 - [ ] 在 `release/` 一起保存 `<版本>.md`、`<版本>.SHA256SUMS.txt`（外层）、`<版本>.sources.SHA256SUMS.txt`（包内）和 `<版本>.assets.json`（字节数与摘要），`<版本>` 不带 `v`，例如 `0.34.0.md`。后者来自包装输出的 `release-assets.json`，不要从旧版手工抄数字。
 - [ ] `checks.py`、`privacy.py`、白名单只有 `scripts/` 这一份，CI 和发版工具共用。`privacy-private-rules.json`（带真名、私人邮箱、主机名、本机目录的规则）只放在维护者本机、仓库外面，绝不提交。
-- [ ] 发版 PR 一起带上 `release/<版本>.issues.json`（这一版要关、要补评论的 issue，带 `pending-release` 的都写上），用 `tools/pubrel/release-pr.ps1 -PlanFile <清单>` 从发版清单生成；审过以后在 PR 正文写上一行 `Reviewed-Head: <审过的头，40 位>`（同一个脚本加 `-BodyFile` 生成）。格式见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版 PR 和 GitHub 上的两个 workflow」。
+- [ ] 发版 PR 一起带上 `release/<版本>.issues.json`（这一版要关、要补评论的 issue，带 `!pending-release` 的都写上），用 `tools/pubrel/release-pr.ps1 -PlanFile <清单>` 从发版清单生成；审过以后在 PR 正文写上一行 `Reviewed-Head: <审过的头，40 位>`（同一个脚本加 `-BodyFile` 生成）。格式见 [tools/pubrel/README.md](tools/pubrel/README.md)「发版 PR 和 GitHub 上的两个 workflow」。
 - [ ] CI 补丁回放、一致性与隐私检查全部通过。需要本地复验时，使用下一节的同一组命令。
 
 ## 草稿与发布
@@ -81,7 +81,7 @@ pwsh -NoProfile -File tools/pubrel/release.ps1 -Build 0.42 -Version <版本> -Sd
 - [ ] 草稿建好后触发 `gh workflow run verify-release.yml --repo ModAVD/ModAVD -f version=<版本>`（[#134](https://github.com/ModAVD/ModAVD/issues/134)）：它在 GitHub 上下载附件，和 `release/0.<N>` 上发版提交的 `release/<版本>.SHA256SUMS.txt`、`release/<版本>.md` 核对，再核发版 PR 正文写的审过的头和合并提交的树相同。没过不发布。
 - [ ] **人工过目草稿后再发布**：目标标签/提交、版本号、两层校验表、附件字节数与摘要、源码对应关系、许可证、隐私报告、issue 链接、升级说明和分隔行以上的公告均正确。
 - [ ] 经维护者确认后通过 GitHub 页面发布；自动脚本只创建草稿，不发布、不改仓库设置。
-- [ ] 发布时 `close-released-issues.yml` 自动跑：按 tag 所在提交上的 `release/<版本>.issues.json` 逐条核修它的 PR 进了这一版，过了的关掉（或补评论）、附发布链接、去掉 `pending-release`；核不过的留着标签，列在 job summary 里。看一眼 summary；失败了修好以后 `gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=<版本>` 重跑，只补还没做的。`release: published` 用的是 tag 所在提交上的 workflow 文件，所以发版分支上要有 `close-released-issues.yml`（发布脚本第 1 步会核）；没有就只能发布后手动跑上面那条。
+- [ ] 发布时 `close-released-issues.yml` 自动跑：按 tag 所在提交上的 `release/<版本>.issues.json` 逐条核修它的 PR 进了这一版，过了的关掉（或补评论）、附发布链接、去掉 `!pending-release`；核不过的留着标签，列在 job summary 里。看一眼 summary；失败了修好以后 `gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=<版本>` 重跑，只补还没做的。`release: published` 用的是 tag 所在提交上的 workflow 文件，所以发版分支上要有 `close-released-issues.yml`（发布脚本第 1 步会核）；没有就只能发布后手动跑上面那条。
 - [ ] 三个源码仓库的 `release/0.<N>` 和 tag、默认分支暂时还在本机推（要能跨仓库写的凭据，没上 CI）。
 - [ ] 发布后要改公告（例如补一条已知问题）就直接编辑 Release；分隔行和第一行机读注释不要删。
 
