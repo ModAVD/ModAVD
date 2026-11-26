@@ -1,0 +1,27 @@
+# Code owners list only the high-risk paths: places where a mistake reaches users' machines, the release, or the
+# checks themselves. GitHub asks the owner to review a pull request that touches one of them. Everything else is
+# merged once CI is green. How pull requests are reviewed and merged: CONTRIBUTING.en.md.
+# 只列高风险路径：动了这些路径的 PR，GitHub 会自动请负责人审查；其余的 CI 绿了就能合。流程见 CONTRIBUTING.md。
+
+# Workflows and their permissions, issue and PR templates, Dependabot, this file
+/.github/                        @qiyinxi
+
+# The CI gates themselves, the privacy scan and its allowlist
+/scripts/checks.py               @qiyinxi
+/scripts/repo_checks.py          @qiyinxi
+/scripts/privacy.py              @qiyinxi
+/scripts/privacy-allowlist.json  @qiyinxi
+
+# Release tooling, release records and checksums
+/tools/pubrel/                   @qiyinxi
+/release/                        @qiyinxi
+/manifests/                      @qiyinxi
+
+# The arm64 execution bridge: the staged payload, the source, and the script that installs it into the guest
+/tools/gate/                     @qiyinxi
+/bridge/                         @qiyinxi
+/package/modavd-bridge.ps1       @qiyinxi
+
+# Emulator source patches
+/patches/                        @qiyinxi
+/incoming/                       @qiyinxi
