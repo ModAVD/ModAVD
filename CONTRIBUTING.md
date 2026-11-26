@@ -28,26 +28,36 @@ issue、PR、评论和提交说明用中文或英文都可以。
 ## 这个仓库里改什么
 
 - 文档：使用说明和开发说明都在文档站的仓库 [modavd.github.io](https://github.com/ModAVD/modavd.github.io)，每页底部有「在 GitHub 上改这一页」。本仓库的 README 写错了直接提 PR。
-- 中英两版：README 和这份说明都有中文（`README.md`、`CONTRIBUTING.md`）和英文（`README.en.md`、`CONTRIBUTING.en.md`）两份，逐节对应，中文是主语言。改了一份，就在同一个 PR 里把另一份也改了；只会写一种语言的，在 PR 里说一声，由维护者补上。文档站的英文页也是这样，见[文档和本站](https://modavd.github.io/develop/docs)。
+- 中英两版：README、这份说明和 AGENTS 都有中文（`README.md`、`CONTRIBUTING.md`、`AGENTS.md`）和英文（`README.en.md`、`CONTRIBUTING.en.md`、`AGENTS.en.md`）两份，逐节对应，中文是主语言。改了一份，就在同一个 PR 里把另一份也改了；只会写一种语言的，在 PR 里说一声，由维护者补上。文档站的英文页也是这样，见[文档和本站](https://modavd.github.io/develop/docs)。
 - 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。补全组件、收集问题信息、复制配置信息在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager) 里改。
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
 - 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。
 - `patches/`、`manifests/`、`release/` 是发版工具（`tools/pubrel/`）导出的：PR 不直接改这些，有问题先开 issue。
 - 发版和编译工具 `tools/`，以及 CI 检查 `scripts/`（发版工具也用这一份）：改动先开 issue 商量。本机路径不写进仓库，用参数或本机配置，见 [tools/README.md](tools/README.md)；改了 `tools/pubrel/` 或 `scripts/` 要在本地跑 `python -I tools/pubrel/test_release.py --work <全新临时目录>`。
-- `scripts/privacy.py`、`scripts/repo_checks.py`（提交作者检查）和 `scripts/test_repo_checks.py` 在 ModAVD、ModAVDManager、ModAVDHostIME、ModAVDE2E、modavd.github.io 里是逐字节相同的一份，各仓库的 CI 会拿它和这里的 main 比。要改先改这里，再原样复制到其余仓库。
+- `scripts/privacy.py`、`scripts/repo_checks.py`（提交作者检查）和 `scripts/test_repo_checks.py` 在 ModAVD、ModAVDManager、ModAVDHostIME、ModAVDE2E、modavd.github.io、ModAVDExtras 里是逐字节相同的一份，各仓库的 CI 会拿它和这里的 main 比。要改先改这里，再原样复制到其余仓库。
 - 管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)，发版前回归（端到端测试）在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)：PR 提到那边，issue 还是在本仓库提。
 - 新加或修改 workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。`mirrorchyan_*.yml` 由 Mirror 酱官方维护，照原样保留。
 - CI 绿灯只表示该仓库已经声明的静态、构建或协议检查通过，不代表完成了完整编译、Windows 实机启动、GPU 或游戏兼容性验证，也不代表 AUTO-MAS 全流程已经验证。
 - 跨仓库的协议、版本或整包集成改动，要在相关仓库分别说明基线、依赖和实际验证范围；一个仓库的 CI 结果不能代替另一个仓库的验证。
 - 不收编译 CI：源码加编译产物约 124 GB，GitHub 的免费机器跑不了；自托管 runner 又会让外部 PR 在那台机器上执行任意命令（见 #5）。
 
+## PR 怎么审、怎么合
+
+完整的写在文档站：[PR 怎么审、怎么合](https://modavd.github.io/develop/#review-and-merge)。要点：
+
+- 从自己的 fork 开 PR。新注册的 GitHub 账号第一次提 PR 时，CI 要维护者批准后才会跑。
+- PR 正文写改了什么、实际跑过哪些检查。对应的 issue 单独写一行 `Refs ModAVD/ModAVD#<编号>`，不写 `Fixes`、`Closes`：issue 在带着这个修复的版本发布时才关。
+- 用户看得见的改动，在同一个 PR 里加一个说明文件 `changelog.d/<名字>.<feat|fix|change|remove>.md`，写一行给用户看的话；发版公告的「更新内容」就是从这些文件汇总的。写法见 [changelog.d/README.md](changelog.d/README.md)。管理器、截图库、宿主输入法的仓库里也是这样。
+- CI 全绿才能合。动了 [.github/CODEOWNERS](.github/CODEOWNERS) 里那些高风险路径的 PR，GitHub 会自动请负责人审查，审过再合；其余的不要求审批。
+- 审查里提出的问题按 P0–P3 分：P0、P1 合并前修完，P2、P3 不挡合并，合并后挂 issue。
+- 合并走合并队列：点「Merge when ready」，队列在最新的 `main` 上再跑一遍检查，过了自动 squash 合并，分支不用自己追 `main`。
+- 实机测试按版本做，不逐个 PR 测。发版前的回归查出问题时，可能先 revert 那个合并提交，修好再提。
+
 ## 署名与许可
 
-- 从自己的 fork 开 PR。外部 PR 的 CI 要维护者批准后才会跑。
-- 用户看得见的改动，在同一个 PR 里加一个说明文件 `changelog.d/<名字>.<feat|fix|change|remove>.md`，写一行给用户看的话；发版公告的「更新内容」就是从这些文件汇总的。写法见 [changelog.d/README.md](changelog.d/README.md)。管理器、截图库、宿主输入法的仓库里也是这样。
 - 署你自己的名字或化名，邮箱用 GitHub 的 noreply 地址（`<编号>+<登录名>@users.noreply.github.com`）；不写 `Co-authored-by`。收进来后保留你的署名，发版说明里会致谢。
 - 你的改动按所改文件的许可证进来，见 README 的[许可证与源码](README.md#许可证与源码)；新文件的版权行写你的名字或化名。不用签 CLA，`Signed-off-by` 可加可不加。
-- 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。给 AI 工具看的规矩在仓库根目录的 [AGENTS.md](AGENTS.md)，Codex、Claude Code 等会自己读。
+- 可以用 AI 工具，但提交者仍要对改动负责；能编译、能开实例的代码改动应尽可能实际验证，在 PR 里写明实际运行过的检查和已知限制。给 AI 工具看的规矩在仓库根目录的 [AGENTS.md](AGENTS.md)（英文版 [AGENTS.en.md](AGENTS.en.md)），Codex、Claude Code 等会自己读 `AGENTS.md`。
 - 通用的修复以后可能投到 Google 上游（AOSP、google/gfxstream），上游要求作者本人签 Google CLA。到时会先问你，不愿意就只留在 ModAVD。
 - 图片、图标类改动先开 issue，写明来源和许可证；同人图和来源说不清的图不收。
 
