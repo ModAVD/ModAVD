@@ -45,8 +45,12 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 补丁平台按实际改动的文件标注。Windows 专用改动标为 `windows`，明确跨平台的改动标为 `all`；同一系列同时含两类时，目录表汇总为 `windows / all`。
 
 以下判断仍需在对应平台实测后确认，先保留在清单中：
-- QEMU 各系列的 0035、0060 以及 gfxstream 各系列的 0042、0043，标注按源码判断，留待对应平台回归。
-- gfxstream 中涉及 Vulkan、GuestVulkanOnly 或 Vulkan 内存分配的补丁，先按 `all` 记录，留待 Vulkan 主机回归。
+- QEMU 的 0035（气球空闲页上报）：非 Windows 走 QEMU 原有的 madvise 路径，HVF 下内存是否真的还给系统要测。
+- QEMU 的 0060（宿主输入法的窗口文字模式）：本地事件过滤要补别的平台的实现。
+- QEMU 的 0042、0043（CUDA 媒体解码）：只在有 CUDA 的平台上有意义。
+- gfxstream 中涉及 Vulkan、GuestVulkanOnly 或 Vulkan 内存分配的补丁，先按 `all` 记录；mac 上底层是 MoltenVK，留待对应平台回归。
+
+以后的补丁照现有习惯用标题前缀标平台：Windows 专用的用 `whpx:`、`file-win32:` 这类，mac 专用的用 `hvf:`、`macos:`；`incoming/<主题>` 的主题名也带上平台。
 
 - `qemu/0.43.0` 的 0001–0110 与 `qemu/0.42.0` 是同一批提交（补丁文件头里的序号不同），0111–0116 是 0.43.0 新增的：最大化 / 还原按钮点过以后悬停高亮会消掉（ModAVD/ModAVD#214）（0111），精简窗口的标题栏加旋转按钮，在横屏和竖屏之间切换，窗口跟着转（ModAVD/ModAVD#225）（0112），开机时按 `hw.initialOrientation` 写回客体的 `user_rotation`、点 × 关机前先复位，按钮以初始方向为基准（0113），安卓开机完成前旋转按钮置灰，点击先写客体的 `user_rotation`、写成了才转窗口（0114），实例没有 `skin.name` 时自动生成的同尺寸皮肤保留 config 里的方向，竖屏实例的窗口一开始就是竖的（ModAVD/ModAVD#247）（0115），竖屏实例开机动画期间窗口先横着、动画结束再转成竖的，开机动画不再侧着（0116）。
 - 0.43.0 的 gfxstream 补丁和已发布的 `gfxstream/0.42.0` 是同一批提交（基准、分支头都相同），沿用这个目录；0.43.0 清单注释里写的也是这个目录。
