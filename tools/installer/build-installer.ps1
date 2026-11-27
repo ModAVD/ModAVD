@@ -9,6 +9,7 @@
 
 .PARAMETER Source
   发版 zip（ModAVD-<版本>-win-x64.zip），或已经解压好的目录（顶层就是 ModAVD.exe）。
+  不带 -SelfTest 时必须给；-SelfTest 不带载荷，不用给（给了也不读）。
 
 .PARAMETER Version
   版本号，比如 0.43.0（不带 v）。
@@ -28,10 +29,14 @@
 .EXAMPLE
   pwsh -NoProfile -File tools/installer/build-installer.ps1 -Source <目录>\ModAVD-0.43.0-win-x64.zip `
     -Work <空目录> -Version 0.43.0 -OutDir <输出目录> -Iscc <Inno Setup 目录>\ISCC.exe
+
+.EXAMPLE
+  pwsh -NoProfile -File tools/installer/build-installer.ps1 -SelfTest -Version 0.43.0 -OutDir <输出目录> `
+    -Iscc <Inno Setup 目录>\ISCC.exe
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Source,
+    [string]$Source,
     [Parameter(Mandatory)][string]$Version,
     [Parameter(Mandatory)][string]$OutDir,
     [string]$Work,
@@ -48,6 +53,10 @@ function Stop-Build([string]$message) {
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     Stop-Build "版本号要写成 0.43.0 这样（不带 v），收到「$Version」"
+}
+
+if (-not $SelfTest -and -not $Source) {
+    Stop-Build '要用 -Source 给发版 zip 或解压好的目录；只有 -SelfTest（自检版，不带载荷）可以不给'
 }
 
 $scriptRoot = $PSScriptRoot
@@ -99,6 +108,16 @@ if (-not $SelfTest) {
     if ($manifest.build -ne $Version -or $manifest.version -ne "v$Version") {
         Stop-Build "清单的版本是 $($manifest.version) / $($manifest.build)，和 -Version $Version 对不上"
     }
+
+    # 载荷顶层的名字传给安装程序：卸载时「连数据一起删」靠它认哪些是程序，不在脚本里写死。
+    # 用 | 隔开（文件名里不会有 |）；名字要落进 Pascal 的字符串字面量，所以只许 ASCII 字母、数字和 . _ - 空格。
+    $topNames = @(Get-ChildItem -LiteralPath $payloadDir -Force | ForEach-Object Name)
+    $badNames = @($topNames | Where-Object { $_ -notmatch '^[A-Za-z0-9._ -]+$' })
+    if ($badNames) {
+        Stop-Build "载荷顶层有不认的名字（只许 ASCII 字母、数字和 . _ - 空格）：$($badNames -join ', ')"
+    }
+    $payloadTopNames = $topNames -join '|'
+    Write-Host "载荷顶层：$payloadTopNames"
 }
 
 # ---- 编译 ----
@@ -108,7 +127,7 @@ $baseName = "ModAVD-$Version-win-x64-setup"
 if ($SelfTest) { $baseName += '-selftest' }
 
 $isccArgs = @("/O$outFull", "/F$baseName", "/DAppVersion=$Version", "/DOutputBaseName=$baseName")
-if ($SelfTest) { $isccArgs += '/DSelfTest' } else { $isccArgs += "/DPayloadDir=$payloadDir" }
+if ($SelfTest) { $isccArgs += '/DSelfTest' } else { $isccArgs += "/DPayloadDir=$payloadDir", "/DPayloadTopNames=$payloadTopNames" }
 $isccArgs += $issPath
 
 Write-Host "ISCC $($isccArgs -join ' ')"

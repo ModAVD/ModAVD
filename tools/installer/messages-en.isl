@@ -16,3 +16,5 @@ ErrExisting=ModAVD is already installed here. Please open ModAVD.exe in this fol
 ErrLeftover=This folder holds data left by an earlier ModAVD (mas-avd.json), and Setup will not overwrite it. Please choose an empty folder, or move this folder away first.
 UninstDeleteData=Also delete your instances and game data?%n%nYes: delete the whole folder %1, including all instances, game data and logs. This cannot be undone.%nNo: remove only the program and keep your instances and game data where they are.
 ErrNotEmpty=This folder already has other things in it. Please choose an empty folder or a new one, for example D:\ModAVD.
+ErrReparse=%1 in this path is a junction or symbolic link that points to another folder, so the files would actually end up somewhere else. Please choose a regular folder, for example D:\ModAVD.
+ErrShortName=%1 in this path is an abbreviated (8.3 short) folder name; the full name is %2. Please type the full name, or choose another path, for example D:\ModAVD.
