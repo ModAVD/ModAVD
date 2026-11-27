@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "components": {
+    "ime": {
+      "url": "https://github.com/ModAVD/ModAVDHostIME/releases/download/v1.0.0/modavd-ime.apk",
+      "version": "1.0.0",
+      "size": 20748,
+      "sha256": "912c9c9724e63fa606fa5d4e4212cef0e24148b013923ba49d1ebf8cfd38e0e2",
+      "license": "AGPL-3.0-or-later",
+      "source": "https://github.com/ModAVD/ModAVDHostIME/tree/v1.0.0"
+    },
+    "launcher": {
+      "url": "https://f-droid.org/repo/de.jrpie.android.launcher_57.apk",
+      "version": "0.2.12",
+      "versionCode": 57,
+      "package": "de.jrpie.android.launcher",
+      "filename": "de.jrpie.android.launcher_57.apk",
+      "size": 4099556,
+      "sha256": "f67124dad5009016dd1fce379d79b20ea93a46cefb5759002f3fa149d50b018f",
+      "developerAsset": "https://github.com/jrpie/launcher/releases/download/0.2.12/app-release.apk",
+      "digestSource": "https://api.github.com/repos/jrpie/Launcher/releases/tags/0.2.12",
+      "fDroidMetadata": "https://gitlab.com/fdroid/fdroiddata/-/raw/master/metadata/de.jrpie.android.launcher.yml",
+      "source": "https://github.com/jrpie/Launcher/tree/f09595f7af935952b41eff9395d2ca56209ada36",
+      "sourceCommit": "f09595f7af935952b41eff9395d2ca56209ada36",
+      "license": "MIT",
+      "licenseUrl": "https://raw.githubusercontent.com/jrpie/Launcher/f09595f7af935952b41eff9395d2ca56209ada36/LICENSE",
+      "licenseFile": "uLauncher-LICENSE.txt",
+      "licenseSha256": "3c6478b846c3ded0ec1cbf2399745bf098d196e756757e5b2245b69cc79a8d0b",
+      "embeddedLicenseMember": "META-INF/androidx/constraintlayout/constraintlayout-core/LICENSE.txt",
+      "embeddedLicenseFile": "uLauncher-constraintlayout-LICENSE.txt",
+      "embeddedLicenseSha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+      "minSdk": 21,
+      "targetSdk": 36,
+      "architecture": "DEX managed code; no native libraries or ELF entries",
+      "verificationDate": "2026-10-31"
+    }
+  }
+}
