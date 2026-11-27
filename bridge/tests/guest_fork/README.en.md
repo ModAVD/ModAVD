@@ -105,6 +105,15 @@ try:
         (name, r) for name in names for r in range(3)}
     assert all(code == "0" and case_pid == pid for _, _, code, case_pid in cases)
     assert log.count("host fork atfork parent: held=1") == 3
+    # Every imported fork round passed the loader guard: one marker before its case line.
+    log_lines, previous, guarded = log.splitlines(), 0, 0
+    for index, line in enumerate(log_lines):
+        if "case=" not in line:
+            continue
+        window, previous = log_lines[previous:index], index + 1
+        if "case=imported-libc-fork " in line:
+            guarded += sum(bool(re.search(r"host fork loader guard: result=[1-9]\d* ", w)) for w in window) == 1
+    assert guarded == 3
     for flags in ["1200011", "1300011"]:
         assert log.count("raw clone tid outputs: flags=" + flags + " safe=1 ") == 3
         assert len(re.findall(r"raw clone guard: flags=" + flags +
@@ -121,10 +130,10 @@ finally:
             cleanup_errors.append(error)
     if cleanup_errors:
         raise RuntimeError("test package/property cleanup incomplete")
-print("PASS: ARM64, one PID, 9 functional cases, host-atfork=3, raw1200011=3, raw1300011=3")
+print("PASS: ARM64, one PID, 9 functional cases, host-atfork=3, loader-guard=3, raw1200011=3, raw1300011=3")
 ```
 
-The acceptance combines function and log: the imported fork has 3 separate host-atfork held=1 lines; the explicit 1200011 and 1300011 each have 3 checker safe=1 lines and 3 raw held=1 lines, matched case by case and round by round on the same PID. The dladdr of the public `fork` does not mean the guest libc's internal path goes through the raw GOT. On this API 34 real-device proxy, the `__clone_for_fork` thunk forwards to the host Bionic fork, so an ordinary imported fork cannot be counted as raw GOT coverage. Passing on the isolated mmap does not mean that every guest pthread/tid address passes the conservative TLS/pthread/host-stack VMA check either.
+The acceptance combines function and log: the imported fork has 3 separate host-atfork held=1 lines, and each round has exactly one `host fork loader guard: result=<child>` line before its case line (the host fork is issued under the loader lock, see [bridge/README](../../README.en.md)); the explicit 1200011 and 1300011 each have 3 checker safe=1 lines and 3 raw held=1 lines, matched case by case and round by round on the same PID. The dladdr of the public `fork` does not mean the guest libc's internal path goes through the raw GOT. On this API 34 real-device proxy, the `__clone_for_fork` thunk forwards to the host Bionic fork, so an ordinary imported fork cannot be counted as raw GOT coverage. Passing on the isolated mmap does not mean that every guest pthread/tid address passes the conservative TLS/pthread/host-stack VMA check either.
 
 ## Existing records and limits
 

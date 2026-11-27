@@ -45,6 +45,7 @@
 #include <csignal>
 #include <ucontext.h>
 #include <atomic>
+#include <initializer_list>
 #include <elf.h>
 #include <jni.h>
 #include <link.h>
@@ -56,6 +57,7 @@
 #include <sched.h>
 #include <time.h>
 #include <sys/syscall.h>
+#include <android/fdsan.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ModAvdGate", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ModAvdGate", __VA_ARGS__)
@@ -1552,6 +1554,8 @@ int NdkMprotectWrapper(void* addr, size_t len, int prot) {
   return rc;
 }
 
+void MaybeInstallProxyFork();
+
 void* NdkAndroidDlopenExtWrapper(const char* filename, int flags, const void* extinfo) {
   AndroidDlopenExtFn real = g_real_ndk_android_dlopen_ext;
   if (real == nullptr) return nullptr;
@@ -1565,6 +1569,7 @@ void* NdkAndroidDlopenExtWrapper(const char* filename, int flags, const void* ex
     g_in_trigger = true;
     RefreshHookedSlotTableIfModulesGrew();  // a new module brings new watched slots
     MaybeReassertSegv();
+    MaybeInstallProxyFork();  // the guest libc's proxy library loads after arming
     g_in_trigger = false;
   }
   return result;
@@ -1583,6 +1588,7 @@ void* NdkDlopenWrapper(const char* filename, int flags) {
     g_in_trigger = true;
     RefreshHookedSlotTableIfModulesGrew();  // a new module brings new watched slots
     MaybeReassertSegv();
+    MaybeInstallProxyFork();
     g_in_trigger = false;
   }
   return result;
@@ -2026,6 +2032,8 @@ void YieldForkAttempt(ForkAttempt result) {
 
 void ForkPrepare() {
   if (!g_fork_safety.load(std::memory_order_acquire)) return;
+  // ProxyForkWrapper already took every lock on this thread under the loader lock.
+  if (g_fork_held.load() && g_fork_owner.load() == gettid()) return;
   const long deadline = MonoNs() + kForkLockWaitNs;
   for (;;) {
     const ForkAttempt result = TryForkLocks();
@@ -2121,6 +2129,7 @@ void InstallForkSafety(uintptr_t base) {
   g_fork_safety.store(true, std::memory_order_release);
   LOGI("fork safety: holding %d translator locks across fork(); cache quiescence enabled; "
        "detailed diagnostics=%d", kNumForkLocks, g_fork_diagnostics.load());
+  MaybeInstallProxyFork();
 }
 
 struct RawCloneCall {
@@ -2193,6 +2202,12 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
   // leaves the host cached tid unchanged, so its recursive unlock used the same
   // owner in both. Bionic fork's atfork handlers never take this loader scope.
   if (call.result == 0) {
+    // As Bionic fork() does in its child (libc/bionic/fork.cpp). The kernel copies
+    // the fd table before the memory, so an fd another parent thread opened in
+    // between is closed here but still owned in the fdsan table; the linker's
+    // close of a library file that reuses that number would abort this child.
+    // A shared fd table (CLONE_FILES) has no such gap, so fdsan stays on there.
+    if (!(flags & CLONE_FILES)) android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED);
     ForkChild();  // Also release another prepare's inherited locks on fallback.
   } else {
     ForkParent();
@@ -2206,6 +2221,206 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
   }
   errno = call.saved_errno;
   return call.result;
+}
+
+// --- host fork() under the loader lock (ModAVD#102) ----------------------------
+// The guest's libc fork() reaches the host through the proxy library's thunk
+// DoThunk___clone_for_fork: host Bionic fork() via the proxy's own fork@LIBC GOT
+// slot, then ResetCurrentGuestThreadAfterFork in the child, which dlopens the
+// exec-region library. The atfork handlers above carry the translator locks across
+// that fork but not the loader's global recursive mutex. If another thread was in
+// dlopen or dl_iterate_phdr at the fork, the child inherits that mutex locked and
+// waits in its dlopen forever (futex_wait on linker64's g_dl_mutex, value 0x4002;
+// about one launch in twenty of the guest_fork fixture).
+//
+// The proxy's slot now points at a wrapper that forks inside a dl_iterate_phdr
+// callback, as the raw clone guard does, so no other thread is in the loader at
+// that moment; the translator locks are tried once inside, never waited for there.
+// Lock order: the loader mutex is taken before Bionic fork() takes its atfork list
+// mutex. Bionic itself uses that order whenever a library constructor registers an
+// atfork handler during dlopen, or __cxa_finalize unregisters them during dlclose,
+// so an atfork prepare or parent handler that entered the loader could already
+// deadlock without this wrapper. None of the host handlers registered in the
+// guest_fork fixture process do (scudo, arc4random, libbinder, ours).
+//
+// One difference from the raw clone: Bionic fork() has the kernel store the child's
+// new tid in this thread's cached tid (CLONE_CHILD_SETTID), while the recursive
+// loader mutex checks that cached tid against its recorded owner, the parent, and
+// unlocking fails with EPERM. Measured on the fixture: without a correction the
+// child then hangs in its next dlopen exactly as before. So in the child the cached
+// tid holds the parent's tid until this level of the loader mutex is released, then
+// the child's own again. ProxyForkEarlyChild, registered from the constructor ahead
+// of every handler but Bionic's own, makes that switch before later atfork child
+// handlers run, so one that enters the loader takes the mutex recursively instead of
+// waiting on itself; signals stay blocked for the whole switch. The cached tid is
+// pthread_internal_t::tid, right after the two list pointers. The wrapper is only
+// installed over the host libc and linker builds it was verified against, and the
+// word is checked against the kernel's tid before every use.
+using ForkFn = pid_t (*)();
+void* g_real_proxy_fork = nullptr;  // Written before the slot points at the wrapper.
+std::atomic<bool> g_proxy_fork_installed{false};
+std::atomic<bool> g_proxy_fork_refused_logged{false};
+constexpr uintptr_t kCachedTidOffset = 2 * sizeof(void*);
+// API 34 x86_64 /apex/com.android.runtime: lib64/bionic/libc.so and bin/linker64.
+constexpr unsigned char kHostLibcBuildId[16] = {
+    0xfa, 0x33, 0x79, 0x69, 0xc7, 0x98, 0x94, 0x62,
+    0x80, 0xca, 0xa4, 0x5e, 0x2d, 0x71, 0xa2, 0xe7,
+};
+constexpr unsigned char kHostLinkerBuildId[16] = {
+    0xfe, 0xe6, 0xe4, 0x4f, 0xcb, 0x3f, 0x06, 0x3e,
+    0xdc, 0x41, 0x23, 0x51, 0xa2, 0xd5, 0x7c, 0xb0,
+};
+// Set by the forking thread just before the real fork(); read in the child.
+std::atomic<pthread_t> g_proxy_fork_thread{0};
+std::atomic<pid_t> g_proxy_fork_parent_tid{0};
+// Child-only state after the switch (the parent never sets these).
+bool g_proxy_child_switched = false;
+uint64_t g_proxy_child_saved_mask = 0;
+
+pid_t* CachedTidWord() {
+  return reinterpret_cast<pid_t*>(static_cast<uintptr_t>(pthread_self()) + kCachedTidOffset);
+}
+
+pid_t KernelTid() { return static_cast<pid_t>(syscall(SYS_gettid)); }
+
+struct HostLibs {
+  const unsigned char (*libc)[16];
+  const unsigned char (*linker)[16];
+  int matched = 0;
+};
+
+int MatchHostLibs(struct dl_phdr_info* info, size_t, void* opaque) {
+  auto& libs = *static_cast<HostLibs*>(opaque);
+  const char* name = info->dlpi_name;
+  if (name == nullptr) return 0;
+  const size_t n = strlen(name);
+  auto ends_with = [&](const char* suffix) {
+    const size_t s = strlen(suffix);
+    return n >= s && strcmp(name + n - s, suffix) == 0;
+  };
+  if (ends_with("/bionic/libc.so") && BuildIdIs(info->dlpi_addr, *libs.libc)) libs.matched |= 1;
+  if (ends_with("/linker64") && BuildIdIs(info->dlpi_addr, *libs.linker)) libs.matched |= 2;
+  return libs.matched == 3;
+}
+
+bool HostLibsAre(const unsigned char (&libc)[16], const unsigned char (&linker)[16]) {
+  HostLibs libs{&libc, &linker};
+  dl_iterate_phdr(&MatchHostLibs, &libs);
+  return libs.matched == 3;
+}
+
+// Runs among the atfork child handlers, after Bionic's own (malloc, arc4random).
+void ProxyForkEarlyChild() {
+  if (g_proxy_fork_thread.load(std::memory_order_relaxed) != pthread_self()) return;
+  // Consume the marker: a later fork from this child must not see it.
+  const pid_t parent_tid = g_proxy_fork_parent_tid.exchange(0, std::memory_order_relaxed);
+  g_proxy_fork_thread.store(0, std::memory_order_relaxed);
+  if (parent_tid == 0 || __atomic_load_n(CachedTidWord(), __ATOMIC_RELAXED) != KernelTid()) return;
+  // Block asynchronous signals only; a fault cannot be deferred anyway.
+  uint64_t block = ~0ULL;
+  for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS}) block &= ~(1ULL << (sig - 1));
+  syscall(SYS_rt_sigprocmask, SIG_BLOCK, &block, &g_proxy_child_saved_mask, sizeof(block));
+  __atomic_store_n(CachedTidWord(), parent_tid, __ATOMIC_RELAXED);
+  g_proxy_child_switched = true;
+}
+
+void ProxyForkChildRestore() {
+  if (!g_proxy_child_switched) return;
+  g_proxy_child_switched = false;
+  __atomic_store_n(CachedTidWord(), KernelTid(), __ATOMIC_RELAXED);
+  syscall(SYS_rt_sigprocmask, SIG_SETMASK, &g_proxy_child_saved_mask, nullptr,
+          sizeof(g_proxy_child_saved_mask));
+}
+
+struct HostForkCall {
+  ForkFn real;
+  pid_t parent_tid;
+  int incoming_errno;
+  ForkAttempt attempt = ForkAttempt::kDisabled;
+  bool forked = false;
+  pid_t result = -1;
+  int saved_errno = 0;
+};
+
+int HostForkUnderLoaderLock(struct dl_phdr_info*, size_t, void* opaque) {
+  auto& call = *static_cast<HostForkCall*>(opaque);
+  call.attempt = TryForkLocks();
+  if (call.attempt != ForkAttempt::kReady) return 1;  // Retry outside the loader scope.
+  // ForkPrepare sees the locks held by this thread; the atfork parent and child
+  // handlers release them as for any other fork.
+  g_proxy_fork_parent_tid.store(call.parent_tid, std::memory_order_relaxed);
+  g_proxy_fork_thread.store(pthread_self(), std::memory_order_relaxed);
+  errno = call.incoming_errno;
+  call.result = call.real();
+  call.saved_errno = errno;
+  call.forked = true;
+  if (call.result == 0) {
+    ProxyForkEarlyChild();  // No-op if the atfork child handler already switched.
+  } else {
+    g_proxy_fork_thread.store(0, std::memory_order_relaxed);
+    g_proxy_fork_parent_tid.store(0, std::memory_order_relaxed);
+  }
+  return 1;  // Release exactly this loader-lock level, as the recorded owner.
+}
+
+pid_t ProxyForkWrapper() {
+  const int incoming_errno = errno;
+  ForkFn real = reinterpret_cast<ForkFn>(__atomic_load_n(&g_real_proxy_fork, __ATOMIC_ACQUIRE));
+  if (real == nullptr) real = &fork;
+  const pid_t parent_tid = KernelTid();
+  if (!g_fork_safety.load(std::memory_order_acquire) ||
+      __atomic_load_n(CachedTidWord(), __ATOMIC_RELAXED) != parent_tid) {
+    errno = incoming_errno;
+    return real();
+  }
+  HostForkCall call{real, parent_tid, incoming_errno};
+  const long begin = MonoNs();
+  const long deadline = begin + kForkLockWaitNs;
+  for (;;) {
+    dl_iterate_phdr(&HostForkUnderLoaderLock, &call);
+    if (call.forked) break;
+    if (call.attempt == ForkAttempt::kUnknown || call.attempt == ForkAttempt::kDisabled ||
+        MonoNs() >= deadline) {
+      // As before this wrapper: an ordinary fork whose prepare handler makes its
+      // own attempt, or none once the guard is off.
+      errno = incoming_errno;
+      return real();
+    }
+    YieldForkAttempt(call.attempt);
+  }
+  if (call.result == 0) {
+    ProxyForkChildRestore();
+  } else if (g_fork_diagnostics.load(std::memory_order_relaxed)) {
+    LOGI("host fork loader guard: result=%d wait_us=%ld", call.result, (MonoNs() - begin) / 1000);
+  }
+  errno = call.saved_errno;
+  return call.result;
+}
+
+// The public loader scope serialises installers, as for the translator's slots.
+int InstallProxyForkLocked(struct dl_phdr_info*, size_t, void*) {
+  if (g_detached.load(std::memory_order_acquire) ||
+      g_proxy_fork_installed.load(std::memory_order_acquire)) return 1;
+  if (!HostLibsAre(kHostLibcBuildId, kHostLinkerBuildId)) {
+    if (!g_proxy_fork_refused_logged.exchange(true))
+      LOGI("fork safety: host libc/linker build differs from the verified one; "
+           "host fork() is not wrapped");
+    return 1;
+  }
+  if (PatchOneGotSlot("libndk_translation_proxy_libc.so", "fork",
+                      reinterpret_cast<void*>(&ProxyForkWrapper), &g_real_proxy_fork,
+                      "proxy_libc!fork")) {
+    g_proxy_fork_installed.store(true, std::memory_order_release);
+  }
+  return 1;
+}
+
+void MaybeInstallProxyFork() {
+  if (g_fork_safety.load(std::memory_order_acquire) &&
+      !g_proxy_fork_installed.load(std::memory_order_acquire) &&
+      !g_proxy_fork_refused_logged.load(std::memory_order_acquire)) {
+    dl_iterate_phdr(&InstallProxyForkLocked, nullptr);
+  }
 }
 
 }  // namespace
@@ -2493,6 +2708,9 @@ __attribute__((constructor)) static void ModAvdGateAutoInit() {
   // to one atomic only — no thread is created, which is what bootlooped zygote
   // specialization before.
   pthread_atfork(nullptr, nullptr, &GateForgetAfterFork);
+  // Registered this early so that in a wrapped host fork's child it runs before
+  // the atfork child handlers of libraries loaded later (see ProxyForkWrapper).
+  pthread_atfork(nullptr, nullptr, &ProxyForkEarlyChild);
   // The trigger that actually fires for an arm64-primary app: the translator's own
   // import table. See the ARMING TRIGGER note above for why libnativeloader's
   // android_dlopen_ext slot (kept below as a secondary) never fires there.
