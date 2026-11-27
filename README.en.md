@@ -4,7 +4,7 @@
 
 <!-- README.md and README.en.md match section by section: if you change one, change the other in the same PR. -->
 
-![ModAVD](assets/banner.png)
+![ModAVD](assets/banner-en.png)
 
 ModAVD is an Android emulator for Windows, with more platforms planned.
 
