@@ -2025,7 +2025,8 @@ class ReleaseChecks(unittest.TestCase):
                      "main.go": "x"}, "托盘双击 (#170)")
         commit(mgr, {"main_test.go": "x"}, "test: 慢的机器上不再偶尔失败 (#171)")
         commit(mgr, {"changelog.d/old.fix.md": "上一版修的\nFixed in the previous release\n"}, "补上英文 (#172)")
-        head = commit(mgr, {"changelog.d/direct.change.md": "没起名的实例显示 emu-N\nAn instance without a name shows as emu-N (#5)"},
+        head = commit(mgr, {"changelog.d/direct.change.md": "没起名的实例显示 emu-N\nAn instance without a name shows as emu-N (#5)",
+                            release.MANAGER_VERSION_FILE: 'package buildinfo\n\nvar Version = "0.41.1"\n'},
                       "直接提交的改动")
         items, since = release.new_fragments(mgr, "HEAD", "ModAVD/ModAVDManager")
         self.assertEqual(since, "v0.41.0")
@@ -2107,24 +2108,137 @@ class ReleaseChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "have no English"):
             release.collect_changelog(log, "0.41.1", 41, {"修复": [("x", "x")]})
 
-        # once released (tagged) nothing is new; a released file whose Chinese line changes, or a file that is no
-        # fragment, stops it; adding or changing the English line of a released file is fine
+        # once released (tagged) nothing is new for the next version, while collecting the tagged version again still
+        # compares with the one before; a released file whose Chinese line changes, or a file that is no fragment,
+        # stops it; adding or changing the English line of a released file is fine
         git(mgr, "tag", "v0.41.1")
-        self.assertEqual(release.new_fragments(mgr, "HEAD", "p"), ([], "v0.41.1"))
+        self.assertEqual(release.new_fragments(mgr, "HEAD", "p", "0.41.2"), ([], "v0.41.1"))
+        self.assertEqual(release.new_fragments(mgr, "HEAD", "p", "0.41.1")[1], "v0.41.0")
+        self.assertEqual(len(release.new_fragments(mgr, "HEAD", "p", "0.41.1")[0]), 3)
         commit(mgr, {"changelog.d/210-resize.fix.md": "调高分辨率后开机不再卡死退出。\nNo more hang at start after a resolution change\n"},
                "英文改一下 (#10)")
-        self.assertEqual(release.new_fragments(mgr, "HEAD", "p"), ([], "v0.41.1"))
+        self.assertEqual(release.new_fragments(mgr, "HEAD", "p", "0.41.2"), ([], "v0.41.1"))
         commit(mgr, {"changelog.d/old.fix.md": "改了已经发过的\nFixed in the previous release", "changelog.d/notes.txt": "x",
                      "changelog.d/long.fix.md": "长" * 61 + "\nlong", "changelog.d/next.fix.md": "下一版修的",
                      "changelog.d/wide.fix.md": "下一版修的\n" + "e" * 121}, "下一版 (#9)")
         with self.assertRaises(ValueError) as stopped:
-            release.new_fragments(mgr, "HEAD", "p")
+            release.new_fragments(mgr, "HEAD", "p", "0.41.2")
         for part in ["changelog.d/old.fix.md: 中文那一行和已经发过的 v0.41.1 不同", "its Chinese line differs from v0.41.1",
                      "changelog.d/notes.txt: 文件名要是", "the name must be", "changelog.d/long.fix.md: 第 1 行",
                      "changelog.d/next.fix.md: 要正好两行", "needs exactly two lines", "changelog.d/wide.fix.md: 第 2 行"]:
             self.assertIn(part, str(stopped.exception))
         with self.assertRaises(ValueError):
             checks.check_fragments(mgr)
+
+    def test_previous_release_by_version(self):
+        """The previous release is the release tag of the highest version below this one, not the nearest tag going
+        back: ModAVDManager's v0.43.0 is on release/0.43 only, so release/0.44, cut from main, does not descend from it
+        (ModAVD#277). Legacy and suffixed tags are no release; a component at another version is not rebuilt; the host
+        IME, which writes no version, is compared with its highest release tag that is not on the commit itself."""
+        root = self.folder()
+        git = release.git
+        def commit(repo, files, message, tag=None):
+            repo.mkdir(exist_ok=True)
+            for rel, text in files.items():
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_bytes(text.encode("utf-8"))
+            if not (repo / ".git").exists():
+                git(repo, "init", "-q")
+            git(repo, "add", "-A")
+            git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message)
+            if tag:
+                git(repo, "tag", tag)
+            return git(repo, "rev-parse", "HEAD")
+        def cut(repo, branch, files, message, tag=None):
+            """a release commit on a new `branch` off the checked-out one, which stays checked out (squash merges only:
+            it never comes back)"""
+            main = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+            git(repo, "checkout", "-q", "-b", branch)
+            head = commit(repo, files, message, tag)
+            git(repo, "checkout", "-q", main)
+            return head
+        manager_version = lambda v: {release.MANAGER_VERSION_FILE: f'package buildinfo\n\nvar Version = "{v}"\n'}
+
+        # ModAVDManager: v0.42.0 is on main, v0.43.0 only on release/0.43
+        mgr = root / "manager"
+        commit(mgr, {"changelog.d/README.md": "怎么写", "changelog.d/a42.fix.md": "0.42 修的\nFixed in 0.42",
+                     **manager_version("0.42.0")}, "0.42 (#1)", tag="v0.42.0")
+        commit(mgr, {"changelog.d/a43.feat.md": "0.43 加的\nAdded in 0.43"}, "0.43 的功能 (#2)")
+        cut(mgr, "release/0.43", {**manager_version("0.43.0"), "release/0.43.0.SHA256SUMS.txt": "x"}, "发版：0.43.0 (#3)",
+            tag="v0.43.0")
+        # main goes on: the English line of a released file may change, a new file is the next release's
+        commit(mgr, {"changelog.d/a43.feat.md": "0.43 加的\nAdded in 0.43, in better English"}, "英文改一下 (#4)")
+        commit(mgr, {"changelog.d/a44.fix.md": "0.44 修的\nFixed in 0.44"}, "0.44 的修复 (#5)")
+        head = cut(mgr, "release/0.44", manager_version("0.44.0"), "发版：0.44.0 (#6)")
+        git(mgr, "update-ref", "refs/remotes/upstream/release/0.44", head)
+        # going back by ancestry finds v0.42.0, which would announce 0.43 again
+        self.assertEqual(git(mgr, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", head), "v0.42.0")
+        self.assertEqual(release.previous_release(mgr, head, "0.44.0"), "v0.43.0")
+        self.assertEqual(release.new_fragments(mgr, head, "ModAVD/ModAVDManager", "0.44.0"),
+                         ([("修复", "0.44 修的 (ModAVD/ModAVDManager#5)", "Fixed in 0.44 (ModAVD/ModAVDManager#5)")], "v0.43.0"))
+
+        # ModAVD: the legacy v37.2.10-masNN tags and a pre-release are no release (nor above the previous one)
+        emu = root / "emu"
+        commit(emu, {"changelog.d/README.md": "怎么写", "changelog.d/old.fix.md": "很早修的\nFixed long ago"}, "mas32",
+               tag="v37.2.10-mas32")
+        git(emu, "tag", "v37.2.10-mas30")
+        commit(emu, {"changelog.d/b43.fix.md": "0.43 修的\nFixed in 0.43"}, "0.43 (#10)", tag="v0.43.0")
+        commit(emu, {"changelog.d/b44.feat.md": "0.44 加的\nAdded in 0.44"}, "0.44 (#11)", tag="v0.44.0-rc1")
+        git(emu, "tag", "v37.2.10-mas33")
+        self.assertEqual(sorted(release.release_tags(emu)), ["v0.43.0"])
+        self.assertEqual(release.new_fragments(emu, "HEAD", "", "0.44.0"),
+                         ([("新增", "0.44 加的 (#11)", "Added in 0.44 (#11)")], "v0.43.0"))
+        self.assertEqual(release.new_fragments(emu, "HEAD", "", None)[1], "v0.43.0")
+
+        # ModAVDExtras at its own 0.3.1 on release/0.44: not rebuilt, so nothing of it is announced
+        extras = root / "extras"
+        cmake = lambda v: {release.EXTRAS_VERSION_FILE: f"project(ModAVDExtras VERSION {v} LANGUAGES C)\n"}
+        commit(extras, {"changelog.d/README.md": "怎么写", **cmake("0.3.1")}, "0.3.1", tag="v0.3.1")
+        commit(extras, {"changelog.d/c.fix.md": "截图库修的\nFixed in the capture library"}, "截图库 (#12)")
+        git(extras, "update-ref", "refs/remotes/upstream/release/0.44", "HEAD")
+        # ModAVDHostIME writes no version and is at 1.0.x, above 0.44.0; already tagged at the head of its branch
+        ime = root / "ime"
+        commit(ime, {"changelog.d/README.md": "怎么写", "changelog.d/d.feat.md": "输入法加的\nAdded in the IME"}, "1.0.0 (#1)",
+               tag="v1.0.0")
+        commit(ime, {"changelog.d/e.fix.md": "输入法修的\nFixed in the IME"}, "输入法 (#13)", tag="v1.0.1")
+        git(ime, "update-ref", "refs/remotes/upstream/release/0.44", "HEAD")
+
+        log = root / "changelog.json"
+        released = {"version": "v0.43.0", "build": "0.43.0", "min_automas": "5.9.0-beta.1",
+                    "changes": {"新增": ["0.43 加的"]}, "changes_en": {"New": ["Added in 0.43"]}}
+        release.save(log, [released])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            release.collect_command(SimpleNamespace(build="0.44", patch=0, version="0.44.0", changelog=str(log),
+                                                    repository=str(emu), manager_repo=str(mgr), extras_repo=str(extras),
+                                                    ime_repo=str(ime), release_branch="release/0.44", note=[], note_en=[],
+                                                    min_automas=None))
+        said = printed.getvalue()
+        entry = release.load(log)[0]
+        self.assertEqual((entry["version"], entry["changes"]),
+                         ("v0.44.0", {"新增": ["0.44 加的 (#11)"],
+                                      "修复": ["0.44 修的 (ModAVD/ModAVDManager#5)", "输入法修的 (ModAVD/ModAVDHostIME#13)"]}))
+        self.assertEqual(release.load(log)[1:], [released])
+        for part in ["ModAVD since v0.43.0: 1 new", "ModAVDManager since v0.43.0: 1 new", "ModAVDHostIME since v1.0.0: 1 new",
+                     "ModAVDExtras: upstream/release/0.44 is at 0.3.1, not 0.44.0, taken as not rebuilt"]:
+            self.assertIn(part, said)
+
+        # a released Chinese line is still checked, against the new previous release
+        commit(mgr, {"changelog.d/a43.feat.md": "0.43 加的，又改了\nAdded in 0.43"}, "改了发过的 (#7)")
+        changed = cut(mgr, "release/0.44-again", manager_version("0.44.0"), "发版 (#8)")
+        with self.assertRaisesRegex(ValueError, r"a43\.feat\.md: 中文那一行和已经发过的 v0\.43\.0 不同"):
+            release.new_fragments(mgr, changed, "p", "0.44.0")
+        # collected again once tagged, the release still compares with the one before
+        git(emu, "tag", "v0.44.0")
+        self.assertEqual(release.new_fragments(emu, "HEAD", "", "0.44.0")[1], "v0.43.0")
+        # a release tag above the previous one that is not on the commit is refused, not compared against
+        commit(emu, {"a.txt": "x"}, "发版以后")
+        with self.assertRaisesRegex(ValueError, r"v0\.44\.0 is newer than the previous release v0\.43\.0 but not on the commit"):
+            release.new_fragments(emu, "HEAD", "", "0.44.0")
+        self.assertEqual(release.new_fragments(emu, "HEAD", "", "0.44.1"), ([], "v0.44.0"))
+        git(emu, "tag", "v0.45.0", "HEAD~1")
+        with self.assertRaisesRegex(ValueError, r"v0\.45\.0 比上一版 v0\.44\.0 新"):
+            release.new_fragments(emu, "HEAD", "", "0.44.1")
 
     def test_component_takes_the_release_version(self):
         """A component rebuilt for a release takes the release's version, and its release page only points at the

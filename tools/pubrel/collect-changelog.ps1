@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version,
     # ModAVD release checkout (default: the checkout these tools are in); read at its HEAD
     [string]$Repository,
-    # component checkouts, read at the head of upstream's release/<X>.<Y>; one without that branch adds nothing
+    # component checkouts, read at the head of upstream's release/<X>.<Y>; one without that branch, or whose version
+    # there is not -Version (manager, capture library), adds nothing
     [string]$ManagerRepo,
     [string]$ExtrasRepo,
     [string]$ImeRepo,
