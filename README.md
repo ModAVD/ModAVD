@@ -4,11 +4,9 @@
 
 <!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
 
-![ModAVD：基于 AOSP 的安卓模拟器](assets/banner.png)
+![ModAVD](assets/banner.png)
 
-基于 AOSP Android Emulator 37.2.10 的安卓模拟器，加了一批补丁后自己编译。目前支持 Windows，以后计划支持更多平台（见 [#27](https://github.com/ModAVD/ModAVD/issues/27)）。
-
-包里带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`，用来建实例、开机关机、更新，有中文和英文界面；也可以接入 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 这类自动化工具，由它们负责实例编排和任务流程。包里的截图库让这类工具不经 adb 直接取画面、点击、按键和输入文字；MAA 从 v6.23.0 起可以直接选 ModAVD 连接。
+ModAVD 是一款安卓模拟器，目前支持 Windows，计划支持更多平台。
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
@@ -28,10 +26,22 @@
 
 ## 这是什么
 
-- 一个安卓模拟器，现在跑在 Windows 上，用 Windows 虚拟机监控程序平台（WHPX）做硬件加速；以后计划支持更多平台。
-- 可以开窗口当普通模拟器用，也可以不开窗口（无头）运行。管理器开机带窗口；无头开机用命令行或脚本，用完可以在管理器或命令行里关掉。
-- 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
-- adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由管理器的「补全组件」（或命令行 `tools\modavd.exe components fetch`）在你的电脑上从官方渠道下载。
+- 用管理器带窗口启动，或用命令行无窗口运行。
+- 复制出来的实例也带着原来的游戏、登录状态和设置。
+- 每台实例都可以单独选择分辨率和横竖屏方向。
+- 在模拟器窗口里，可以直接用 Windows 输入法打字。
+- 更新 ModAVD 时会保留已有的实例、游戏和登录状态。
+- ModAVD 可以接入 AUTO-MAS、MAA 等自动化工具。
+
+| 复制实例 | 每台实例的显示设置 | 更新后接着用 |
+| --- | --- | --- |
+| ![](assets/readme/clone.png) | ![](assets/readme/display.png) | ![](assets/readme/retain.png) |
+
+<!-- 管理器实例列表截图待补。 -->
+
+| 实例设置 | 模拟器窗口 |
+| --- | --- |
+| ![管理器里的分辨率、DPI 和横竖屏设置](assets/readme/manager-settings.png) | ![打开安卓系统设置的模拟器窗口，标题栏上有截图、旋转、最大化和音量按钮](assets/readme/instance-window.png) |
 
 和官方模拟器相比，已发布的 0.43.0 不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘默认 256 GB、电脑上只按实际写入占空间，也可以改成指定大小；明日方舟、终末地下资源走单独的下载盘，不再被频繁落盘拖慢；带窗口时标题栏有最大化、截图、旋转按钮，开了声音的实例还有音量按钮；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，让一部分只有 arm64 版本的游戏也能跑，其他只有 arm64 的游戏仍需逐个验证。实测过哪些游戏见[已实测的游戏](#已实测的游戏)。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
 

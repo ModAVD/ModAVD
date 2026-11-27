@@ -4,11 +4,9 @@
 
 <!-- README.md and README.en.md match section by section: if you change one, change the other in the same PR. -->
 
-![ModAVD – An AOSP-based Android emulator](assets/banner-en.png)
+![ModAVD](assets/banner.png)
 
-ModAVD is an Android emulator built from the AOSP Android Emulator 37.2.10 plus a set of patches. It runs on Windows today; support for more platforms is planned (see [#27](https://github.com/ModAVD/ModAVD/issues/27)).
-
-The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for creating instances, starting and stopping them and updating ModAVD, with Chinese and English interfaces. Automation tools such as [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) can drive it too and handle instance orchestration and task flows. The capture library in the package lets automation tools read the screen, tap, press keys and type text without adb; from v6.23.0, MAA can connect to ModAVD directly.
+ModAVD is an Android emulator for Windows, with more platforms planned.
 
 **Documentation: <https://modavd.github.io/en/>** (installation, upgrade, feedback, privacy, the components and how to contribute are all there)
 
@@ -28,10 +26,22 @@ The package includes a manager (`ModAVD.exe`) and a CLI (`tools\modavd.exe`) for
 
 ## What is ModAVD
 
-- An Android emulator that runs on Windows today and uses the Windows Hypervisor Platform (WHPX) for hardware acceleration. More platforms are planned.
-- It can run in a window like any emulator, or headless (no window). The manager always starts instances with a window; headless starts come from the CLI or a script, and the manager or the CLI can shut them down afterwards.
-- The emulator itself comes from Google's open-source [Android Emulator](https://android.googlesource.com/platform/external/qemu/). We changed parts of QEMU, gfxstream (graphics streaming) and Crashpad (crash handling), and the changes are published as patches (`patches/`).
-- adb and the Android system images belong to Google and are covered by the Android Software Development Kit License Agreement, so we cannot distribute them. They are not in the Release; **Fetch components** in the manager, or the CLI command `tools\modavd.exe components fetch`, downloads them from the official channels on your computer.
+- Start an instance in a window from the manager, or run it without a window from the command line.
+- A cloned instance comes with the original instance's games, sign-in state, and settings.
+- Choose a resolution and a landscape or portrait orientation for each instance.
+- Type directly in the emulator window with your Windows input method.
+- Updating ModAVD keeps your existing instances, games, and sign-in state.
+- ModAVD works with automation tools such as AUTO-MAS and MAA.
+
+| Clone instances | Display settings per instance | Keep your instances when you update |
+| --- | --- | --- |
+| ![](assets/readme/clone.png) | ![](assets/readme/display.png) | ![](assets/readme/retain.png) |
+
+<!-- Add the manager instance list screenshot when available. -->
+
+| Instance settings | Emulator window |
+| --- | --- |
+| ![Resolution, DPI, and orientation settings in the manager](assets/readme/manager-settings.png) | ![Emulator window showing Android Settings and title bar buttons for screenshots, rotation, maximizing, and volume](assets/readme/instance-window.png) |
 
 Compared with the official emulator, the published 0.43.0 release no longer uploads usage statistics or crash reports to Google, and no longer checks Google for updates or downloads feature flags. Write-through lowers the risk of qcow2 metadata corruption when an instance is force-killed, but you should still run `sync` first. Memory that Android frees goes back to Windows. The data disk is 256 GB by default and takes only as much space on the PC as has actually been written; it can also be set to a fixed size. *Arknights* and *Arknights: Endfield* download their resources to a separate download disk, so frequent flushes to disk no longer slow them down. In a window, the title bar has maximize, screenshot and rotate buttons, plus a volume button when sound is on for the instance. A batch of graphics, networking and WHPX problems are fixed. From 0.36.0 the package includes the arm64 execution bridge, which lets some games that ship only for arm64 run; any other arm64-only game still has to be verified one by one. For the games we have tested, see [Tested games](#tested-games). For the item-by-item differences see [How ModAVD differs from the official emulator](https://modavd.github.io/en/guide/changes) on the docs site; for each patch see `patches/`.
 
