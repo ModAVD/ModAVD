@@ -1,6 +1,6 @@
 # After a ModAVD release is published, close the issues it fixes (ModAVD/ModAVD#134). Reads
 # release/<version>.issues.json on the tagged commit (written into the release PR by tools/pubrel/release-pr.ps1);
-# an issue is closed (or commented on), linked to the release and loses !pending-release only when every PR that fixes
+# an issue is closed (or commented on), linked to the release and loses 0-pending-release only when every PR that fixes
 # it is in this release. Issues that do not check out are skipped and listed in the job summary. Running it again
 # only does what is still missing:
 #   gh workflow run close-released-issues.yml --repo ModAVD/ModAVD -f version=0.42.0
