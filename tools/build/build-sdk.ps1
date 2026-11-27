@@ -33,12 +33,12 @@ if (-not $MinFreeGB) { $MinFreeGB = 120 }
 # 0.42 / 0.42.0 是同一个构建：一律写成三段，和 release_tools.py 的 normalize_build 一致（新写法从 0.42 起）
 if ($Build -match '^(\d+)\.(\d+)(\.0)?$') {
     $Build = "$([int]$Matches[1]).$([int]$Matches[2]).0"
-    if ([int]$Matches[1] -eq 0 -and [int]$Matches[2] -le 41) { throw "0.41 及以前的构建号写 masN：$Build" }
-} elseif ([int]$Build.Substring(3) -gt 41) { throw "mas41 以后的构建号写 0.N（比如 -Build 0.42）：$Build" }
+    if ([int]$Matches[1] -eq 0 -and [int]$Matches[2] -le 41) { throw "0.41 及以前的构建号写 masN / Builds up to 0.41 are written masN: $Build" }
+} elseif ([int]$Build.Substring(3) -gt 41) { throw "mas41 以后的构建号写 0.N（比如 -Build 0.42） / Builds after mas41 are written 0.N (for example -Build 0.42): $Build" }
 $buildId = if ($Build.StartsWith('mas')) { "mas-$($Build.Substring(3))" } else { $Build }
 $sourceRoot = [IO.Path]::GetFullPath($EmuSrc)
 $target = Join-Path $sourceRoot "sdk-$Build"
-if (Test-Path -LiteralPath $target) { throw "目标已存在，拒绝覆盖：$target" }
+if (Test-Path -LiteralPath $target) { throw "目标已存在，拒绝覆盖 / Target already exists, refusing to overwrite: $target" }
 $qemu = Join-Path $sourceRoot 'external\qemu'
 $distribution = Join-Path $sourceRoot 'objs\distribution\emulator'
 $helper = Join-Path $PSScriptRoot '..\pubrel\release_tools.py'
@@ -66,10 +66,10 @@ if (-not $PSCmdlet.ShouldProcess($target, '增量编译并安装独立 SDK')) { 
 # 源码树可能是目录联接：看它真正所在的那个盘
 $real = (Get-Item -LiteralPath $sourceRoot).ResolveLinkTarget($true)
 $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($(if ($real) { $real.FullName } else { $sourceRoot })))
-if ($drive.AvailableFreeSpace -lt $MinFreeGB * 1GB) { throw "$($drive.Name) 至少需 $MinFreeGB GiB 可用空间（-MinFreeGB），现在 $([int]($drive.AvailableFreeSpace / 1GB)) GiB" }
+if ($drive.AvailableFreeSpace -lt $MinFreeGB * 1GB) { throw "$($drive.Name) 至少需 $MinFreeGB GiB 可用空间（-MinFreeGB），现在 $([int]($drive.AvailableFreeSpace / 1GB)) GiB / $($drive.Name) needs at least $MinFreeGB GiB free (-MinFreeGB), now $([int]($drive.AvailableFreeSpace / 1GB)) GiB" }
 New-Item -ItemType Directory -Path $logDir | Out-Null
 & $Python -I $helper snapshot --build $Build --emu-src $sourceRoot --snapshot $snapshot
-if ($LASTEXITCODE) { throw '读取源码提交快照失败' }
+if ($LASTEXITCODE) { throw '读取源码提交快照失败 / Failed to read the source commit snapshot' }
 $oldUtf8 = $env:PYTHONUTF8
 $oldParallel = $env:CMAKE_BUILD_PARALLEL_LEVEL
 $oldPath = $env:PATH
@@ -82,17 +82,17 @@ try {
     Push-Location $qemu
     try {
         & $Python @buildArgs *>&1 | Tee-Object -FilePath (Join-Path $logDir 'build.log')
-        if ($LASTEXITCODE) { throw "编译失败，退出码 $LASTEXITCODE；见 $logDir\build.log" }
+        if ($LASTEXITCODE) { throw "编译失败，退出码 $LASTEXITCODE；见 $logDir\build.log / Build failed, exit code $LASTEXITCODE; see $logDir\build.log" }
     } finally { Pop-Location }
-    if (-not (Test-Path -LiteralPath (Join-Path $distribution 'emulator.exe'))) { throw "缺少构建产物：$distribution" }
+    if (-not (Test-Path -LiteralPath (Join-Path $distribution 'emulator.exe'))) { throw "缺少构建产物 / Build output is missing: $distribution" }
     # Capture again to detect changed commits/files during the long build, before labeling any binary.
     $after = Join-Path $logDir 'build-info-after.json'
     & $Python -I $helper snapshot --build $Build --emu-src $sourceRoot --snapshot $after
-    if ($LASTEXITCODE -or (Get-FileHash $snapshot).Hash -ne (Get-FileHash $after).Hash) { throw '编译期间源码改变；拒绝标记 SDK' }
-    if (Test-Path -LiteralPath $target) { throw "编译期间目标已被创建：$target" }
+    if ($LASTEXITCODE -or (Get-FileHash $snapshot).Hash -ne (Get-FileHash $after).Hash) { throw '编译期间源码改变；拒绝标记 SDK / The source changed during the build; refusing to mark the SDK' }
+    if (Test-Path -LiteralPath $target) { throw "编译期间目标已被创建 / The target was created during the build: $target" }
     New-Item -ItemType Directory -Path $target | Out-Null
     & robocopy $distribution (Join-Path $target 'emulator') /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ /NP /NFL /NDL
-    if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE；保留目标以便排查" }
+    if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE；保留目标以便排查 / robocopy failed, exit code $LASTEXITCODE; the target is kept for inspection" }
     $props = Join-Path $target 'emulator\source.properties'
     $text = [IO.File]::ReadAllText($props)
     $id = "Pkg.BuildId=$buildId"
