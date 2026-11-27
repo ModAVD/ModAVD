@@ -1892,7 +1892,8 @@ class ReleaseChecks(unittest.TestCase):
         self.assertIn('"build":41', machine)
 
     def write_changelog_for_fields(self, changelog):
-        release.save(changelog, [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["x"]}}])
+        release.save(changelog, [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["x"]},
+                                  "changes_en": {"Fixed": ["x"]}}])
         return changelog
 
     def test_notes_budget_before_packaging(self):
@@ -1900,7 +1901,8 @@ class ReleaseChecks(unittest.TestCase):
         after packaging. preflight and notes-budget measure them from changelog.json alone."""
         path = self.folder()
         changelog = path / "changelog.json"
-        entry = lambda b, item: {"version": f"v0.{b}.0", "build": b, "min_automas": None, "changes": {"修复": [item]}}
+        entry = lambda b, item, en="Fixed one thing": {"version": f"v0.{b}.0", "build": b, "min_automas": None,
+                                                       "changes": {"修复": [item]}, "changes_en": {"Fixed": [en]}}
         release.save(changelog, [entry(39, "修好一处")] + [entry(b, "旧版") for b in range(38, 29, -1)])
         machine, upper = release.notes_budget("0.39.0", 39, "37.2.10", changelog)
         # measured with the longest component line there can be, before the components are known
@@ -1914,6 +1916,22 @@ class ReleaseChecks(unittest.TestCase):
         self.assertEqual((machine, upper), (len(rendered[0]), sum(len(line) + 1 for line in rendered[1:rendered.index(checks.SEPARATOR)]) - 1))
         self.assertNotIn("WARNING", release.describe_budget(machine, upper))
         self.assertIn("WARNING: announcement", release.describe_budget(machine, 3700))
+        # the English goes below the separator only: MirrorChyan, AUTO-MAS and the machine line see Chinese alone, and
+        # however long it is, the announcement's length stays the same
+        above, below = text.split(checks.SEPARATOR)
+        self.assertNotIn("Fixed one thing", above)
+        self.assertIn("\n## What's new\n\nModAVD 0.39.0, built on Google AOSP Android Emulator 37.2.10. Components: "
+                      "emulator 0.39.0 (updated in this release), manager 0.999.999 (updated in this release), ", below)
+        self.assertIn("\n### Fixed\n\n- Fixed one thing\n\n## 下载\n", below)
+        self.assertLess(below.index("## What's new"), below.index("## 下载"))
+        release.save(changelog, [entry(39, "修好一处", "long " * 1000)] + [entry(b, "旧版") for b in range(38, 29, -1)])
+        self.assertEqual(release.notes_budget("0.39.0", 39, "37.2.10", changelog), (machine, upper))
+        # this version's entry needs its English; older entries (released before it existed) do not
+        release.save(changelog, [{k: v for k, v in entry(39, "修好一处").items() if k != "changes_en"}, entry(38, "旧版")])
+        with self.assertRaisesRegex(ValueError, "no English items"):
+            release.notes_budget("0.39.0", 39, "37.2.10", changelog)
+        release.save(changelog, [entry(39, "修好一处")] + [{k: v for k, v in entry(38, "旧版").items() if k != "changes_en"}])
+        release.notes_budget("0.39.0", 39, "37.2.10", changelog)
         # this version's items count in both; older ones only in the machine line
         release.save(changelog, [entry(39, "长" * 3990)] + [entry(b, "旧版") for b in range(38, 29, -1)])
         with self.assertRaisesRegex(ValueError, r"announcement above the separator would be \d+ chars, limit 4000"):
@@ -1976,33 +1994,54 @@ class ReleaseChecks(unittest.TestCase):
             if tag:
                 git(repo, "tag", tag)
             return git(repo, "rev-parse", "HEAD")
-        # one file: the type is the category, the text one line for users
-        self.assertEqual(checks.fragment_item("210-resize_crash.fix.md", "﻿调高分辨率后开机不再卡死退出。\r\n".encode("utf-8")),
-                         ("修复", "调高分辨率后开机不再卡死退出"))
-        self.assertEqual(checks.fragment_item("a.feat.md", ("长" * 60 + " (#185)").encode("utf-8")), ("新增", "长" * 60 + " (#185)"))
-        self.assertEqual(checks.fragment_item("a.remove.md", "不再带说明.txt（ModAVD/ModAVDManager#12）".encode("utf-8"))[0], "移除")
-        for name, data in [("Bad.fix.md", b"x"), ("a.docs.md", b"x"), ("a.fix.txt", b"x"), ("a.fix.md", b""), ("a.fix.md", b"a -- b"),
-                           ("a.fix.md", "长".encode("utf-8") * 61), ("a.fix.md", b"one\ntwo"), ("a.fix.md", b"\xff\xfe")]:
+        # one file: the type is the category, the text two lines for users, Chinese then English
+        en = "\nStarting no longer hangs after raising the resolution"
+        self.assertEqual(checks.fragment_item("210-resize_crash.fix.md", "﻿调高分辨率后开机不再卡死退出。\r\nStarting no "
+                                              "longer hangs after raising the resolution.\r\n".encode("utf-8")),
+                         ("修复", "调高分辨率后开机不再卡死退出", "Starting no longer hangs after raising the resolution"))
+        self.assertEqual(checks.fragment_item("a.feat.md", ("长" * 60 + " (#185)\n" + "e" * 120 + " (#185)").encode("utf-8")),
+                         ("新增", "长" * 60 + " (#185)", "e" * 120 + " (#185)"))
+        self.assertEqual(checks.fragment_item("a.remove.md", ("不再带说明.txt（ModAVD/ModAVDManager#12）" + en).encode("utf-8"))[0], "移除")
+        for name, data in [("Bad.fix.md", "修好\nfixed"), ("a.docs.md", "修好\nfixed"), ("a.fix.txt", "修好\nfixed"), ("a.fix.md", ""),
+                           ("a.fix.md", "修 -- 好\nfixed"), ("a.fix.md", "修好\nfixed -- now"), ("a.fix.md", "长" * 61 + en),
+                           ("a.fix.md", "三\n行\nthree"), ("a.fix.md", "修好\n\nfixed"), ("a.fix.md", "修好\n。"),
+                           # the English line is required, at most 120 chars, and in English; the Chinese one comes first
+                           ("a.fix.md", "调高分辨率后开机不再卡死退出\n"), ("a.fix.md", "修好\n" + "e" * 121),
+                           ("a.fix.md", "修好\n修好了"), ("a.fix.md", "Fixed\n修好"), ("a.fix.md", "Fixed\nFixed"),
+                           ("a.fix.md", b"\xff\xfe")]:
             with self.assertRaises(ValueError, msg=(name, data)):
-                checks.fragment_item(name, data)
+                checks.fragment_item(name, data if isinstance(data, bytes) else data.encode("utf-8"))
+        with self.assertRaisesRegex(ValueError, r"changelog\.d/a\.fix\.md: 要正好两行.*needs exactly two lines"):
+            checks.fragment_item("a.fix.md", "调高分辨率后开机不再卡死退出".encode("utf-8"))
+        with self.assertRaisesRegex(ValueError, r"changelog\.d/a\.fix\.md: 第 2 行.* line 2 \(英文 / English\) needs at most 120"):
+            checks.fragment_item("a.fix.md", ("修好\n" + "e" * 121).encode("utf-8"))
         # a repository: what it has now and did not have at its previous release (the nearest tag below)
         mgr = root / "manager"
+        # released with one Chinese line only (before 0.44): its English line may be added later
         commit(mgr, {"changelog.d/README.md": "怎么写", "changelog.d/old.fix.md": "上一版修的\n"}, "上一版 (#1)", tag="v0.41.0")
-        commit(mgr, {"changelog.d/210-resize.fix.md": "调高分辨率后开机不再卡死退出。\n"}, "开机前查出谁拿着截图共享内存 (#168)")
-        commit(mgr, {"changelog.d/tray.feat.md": "双击托盘图标隐藏或显示管理器窗口 (#188)\n", "main.go": "x"}, "托盘双击 (#170)")
+        commit(mgr, {"changelog.d/210-resize.fix.md": "调高分辨率后开机不再卡死退出。\nStarting no longer hangs after raising the resolution.\n"},
+               "开机前查出谁拿着截图共享内存 (#168)")
+        commit(mgr, {"changelog.d/tray.feat.md": "双击托盘图标隐藏或显示管理器窗口 (#188)\nDouble-click the tray icon to hide or show the manager\n",
+                     "main.go": "x"}, "托盘双击 (#170)")
         commit(mgr, {"main_test.go": "x"}, "test: 慢的机器上不再偶尔失败 (#171)")
-        head = commit(mgr, {"changelog.d/direct.change.md": "没起名的实例显示 emu-N"}, "直接提交的改动")
+        commit(mgr, {"changelog.d/old.fix.md": "上一版修的\nFixed in the previous release\n"}, "补上英文 (#172)")
+        head = commit(mgr, {"changelog.d/direct.change.md": "没起名的实例显示 emu-N\nAn instance without a name shows as emu-N (#5)"},
+                      "直接提交的改动")
         items, since = release.new_fragments(mgr, "HEAD", "ModAVD/ModAVDManager")
         self.assertEqual(since, "v0.41.0")
-        # by file name; the pull request that added the file, unless the line names an issue itself or there is none
-        self.assertEqual(items, [("修复", "调高分辨率后开机不再卡死退出 (ModAVD/ModAVDManager#168)"),
-                                 ("变更", "没起名的实例显示 emu-N"), ("新增", "双击托盘图标隐藏或显示管理器窗口 (#188)")])
-        self.assertEqual(release.commits_without_fragment(mgr, since, head), ["test: 慢的机器上不再偶尔失败 (#171)"])
+        # by file name; the pull request that added the file, unless the line names an issue itself or there is none;
+        # the English line takes the Chinese line's reference unless it names its own
+        self.assertEqual(items, [("修复", "调高分辨率后开机不再卡死退出 (ModAVD/ModAVDManager#168)",
+                                  "Starting no longer hangs after raising the resolution (ModAVD/ModAVDManager#168)"),
+                                 ("变更", "没起名的实例显示 emu-N", "An instance without a name shows as emu-N (#5)"),
+                                 ("新增", "双击托盘图标隐藏或显示管理器窗口 (#188)", "Double-click the tray icon to hide or show the manager (#188)")])
+        self.assertEqual(release.commits_without_fragment(mgr, since, head),
+                         ["补上英文 (#172)", "test: 慢的机器上不再偶尔失败 (#171)"])
         self.assertEqual(checks.check_fragments(mgr), 4)
         # without a release yet everything there is new; without the folder there is nothing
         fresh = root / "fresh"
-        commit(fresh, {"changelog.d/a.remove.md": "不再带说明.txt"}, "x (#5)")
-        self.assertEqual(release.new_fragments(fresh, "HEAD", ""), ([("移除", "不再带说明.txt (#5)")], None))
+        commit(fresh, {"changelog.d/a.remove.md": "不再带说明.txt（#3）\nNo more readme text file"}, "x (#5)")
+        self.assertEqual(release.new_fragments(fresh, "HEAD", ""), ([("移除", "不再带说明.txt（#3）", "No more readme text file (#3)")], None))
         bare = root / "bare"
         commit(bare, {"a.txt": "x"}, "x")
         self.assertEqual(release.new_fragments(bare, "HEAD", ""), ([], None))
@@ -2011,7 +2050,9 @@ class ReleaseChecks(unittest.TestCase):
         # the command: the ModAVD checkout at HEAD, the components at the head of upstream's release branch
         pub = root / "pub"
         commit(pub, {"changelog.d/README.md": "怎么写"}, "上一版", tag="v0.41.0")
-        commit(pub, {"changelog.d/185-maximize.feat.md": "带窗口的实例：标题栏加回最大化 / 还原按钮 (#185)"}, "发版：补丁 (#211)")
+        commit(pub, {"changelog.d/185-maximize.feat.md": "带窗口的实例：标题栏加回最大化 / 还原按钮 (#185)\n"
+                                                         "Windowed instances: the title bar has the maximize / restore button again"},
+               "发版：补丁 (#211)")
         git(mgr, "update-ref", "refs/remotes/upstream/release/0.41", head)
         log = root / "changelog.json"
         old = {"version": "v0.41.0", "build": 41, "min_automas": "5.7.0", "changes": {"修复": ["旧版"]}}
@@ -2022,41 +2063,65 @@ class ReleaseChecks(unittest.TestCase):
                 release.collect_command(SimpleNamespace(**{"build": "mas41", "patch": 0, "version": version, "changelog": str(log),
                                                            "repository": str(pub), "manager_repo": str(mgr), "extras_repo": str(fresh),
                                                            "ime_repo": None, "release_branch": "release/0.41", "note": [],
-                                                           "min_automas": None, **more}))
+                                                           "note_en": [], "min_automas": None, **more}))
             return printed.getvalue()
         said = collect("0.41.1")
         changes = {"新增": ["带窗口的实例：标题栏加回最大化 / 还原按钮 (#185)", "双击托盘图标隐藏或显示管理器窗口 (#188)"],
                    "变更": ["没起名的实例显示 emu-N"], "修复": ["调高分辨率后开机不再卡死退出 (ModAVD/ModAVDManager#168)"]}
-        self.assertEqual(release.load(log), [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": changes}, old])
+        changes_en = {"New": ["Windowed instances: the title bar has the maximize / restore button again (#185)",
+                              "Double-click the tray icon to hide or show the manager (#188)"],
+                      "Changed": ["An instance without a name shows as emu-N (#5)"],
+                      "Fixed": ["Starting no longer hangs after raising the resolution (ModAVD/ModAVDManager#168)"]}
+        self.assertEqual(release.load(log), [{"version": "v0.41.1", "build": 41, "min_automas": "5.7.0", "changes": changes,
+                                              "changes_en": changes_en}, old])
         self.assertEqual(list(release.load(log)[0]["changes"]), ["新增", "变更", "修复"])
-        self.assertIn("ModAVDManager since v0.41.0: 3 new changelog.d files, 1 commits without one\n    test: 慢的机器上不再偶尔失败 (#171)", said)
+        self.assertEqual(list(release.load(log)[0]["changes_en"]), ["New", "Changed", "Fixed"])
+        self.assertIn("ModAVDManager since v0.41.0: 3 new changelog.d files, 2 commits without one\n    补上英文 (#172)", said)
         self.assertIn("ModAVDExtras: no upstream/release/0.41", said)
         self.assertIn("- 没起名的实例显示 emu-N", said)
-        # collecting again replaces the entry; the hand-written 说明 and the AUTO-MAS version stay unless given anew
-        collect("0.41.1", note=["更新前先把实例都关机"], min_automas="5.8.0")
+        self.assertIn("### Changed\n\n- An instance without a name shows as emu-N (#5)", said)
+        # collecting again replaces the entry; the hand-written 说明 (with its English) and the AUTO-MAS version stay
+        # unless given anew
+        with self.assertRaisesRegex(ValueError, "each --note needs its English --note-en"):
+            collect("0.41.1", note=["更新前先把实例都关机"])
+        collect("0.41.1", note=["更新前先把实例都关机"], note_en=["Shut down the instances before updating"], min_automas="5.8.0")
         collect("0.41.1")
         entry = release.load(log)[0]
-        self.assertEqual((entry["min_automas"], entry["changes"]), ("5.8.0", {**changes, "说明": ["更新前先把实例都关机"]}))
+        self.assertEqual((entry["min_automas"], entry["changes"], entry["changes_en"]),
+                         ("5.8.0", {**changes, "说明": ["更新前先把实例都关机"]},
+                          {**changes_en, "Notes": ["Shut down the instances before updating"]}))
         collect("0.41.1", min_automas="none", manager_repo=None)
         entry = release.load(log)[0]
         self.assertEqual((entry["min_automas"], entry["changes"]), (None, {"新增": changes["新增"][:1], "说明": ["更新前先把实例都关机"]}))
+        self.assertEqual(entry["changes_en"], {"New": changes_en["New"][:1], "Notes": ["Shut down the instances before updating"]})
         self.assertEqual([e["version"] for e in release.load(log)], ["v0.41.1", "v0.41.0"])
         # a version that is not the newest and has no entry is refused, and the file stays as it was
         before = log.read_bytes()
         with self.assertRaisesRegex(ValueError, "newest first"):
-            release.collect_changelog(log, "0.40.9", 40, {"修复": ["x"]})
+            release.collect_changelog(log, "0.40.9", 40, {"修复": [("x", "x")]})
         with self.assertRaisesRegex(ValueError, "Nothing to announce"):
             release.collect_changelog(log, "0.41.2", 41, {"修复": []})
         self.assertEqual(log.read_bytes(), before)
+        # an entry whose 说明 has no English (written before 0.44) wants it given again
+        release.save(log, [{**old, "version": "v0.41.1", "changes": {"说明": ["旧的说明"]}}, old])
+        with self.assertRaisesRegex(ValueError, "have no English"):
+            release.collect_changelog(log, "0.41.1", 41, {"修复": [("x", "x")]})
 
-        # once released (tagged) nothing is new; a released file that changes, or a file that is no fragment, stops it
+        # once released (tagged) nothing is new; a released file whose Chinese line changes, or a file that is no
+        # fragment, stops it; adding or changing the English line of a released file is fine
         git(mgr, "tag", "v0.41.1")
         self.assertEqual(release.new_fragments(mgr, "HEAD", "p"), ([], "v0.41.1"))
-        commit(mgr, {"changelog.d/old.fix.md": "改了已经发过的", "changelog.d/notes.txt": "x", "changelog.d/long.fix.md": "长" * 61,
-                     "changelog.d/next.fix.md": "下一版修的"}, "下一版 (#9)")
+        commit(mgr, {"changelog.d/210-resize.fix.md": "调高分辨率后开机不再卡死退出。\nNo more hang at start after a resolution change\n"},
+               "英文改一下 (#10)")
+        self.assertEqual(release.new_fragments(mgr, "HEAD", "p"), ([], "v0.41.1"))
+        commit(mgr, {"changelog.d/old.fix.md": "改了已经发过的\nFixed in the previous release", "changelog.d/notes.txt": "x",
+                     "changelog.d/long.fix.md": "长" * 61 + "\nlong", "changelog.d/next.fix.md": "下一版修的",
+                     "changelog.d/wide.fix.md": "下一版修的\n" + "e" * 121}, "下一版 (#9)")
         with self.assertRaises(ValueError) as stopped:
             release.new_fragments(mgr, "HEAD", "p")
-        for part in ["changelog.d/old.fix.md differs from v0.41.1", "changelog.d/notes.txt: the name must be", "changelog.d/long.fix.md: needs one line"]:
+        for part in ["changelog.d/old.fix.md: 中文那一行和已经发过的 v0.41.1 不同", "its Chinese line differs from v0.41.1",
+                     "changelog.d/notes.txt: 文件名要是", "the name must be", "changelog.d/long.fix.md: 第 1 行",
+                     "changelog.d/next.fix.md: 要正好两行", "needs exactly two lines", "changelog.d/wide.fix.md: 第 2 行"]:
             self.assertIn(part, str(stopped.exception))
         with self.assertRaises(ValueError):
             checks.check_fragments(mgr)
@@ -2116,6 +2181,17 @@ class ReleaseChecks(unittest.TestCase):
             release.save(log, bad)
             with self.assertRaises(ValueError):
                 release.read_changelog(log, "0.41.0", 40)
+        # changes_en, when there, is the English of every item: same categories by their English names, same counts
+        release.save(log, [{**entry("v0.41.0", 40), "changes_en": {"Fixed": ["a"]}}, entry("v0.40.0", 40)])
+        release.read_changelog(log, "0.41.0", 40)
+        for english in [{}, {"修复": ["a"]}, {"Fixed": []}, {"Fixed": ["a", "b"]}, {"Fixed": ["a"], "New": ["b"]},
+                        {"Fixed": ["a -- b"]}, {"Fixed": ["a\nb"]}, {"Fixed": [""]}, {"Fixed": "a"}, ["a"]]:
+            release.save(log, [{**entry("v0.41.0", 40), "changes_en": english}])
+            with self.assertRaises(ValueError, msg=english):
+                release.read_changelog(log, "0.41.0", 40)
+        release.save(log, [{**entry("v0.41.0", 40), "changes_en": {"Fixed": ["a"]}, "extra": 1}])
+        with self.assertRaisesRegex(ValueError, "needs exactly"):
+            release.read_changelog(log, "0.41.0", 40)
 
 
 if __name__ == "__main__":

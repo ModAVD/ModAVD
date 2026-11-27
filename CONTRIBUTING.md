@@ -47,7 +47,7 @@ issue、PR、评论和提交说明用中文或英文都可以。
 
 - 从自己的 fork 开 PR。新注册的 GitHub 账号第一次提 PR 时，CI 要维护者批准后才会跑。
 - PR 正文写改了什么、实际跑过哪些检查。对应的 issue 单独写一行 `Refs ModAVD/ModAVD#<编号>`，不写 `Fixes`、`Closes`：issue 在带着这个修复的版本发布时才关。
-- 用户看得见的改动，在同一个 PR 里加一个说明文件 `changelog.d/<名字>.<feat|fix|change|remove>.md`，写一行给用户看的话；发版公告的「更新内容」就是从这些文件汇总的。写法见 [changelog.d/README.md](changelog.d/README.md)。管理器、截图库、宿主输入法的仓库里也是这样。
+- 用户看得见的改动，在同一个 PR 里加一个说明文件 `changelog.d/<名字>.<feat|fix|change|remove>.md`，写两行给用户看的话，先中文、再英文；发版公告的「更新内容」（中文）和「What's new」（英文）就是从这些文件汇总的。写法见 [changelog.d/README.md](changelog.d/README.md)。管理器、截图库、宿主输入法的仓库里也是这样。
 - CI 全绿才能合。动了 [.github/CODEOWNERS](.github/CODEOWNERS) 里那些高风险路径的 PR，GitHub 会自动请负责人审查，审过再合；其余的不要求审批。
 - 审查里提出的问题按 P0–P3 分：P0、P1 合并前修完，P2、P3 不挡合并，合并后挂 issue。
 - 合并走合并队列：点「Merge when ready」，队列在最新的 `main` 上再跑一遍检查，过了自动 squash 合并，分支不用自己追 `main`。

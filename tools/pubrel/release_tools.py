@@ -172,12 +172,18 @@ OWN_SOURCES_EXTRAS_TEXT = """\
 RELEASE_REPO = "ModAVD/ModAVD"
 FRAGMENT_REPOS = (("repository", "ModAVD", ""), ("manager_repo", "ModAVDManager", "ModAVD/ModAVDManager"),
                   ("extras_repo", "ModAVDExtras", "ModAVD/ModAVDExtras"), ("ime_repo", "ModAVDHostIME", "ModAVD/ModAVDHostIME"))
-# Written by hand (changelog-collect --note): what the user has to do for this version. Kept when collecting again.
+# Written by hand (changelog-collect --note, with its English --note-en): what the user has to do for this version.
+# Kept when collecting again.
 NOTE_CATEGORY = "说明"
+# changelog.json keeps the English items next to the Chinese ones as "changes_en", under these names; they are
+# rendered below the separator (What's new), so neither MirrorChyan nor the machine line carries them.
+CATEGORY_EN = {"新增": "New", "变更": "Changed", "修复": "Fixed", "移除": "Removed", "说明": "Notes"}
 # A squash merge's subject ends with the pull request: the item of a fragment refers to the one that added it.
 PR_SUFFIX = re.compile(r"\(#([1-9][0-9]*)\)$")
 # The component line of the announcement, in this order; the emulator comes first, from the build number.
 COMPONENT_NAMES = (("manager", "管理器"), ("extras", "截图库"), ("ime", "宿主输入法"))
+# the same names in What's new
+COMPONENT_NAMES_EN = {"manager": "manager", "extras": "capture library", "ime": "host input method"}
 # component-notes: the short release page of a component repository.
 COMPONENT_REPOS = {"manager": ("ModAVDManager", "管理器和命令行", "manager and command line"),
                    "extras": ("ModAVDExtras", "截图库", "capture library"),
@@ -368,32 +374,43 @@ def fragment_blobs(repo, ref):
 
 
 def new_fragments(repo, commit, prefix):
-    """([(category, item), ...] by file name, the previous release's tag or None) for the changelog.d files `commit`
-    has and the previous release (previous_release) did not have. An item is the file's line; when the line names no
-    issue or pull request itself, it gets the pull request whose squash merge added the file, as `(<prefix>#N)`.
-    A file the previous release had is not announced again, so a later change takes a new name: one that differs
-    from then is refused, like a file that is not a valid fragment."""
+    """([(category, Chinese item, English item), ...] by file name, the previous release's tag or None) for the
+    changelog.d files `commit` has and the previous release (previous_release) did not have. The items are the file's
+    two lines; a line that names no issue or pull request itself gets the reference of the Chinese line, or else the
+    pull request whose squash merge added the file, as `(<prefix>#N)`.
+    A file the previous release had is not announced again, so a later change takes a new name: one whose Chinese line
+    differs from then is refused, like a file that is not a valid fragment. Its English line may be added or changed
+    (files released when they had only the Chinese line got one later)."""
     commit = git(repo, "rev-parse", "--verify", "--quiet", commit + "^{commit}")
     since = previous_release(repo, commit)
     now, before = fragment_blobs(repo, commit), (fragment_blobs(repo, since) if since else {})
+    blob = lambda name, ref: run("git", "-C", repo, "--no-optional-locks", "cat-file", "blob", ref[name])
     items, bad = [], []
     for name in sorted(now):
         if name in before:
-            if before[name] != now[name]:
-                bad.append(f"{checks.FRAGMENT_DIR}/{name} differs from {since}, which already announced it: "
-                           f"a new change takes a new file name")
+            if before[name] != now[name] and checks.fragment_first_line(blob(name, before)) != checks.fragment_first_line(blob(name, now)):
+                bad.append(f"{checks.FRAGMENT_DIR}/{name}: 中文那一行和已经发过的 {since} 不同，新的改动要另起一个文件 / "
+                           f"its Chinese line differs from {since}, which already announced it: a new change takes a "
+                           f"new file name")
             continue
         try:
-            category, line = checks.fragment_item(name, run("git", "-C", repo, "--no-optional-locks", "cat-file", "blob", now[name]))
+            category, zh, en = checks.fragment_item(name, blob(name, now))
         except ValueError as e:
             bad.append(str(e))
             continue
-        if not checks.FRAGMENT_REF.search(line):
+        ref = checks.FRAGMENT_REF.search(zh)
+        if ref:
+            ref = ref[0].strip()
+        else:
             subject = git(repo, "log", "-1", "--diff-filter=A", "--format=%s", commit, "--", f"{checks.FRAGMENT_DIR}/{name}")
             added_by = PR_SUFFIX.search(subject)
             if added_by:
-                line += f" ({prefix}#{added_by[1]})"
-        items.append((category, line))
+                ref = f"({prefix}#{added_by[1]})"
+                zh += " " + ref
+        if ref and not checks.FRAGMENT_REF.search(en):
+            # the English notes write references with ASCII parentheses
+            en += " " + ref.replace("（", "(").replace("）", ")")
+        items.append((category, zh, en))
     if bad:
         raise ValueError(f"{repo}: " + "; ".join(bad))
     return items, since
@@ -408,23 +425,37 @@ def commits_without_fragment(repo, since, commit):
     return [subject for commit_id, subject in lines if commit_id not in announced]
 
 
-def collect_changelog(path, version, number, changes, notes=None, min_automas=...):
-    """Writes this version's entry of changelog.json from `changes` ({category: [item, ...]}) and returns it. An entry
-    that is already there is replaced, except for its hand-written NOTE_CATEGORY items (unless `notes` gives new ones)
-    and its min_automas (unless given); a new entry goes first and takes the previous version's min_automas."""
+def collect_changelog(path, version, number, changes, notes=None, min_automas=..., notes_en=None):
+    """Writes this version's entry of changelog.json from `changes` ({category: [(Chinese, English), ...]}) and returns
+    it. An entry that is already there is replaced, except for its hand-written NOTE_CATEGORY items (unless `notes`
+    and `notes_en` give new ones, one English for each Chinese) and its min_automas (unless given); a new entry goes
+    first and takes the previous version's min_automas."""
     entries = load(path)
     tag = "v" + version
     old = next((e for e in entries if e["version"] == tag), None)
     changes = {c: list(items) for c, items in changes.items() if items}
-    kept = list(notes) if notes else (old or {}).get("changes", {}).get(NOTE_CATEGORY)
+    if notes or notes_en:
+        if len(notes or []) != len(notes_en or []):
+            raise ValueError(f"每条 --note 要配一条 --note-en，顺序一样 / each --note needs its English --note-en, in the "
+                             f"same order ({len(notes or [])} --note, {len(notes_en or [])} --note-en)")
+        kept = list(zip(notes, notes_en))
+    else:
+        kept_zh = (old or {}).get("changes", {}).get(NOTE_CATEGORY) or []
+        kept_en = (old or {}).get("changes_en", {}).get(CATEGORY_EN[NOTE_CATEGORY]) or []
+        if len(kept_zh) != len(kept_en):
+            raise ValueError(f"{tag} 已有的「{NOTE_CATEGORY}」没有英文：用 --note 和 --note-en 重新给 / the {tag} entry's "
+                             f"{NOTE_CATEGORY} items have no English: give them again with --note and --note-en")
+        kept = list(zip(kept_zh, kept_en))
     if kept:
         changes[NOTE_CATEGORY] = kept
     if not changes:
         raise ValueError(f"Nothing to announce for {tag}: no new {checks.FRAGMENT_DIR} file anywhere; add an item with --note")
     if min_automas is ...:
         min_automas = old["min_automas"] if old else (entries[0]["min_automas"] if entries else None)
+    order = [c for c in checks.CATEGORIES if c in changes]
     entry = {"version": tag, "build": number, "min_automas": min_automas,
-             "changes": {c: changes[c] for c in checks.CATEGORIES if c in changes}}
+             "changes": {c: [zh for zh, _ in changes[c]] for c in order},
+             "changes_en": {CATEGORY_EN[c]: [en for _, en in changes[c]] for c in order}}
     entries = [entry if e is old else e for e in entries] if old else [entry] + entries
     # a version that does not belong first (a typo, an old one) is refused by the usual check: leave the file as it was
     original = Path(path).read_bytes()
@@ -460,20 +491,22 @@ def collect_sources(args):
 def collect_command(args):
     """`changelog-collect`: this version's 更新内容 from the new changelog.d files of the ModAVD checkout and of the
     component checkouts (--manager-repo, --extras-repo, --ime-repo at upstream's --release-branch); --note adds a
-    hand-written 说明 item, --min-automas sets the AUTO-MAS version."""
+    hand-written 说明 item (with its English --note-en), --min-automas sets the AUTO-MAS version."""
     version = public_version(args)
     changes = {}
     for name, repo, commit, prefix in collect_sources(args):
         items, since = new_fragments(repo, commit, prefix)
-        for category, item in items:
-            changes.setdefault(category, []).append(item)
+        for category, zh, en in items:
+            changes.setdefault(category, []).append((zh, en))
         silent = commits_without_fragment(repo, since, commit)
         print(f"{name} since {since or 'the beginning'}: {len(items)} new {checks.FRAGMENT_DIR} files, "
               f"{len(silent)} commits without one" + "".join(f"\n    {subject}" for subject in silent[:30])
               + (f"\n    ... {len(silent) - 30} more" if len(silent) > 30 else ""))
     known = ... if args.min_automas is None else (None if args.min_automas == "none" else args.min_automas)
-    entry = collect_changelog(args.changelog, version, build_number(args.build), changes, args.note, known)
-    print(f"\n{Path(args.changelog).name}: v{version}\n\n{render_changes(entry['changes'])}")
+    entry = collect_changelog(args.changelog, version, build_number(args.build), changes, args.note, known,
+                              getattr(args, "note_en", None))
+    print(f"\n{Path(args.changelog).name}: v{version}\n\n{render_changes(entry['changes'])}\n\n"
+          f"{render_changes_en(entry['changes_en'])}")
 
 
 def read_changelog(path, version, number):
@@ -485,8 +518,8 @@ def read_changelog(path, version, number):
         raise ValueError("changelog.json must be a list")
     seen = []
     for e in entries:
-        if not isinstance(e, dict) or set(e) != {"version", "build", "min_automas", "changes"}:
-            raise ValueError(f"changelog entry needs exactly version/build/min_automas/changes: {e}")
+        if not isinstance(e, dict) or set(e) - {"changes_en"} != {"version", "build", "min_automas", "changes"}:
+            raise ValueError(f"changelog entry needs exactly version/build/min_automas/changes (and changes_en): {e}")
         key = checks.version_key(e["version"])
         if not checks.is_build(e["build"]):
             raise ValueError(f"changelog build must be a positive integer (Pkg.BuildId mas-N) or \"0.N.0\": {e['version']}")
@@ -495,6 +528,8 @@ def read_changelog(path, version, number):
         seen.append(key)
         checks.check_min_automas(e["min_automas"])
         checks.check_changes({e["version"]: e["changes"]})
+        if "changes_en" in e:
+            check_changes_en(e)
     versions = [e["version"] for e in entries]
     if "v" + version not in versions:
         raise ValueError(f"changelog.json has no entry for v{version}")
@@ -507,6 +542,20 @@ def read_changelog(path, version, number):
                          f"{FIRST_AUTOMAS_FOR_NEW_BUILD} refuses to start: min_automas must be at least "
                          f"{FIRST_AUTOMAS_FOR_NEW_BUILD} (collect-changelog.ps1 -MinAutoMas), not {current['min_automas']}")
     return entries[versions.index("v" + version):]
+
+
+def check_changes_en(entry):
+    """An entry's changes_en holds the English of its changes: the same categories under their CATEGORY_EN names, the
+    same number of items in each, every item one non-empty line without '--'."""
+    english = entry["changes_en"]
+    want = {CATEGORY_EN[c]: len(items) for c, items in entry["changes"].items()}
+    if not isinstance(english, dict) or {c: len(v) if isinstance(v, list) else -1 for c, v in english.items()} != want:
+        raise ValueError(f"{entry['version']}: changes_en must have the English of every item of changes, by category "
+                         f"{want}: {english!r}")
+    for items in english.values():
+        for item in items:
+            if not isinstance(item, str) or not item.strip() or "\n" in item or "\r" in item or "--" in item:
+                raise ValueError(f"{entry['version']}: English items must be non-empty single lines without '--': {item!r}")
 
 
 def automas_key(value):
@@ -1797,18 +1846,34 @@ def render_changes(changes):
     return "\n\n".join(blocks)
 
 
-def render_components(version, number, own):
+def render_changes_en(changes_en):
+    """What's new: one `### Category` block per category of changes_en, in the fixed category order."""
+    blocks = []
+    for category in checks.CATEGORIES:
+        name = CATEGORY_EN[category]
+        if name in changes_en:
+            blocks.append(f"### {name}\n\n" + "\n".join("- " + item for item in changes_en[name]))
+    return "\n\n".join(blocks)
+
+
+def render_components(version, number, own, english=False):
     """The announcement's component line: the emulator build and what `own` (the snapshot's) ships, each marked when
     it is new in this version. A component is new when it carries this version's number (a component repackaged for
-    a release takes that release's version) or was not tagged yet when packaged; the emulator when this is 0.<N>.0."""
+    a release takes that release's version) or was not tagged yet when packaged; the emulator when this is 0.<N>.0.
+    With `english`, the same line for What's new."""
     def new(part_version, also=False):
-        return "（本版更新）" if part_version == version or also else ""
+        if part_version == version or also:
+            return " (updated in this release)" if english else "（本版更新）"
+        return ""
     emulator = f"0.{number}.0" if type(number) is int else number
-    parts = [f"模拟器 {emulator}{new(emulator)}"]
+    parts = [f"{'emulator' if english else '模拟器'} {emulator}{new(emulator)}"]
     for key, name in COMPONENT_NAMES:
         part = (own or {}).get(key)
         if part:
-            parts.append(f"{name} {part['version']}{new(part['version'], part.get('tagged') is False)}")
+            label = COMPONENT_NAMES_EN[key] if english else name
+            parts.append(f"{label} {part['version']}{new(part['version'], part.get('tagged') is False)}")
+    if english:
+        return "Components: " + ", ".join(parts) + "."
     return "组件：" + "、".join(parts) + "。"
 
 
@@ -1819,10 +1884,15 @@ SAMPLE_OWN = {key: {"version": "0.999.999", "tagged": False} for key, _ in COMPO
 def text_fields(version, number, upstream, changelog, own=None):
     """The template fields that come from changelog.json and the shipped components (everything but the asset rows)."""
     log = read_changelog(changelog, version, number)
+    if "changes_en" not in log[0]:
+        raise ValueError(f"changelog.json: v{version} 没有英文条目（changes_en），重新跑 collect-changelog.ps1 / the v{version} "
+                         f"entry has no English items (changes_en): collect it again with collect-changelog.ps1")
     machine = {"version": "v" + version, "build": number, "upstream": upstream, "min_automas": log[0]["min_automas"],
                "changes": {e["version"]: e["changes"] for e in log[:checks.MACHINE_VERSIONS]}}
     return {"MACHINE": checks.machine_line(machine), "VERSION": version, "UPSTREAM": upstream,
-            "COMPONENTS": render_components(version, number, own), "CHANGES": render_changes(log[0]["changes"])}
+            "COMPONENTS": render_components(version, number, own), "CHANGES": render_changes(log[0]["changes"]),
+            "COMPONENTS_EN": render_components(version, number, own, english=True),
+            "CHANGES_EN": render_changes_en(log[0]["changes_en"])}
 
 
 def render_notes(fields):
@@ -2056,6 +2126,8 @@ def main():
         parser.add_argument("--" + name)
     # changelog-collect: a hand-written 说明 item (what the user has to do for this version); repeatable
     parser.add_argument("--note", action="append", default=[])
+    # changelog-collect: the English of each --note, in the same order
+    parser.add_argument("--note-en", action="append", default=[])
     # release/<X>.<Y> of the ModAVD version: the manager and the extras library may be at the head of this branch
     # before their tags exist
     parser.add_argument("--release-branch")

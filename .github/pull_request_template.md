@@ -18,7 +18,7 @@ The checks you actually ran, the conditions and the results; say plainly what wa
 
 ## 核对 / Checklist
 
-- [ ] 用户看得见的改动带了 `changelog.d/<名字>.<feat|fix|change|remove>.md`（只动开发、测试、CI、文档的不用） / A change users can see comes with `changelog.d/<name>.<feat|fix|change|remove>.md` (not needed for development, tests, CI or docs)
+- [ ] 用户看得见的改动带了 `changelog.d/<名字>.<feat|fix|change|remove>.md`，两行：先中文、再英文（只动开发、测试、CI、文档的不用） / A change users can see comes with `changelog.d/<name>.<feat|fix|change|remove>.md`, two lines: Chinese, then English (not needed for development, tests, CI or docs)
 - [ ] 中英成对的文档（`X.md`、`X.en.md`）两份都改了；只会一种语言的在上面说一声 / Both files of a Chinese / English pair (`X.md`, `X.en.md`) are changed; if you write only one of the languages, say so above
 
 <!--

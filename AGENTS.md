@@ -17,13 +17,13 @@
 - 管理器、命令行在 ModAVDManager，宿主输入法在 ModAVDHostIME，发版前回归在 ModAVDE2E，改那些去对应的仓库；issue 不分组件，都开在本仓库。
 - workflow：第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner；`mirrorchyan_*.yml` 照原样保留。
 - 本机路径不写进仓库，用参数或本机配置（见 `tools/README.md`）。
-- 用户看得见的改动，同一个 PR 里加一个 `changelog.d/<名字>.<feat|fix|change|remove>.md`，一行给用户看的话（见 `changelog.d/README.md`）；只动开发、测试、CI、文档的不加。
+- 用户看得见的改动，同一个 PR 里加一个 `changelog.d/<名字>.<feat|fix|change|remove>.md`，两行给用户看的话：先中文、再英文（见 `changelog.d/README.md`）；只动开发、测试、CI、文档的不加。
 
 ## 用什么语言写
 
 - issue、PR、评论、提交说明：让你干活的人用中文就写中文，用英文就写英文，一个 PR 里不混着写。这份文件是中文的，不等于你要写中文。
 - 成对的文档（`X.md` 中文、`X.en.md` 英文）两份都要改。让你干活的人只会其中一种时，另一种由你照意思写出来，并在 PR 里写明哪一份是你翻的、请人核对。
-- `changelog.d` 的那一行写中文（发版公告是中文的）。让你干活的人不会中文时，你照他的意思写成中文，并在 PR 正文里附上英文原句。
+- `changelog.d` 的文件第一行写中文、第二行写英文（中文进 Mirror 酱和 AUTO-MAS 看到的公告，英文只在 GitHub 的发布页上）。让你干活的人只会其中一种时，另一行由你照意思写出来，并在 PR 里写明哪一行是你翻的、请人核对。
 - 术语照[术语对照表](https://github.com/ModAVD/ModAVDManager/blob/main/internal/i18n/README.md#terms)写；表里没有的词用代码里的名字或原文，不自己造译名。产品名在哪种语言里都写 ModAVD。
 - 代码里的标识符用英文。注释跟着所在文件原有的语言；新文件用中文或英文都可以，一个文件里不混用。
 

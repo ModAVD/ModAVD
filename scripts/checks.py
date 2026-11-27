@@ -136,8 +136,9 @@ def check_changes(changes):
                     raise ValueError(f"{version}: items must be non-empty single lines without '--': {item!r}")
 
 
-# changelog.d/<name>.<type>.md: one line that tells users what a pull request changes, added by that pull request.
-# The release tools collect the files added since the previous release into the release's 更新内容
+# changelog.d/<name>.<type>.md: two lines that tell users what a pull request changes, added by that pull request:
+# Chinese first, then the same in English. The release tools collect the files added since the previous release into
+# the release's 更新内容 (Chinese, above the separator, synced to MirrorChyan) and What's new (English, below it)
 # (tools/pubrel/release_tools.py changelog-collect); the type is the category.
 FRAGMENT_DIR = "changelog.d"
 FRAGMENT_README = "README.md"
@@ -146,26 +147,53 @@ FRAGMENT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\.(" + "|".join(FRAGMENT_TYPES) 
 # An issue or pull request the line names itself, at its end: (#185), (ModAVD/ModAVDManager#168).
 FRAGMENT_REF = re.compile(r"\s*[（(](?:ModAVD/[A-Za-z0-9]+)?#[1-9][0-9]*[)）]$")
 MAX_FRAGMENT_CHARS = 60
+MAX_FRAGMENT_EN_CHARS = 120
+# Chinese characters and full-width punctuation: the first line needs some, the English line has none.
+HAN = re.compile(r"[　-〿㐀-䶿一-鿿＀-￯]")
+
+
+def fragment_first_line(data):
+    """The first line of a changelog.d file as written (the Chinese one), for comparing with a released copy."""
+    text = data.decode("utf-8-sig", "replace").strip()
+    return text.splitlines()[0].strip() if text else ""
 
 
 def fragment_item(name, data):
-    """(category, line) of the changelog.d file `name` with the bytes `data`: UTF-8, one line of at most
-    MAX_FRAGMENT_CHARS (a reference at its end not counted) that cannot end an HTML comment."""
+    """(category, Chinese line, English line) of the changelog.d file `name` with the bytes `data`: UTF-8, exactly two
+    lines that cannot end an HTML comment, the first Chinese of at most MAX_FRAGMENT_CHARS, the second English of at most
+    MAX_FRAGMENT_EN_CHARS (a reference at the end of a line not counted)."""
     where = f"{FRAGMENT_DIR}/{name}"
     m = FRAGMENT_NAME.fullmatch(name)
     if not m:
-        raise ValueError(f"{where}: the name must be <lowercase-name>.<{'|'.join(FRAGMENT_TYPES)}>.md")
+        raise ValueError(f"{where}: 文件名要是 <小写名字>.<{'|'.join(FRAGMENT_TYPES)}>.md / "
+                         f"the name must be <lowercase-name>.<{'|'.join(FRAGMENT_TYPES)}>.md")
     try:
-        line = data.decode("utf-8-sig").strip()
+        text = data.decode("utf-8-sig").strip()
     except UnicodeDecodeError:
-        raise ValueError(f"{where}: not UTF-8") from None
-    if not FRAGMENT_REF.search(line):
-        line = line.rstrip("。")
-    text = FRAGMENT_REF.sub("", line)
-    if not text or "\n" in line or "\r" in line or "--" in line or len(text) > MAX_FRAGMENT_CHARS:
-        raise ValueError(f"{where}: needs one line of at most {MAX_FRAGMENT_CHARS} chars without '--' "
-                         f"(it has {len(text)}): {line!r}")
-    return FRAGMENT_TYPES[m[1]], line
+        raise ValueError(f"{where}: 不是 UTF-8 / not UTF-8") from None
+    lines = [line.strip() for line in text.splitlines()]
+    if len(lines) != 2 or not all(lines):
+        raise ValueError(f"{where}: 要正好两行，第一行中文、第二行英文，中间不空行（现在 {len(lines)} 行） / "
+                         f"needs exactly two lines, Chinese first, then English, no blank line between "
+                         f"(it has {len(lines)})")
+    zh, en = lines
+    if not FRAGMENT_REF.search(zh):
+        zh = zh.rstrip("。")
+    if not FRAGMENT_REF.search(en):
+        en = en.rstrip(".")
+    for line, limit, number, label in [(zh, MAX_FRAGMENT_CHARS, 1, "中文 / Chinese"),
+                                       (en, MAX_FRAGMENT_EN_CHARS, 2, "英文 / English")]:
+        body = FRAGMENT_REF.sub("", line)
+        if not body or "--" in line or len(body) > limit:
+            raise ValueError(f"{where}: 第 {number} 行（{label}）不超过 {limit} 字、不能有 '--'（现在 {len(body)} 字） / "
+                             f"line {number} ({label}) needs at most {limit} chars without '--' "
+                             f"(it has {len(body)}): {line!r}")
+    if not HAN.search(zh):
+        raise ValueError(f"{where}: 第 1 行要写中文 / line 1 must be the Chinese line: {zh!r}")
+    if HAN.search(en):
+        raise ValueError(f"{where}: 第 2 行要写英文，不能有中文字符 / line 2 must be the English line, "
+                         f"without Chinese characters: {en!r}")
+    return FRAGMENT_TYPES[m[1]], zh, en
 
 
 def check_fragments(root):

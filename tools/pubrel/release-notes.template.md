@@ -7,6 +7,12 @@ ModAVD {{VERSION}}，基于 Google AOSP Android Emulator {{UPSTREAM}} 构建。{
 
 <!-- modavd:github-only -->
 
+## What's new
+
+ModAVD {{VERSION}}, built on Google AOSP Android Emulator {{UPSTREAM}}. {{COMPONENTS_EN}} Installation, updates and feedback: see the [documentation](https://modavd.github.io/en/).
+
+{{CHANGES_EN}}
+
 ## 下载
 
 | 文件 | 大小 | SHA-256 |
