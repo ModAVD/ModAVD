@@ -6,7 +6,7 @@
                   head its body names on the Reviewed-Head line.
   close-issues    .github/workflows/close-released-issues.yml: after a release is published, go through
                   release/<version>.issues.json on the tagged commit; for every issue whose fixing PRs are in this
-                  release, close it (or comment), link the release, remove !pending-release. Issues that do not check
+                  release, close it (or comment), link the release, remove 0-pending-release. Issues that do not check
                   out are skipped and listed. Running it again does nothing more than what is still missing.
   issues-json     write release/<version>.issues.json (tools/pubrel/release-pr.ps1 calls it from the publish plan).
   reviewed-head   put the Reviewed-Head line into a release PR body file (tools/pubrel/release-pr.ps1).
@@ -33,7 +33,7 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 # a fixing PR: "<repository>#<number>", or "<repository>@<commit>" when the commit itself is to be checked
 PR_RE = re.compile(r"(ModAVD[A-Za-z0-9]*)(?:#([1-9][0-9]*)|@([0-9a-f]{7,40}))")
 KINDS = ("close", "comment", "keep")
-PENDING = "!pending-release"
+PENDING = "0-pending-release"
 # the release PR body names the head that was reviewed on a line of its own, exactly once
 REVIEWED_PREFIX = "Reviewed-Head: "
 REVIEWED_RE = re.compile(r"^Reviewed-Head:[ \t]*(\S*)[ \t]*$", re.M)
@@ -273,7 +273,7 @@ def check_pr(gh, key, release_commit, manager_tag, manager_sha, notes):
 
 def plan_issues(gh, repo, data, tag, release_commit, notes):
     """What to do with each issue now. action: close / comment / done (the release link is already in a comment and
-    nothing else is left) / skip (why says why). label: !pending-release is still on it and is to be removed."""
+    nothing else is left) / skip (why says why). label: 0-pending-release is still on it and is to be removed."""
     url = release_url(repo, tag)
     manager_tag = "v" + data["manager"]
     manager_sha = gh.ref_commit(f"{OWNER}/ModAVDManager", f"tags/{manager_tag}")
@@ -344,7 +344,7 @@ def md(text):
 def issue_table(plan):
     rows = ["| issue | 修它的 PR | 做什么 | 原因 |", "| --- | --- | --- | --- |"]
     for x in plan:
-        what = ACTION_TEXT[x["action"]] + ("，去掉 !pending-release" if x["label"] else "")
+        what = ACTION_TEXT[x["action"]] + ("，去掉 0-pending-release" if x["label"] else "")
         rows.append(f"| #{x['issue']} {md(x['title'])} | {md('、'.join(x['prs']) or '源码补丁')} | {what} | {md(x['why'])} |")
     return rows
 
@@ -383,7 +383,7 @@ def close_issues(gh, repo, tag, dry_run=False):
     if failures:
         lines += ["", "### 失败", ""] + [f"- {md(f)}" for f in failures]
     if skipped:
-        lines += ["", f"跳过 {len(skipped)} 个（核不过，留着 !pending-release，下一版再核）：" + "、".join(f"#{x['issue']}" for x in skipped)]
+        lines += ["", f"跳过 {len(skipped)} 个（核不过，留着 0-pending-release，下一版再核）：" + "、".join(f"#{x['issue']}" for x in skipped)]
     if left:
         lines += ["", "还没做完：" + "、".join(f"#{x['issue']}" for x in left) + "；重跑这个 workflow 会接着做"]
         return 1, lines
