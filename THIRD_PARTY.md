@@ -87,6 +87,15 @@ Qt 的预编译文件来自 AOSP，Google 没有记录对应的确切提交，�
 
 最后四行是 ModAVD 自己的程序，源码都在同一个 Release 的源码包（`ModAVD-<版本>-sources.zip`）里的 `modavd-src.tar.xz`（0.36.0 时叫 `modavd-src-<提交>.tar.xz`），`LICENSE` 和 `NOTICE` 在归档里；许可证全文是包里的 `LICENSES\AGPL-3.0.txt`，截图库是 `LICENSES\LGPL-3.0.txt` 和它所补充的 `LICENSES\GPL-3.0.txt`。
 
+## 安装程序
+
+`ModAVD-<版本>-win-x64-setup.exe` 装进去的文件和 zip 主包逐个相同，另外带着 Inno Setup 自己的部分。安装程序的脚本在本仓库的 [tools/installer/](tools/installer/)。
+
+| 文件 | 许可证 |
+|---|---|
+| 安装程序本身、装好后目录里的 `unins000.exe`（Inno Setup 6 的安装和卸载模块） | Inno Setup License，Copyright Jordan Russell、Martijn Laan；允许再分发，要求保留版权声明和网址。见 https://jrsoftware.org/files/is/license.txt |
+| 简体中文界面文字（[tools/installer/ChineseSimplified.isl](tools/installer/ChineseSimplified.isl)） | 原样取自 Inno Setup 官方仓库 [jrsoftware/issrc](https://github.com/jrsoftware/issrc) 的 `Files/Languages/ChineseSimplified.isl`（提交 `6ef32198e`），译者 Zhenghan Yang（Kira）；按 Inno Setup 仓库的 `license.txt` |
+
 ## 不在包里的
 
 - **adb 和系统镜像**：Google 的软件，受《Android 软件开发套件许可协议》约束，由管理器的「补全组件」或 `tools\modavd.exe components fetch` 在你同意协议后从官方渠道下载（0.38.1 及更早的包里是「补全组件.bat」）。
