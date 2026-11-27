@@ -2206,7 +2206,8 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
     // the fd table before the memory, so an fd another parent thread opened in
     // between is closed here but still owned in the fdsan table; the linker's
     // close of a library file that reuses that number would abort this child.
-    android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED);
+    // A shared fd table (CLONE_FILES) has no such gap, so fdsan stays on there.
+    if (!(flags & CLONE_FILES)) android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED);
     ForkChild();  // Also release another prepare's inherited locks on fallback.
   } else {
     ForkParent();

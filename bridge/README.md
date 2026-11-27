@@ -54,7 +54,7 @@ Google 的 native bridge 让 ART 和系统库保持原生 x86_64，只转译应�
 
 和 raw clone 不同的是，`fork()` 会让内核把子进程的新 tid 写进线程的缓存 tid（`CLONE_CHILD_SETTID`），而 linker 递归锁按缓存 tid 核对主人，对不上就解不开、锁留在子进程里（fixture 上实测：子进程随后卡在下一次 dlopen）。所以子进程里缓存 tid 先临时写回父线程的值，解完这一层 linker 锁再改回自己的。写回由伴生库构造函数里注册的 atfork child 回调做，它排在 Bionic 自己的回调之后、后加载库的回调之前，所以后面进 linker 的 child 回调能递归拿锁、不会等自己；写回期间屏蔽异步信号。缓存 tid 的位置（`pthread_internal_t::tid`，紧跟两个链表指针）只在核对过的宿主 libc / linker build-id 上启用（其他构建不套包装），每次使用前还和内核 tid 核对，对不上就照旧直接 `fork()`。
 
-raw clone 不经过 Bionic `fork()`，原来也就没有它在子进程里关 fdsan 的那一步（AOSP `libc/bionic/fork.cpp`：`android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED)`）。内核先复制 fd 表、后复制内存，这期间别的父线程新开的 fd 在子进程里是关着的，fdsan 表里却记着主人；子进程的 linker 打开库文件复用这个号、用完 close，就被 fdsan abort（Issue #102 的 ②）。现在受保护 raw clone 的子进程分支也先把 fdsan 报错级别设成关闭，再 `ForkChild`；子进程本来马上就 exec。tid 输出检查不通过、直接尾跳原调用的那一路不经过这里。
+raw clone 不经过 Bionic `fork()`，原来也就没有它在子进程里关 fdsan 的那一步（AOSP `libc/bionic/fork.cpp`：`android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED)`）。内核先复制 fd 表、后复制内存，这期间别的父线程新开的 fd 在子进程里是关着的，fdsan 表里却记着主人；子进程的 linker 打开库文件复用这个号、用完 close，就被 fdsan abort（Issue #102 的 ②）。现在受保护 raw clone 的子进程分支也先把 fdsan 报错级别设成关闭，再 `ForkChild`；子进程本来马上就 exec。带 `CLONE_FILES`（和父进程共用 fd 表）的没有这个空档，fdsan 保持原样。tid 输出检查不通过、直接尾跳原调用的那一路不经过这里。
 
 其余系统调用经 x86_64 汇编尾跳原样转发，保留零到六个可变参数、64 位返回值和 errno；受保护 clone 使用其原始五个参数。名单外应用撤回全部五个 GOT 槽。没有修改 Google 二进制或游戏文件，也没有改变 clone 标志和参数。父线程在 `CLONE_VFORK` 等待子进程期间仍持有 linker 和三把转译锁，需要这些锁的父线程会暂停；子进程若卡在其他未覆盖的资源上，可能扩大到整个进程停顿。原 200 ms 预算限制取锁或 cache Busy 的重试，超时告警并执行未保护原调用，原挂起风险仍在；公开 `dl_iterate_phdr` 等待 linker 本身是阻塞的，所以整个保护函数没有 200 ms 硬上限。
 

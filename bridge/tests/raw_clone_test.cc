@@ -934,6 +934,21 @@ void CheckProxyForkLockOrder() {
   CheckParentAfterChild(tester);
 }
 
+// A raw clone sharing the fd table keeps fdsan: it has no stale-owner gap.
+void CheckCloneFilesKeepsFdsan() {
+  ResetTestTranslations();
+  modavd_original_syscall = &syscall;
+  const long child = ModavdSyscallWrapper(SYS_clone, static_cast<long>(CLONE_FILES | SIGCHLD),
+                                          0L, 0L, 0L, 0L);
+  if (child == 0) {
+    const bool ok = ChildCanResumeTranslation() &&
+                    android_fdsan_get_error_level() == ANDROID_FDSAN_ERROR_LEVEL_FATAL;
+    syscall(SYS_exit, ok ? 37 : 38);
+    __builtin_unreachable();
+  }
+  CheckParentAfterChild(child);
+}
+
 }  // namespace
 
 int main() {
@@ -1087,6 +1102,7 @@ int main() {
     CheckProxyForkChildHandlers();
     CheckProxyForkLockOrder();
   }
+  CheckCloneFilesKeepsFdsan();
   for (auto& mutex : locks) pthread_mutex_destroy(&mutex);
   std::printf("raw clone ABI, loader locks and cache quiescence: %s (%d failures)\n",
               failures ? "FAIL" : "PASS", failures);
