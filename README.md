@@ -4,11 +4,9 @@
 
 <!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
 
-![ModAVD：基于 AOSP 的安卓模拟器](assets/banner.png)
+![ModAVD](assets/banner.png)
 
-基于 AOSP Android Emulator 37.2.10 的安卓模拟器，加了一批补丁后自己编译。目前支持 Windows，以后计划支持更多平台（见 [#27](https://github.com/ModAVD/ModAVD/issues/27)）。
-
-包里带管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`，用来建实例、开机关机；也可以接入 [AUTO-MAS](https://github.com/AUTO-MAS-Project/AUTO-MAS) 这类自动化工具，由它们负责实例编排和任务流程。
+ModAVD 是一款安卓模拟器，目前支持 Windows，计划支持更多平台。
 
 **文档站：<https://modavd.github.io/>**（安装、升级、反馈、隐私、各组件和参与开发的说明都在那里）
 
@@ -28,16 +26,28 @@
 
 ## 这是什么
 
-- 一个安卓模拟器，现在跑在 Windows 上，用 Windows 虚拟机监控程序平台（WHPX）做硬件加速；以后计划支持更多平台。
-- 可以开窗口当普通模拟器用，也可以不开窗口（无头）运行，由管理器、命令行或脚本拉起、用完关掉。
-- 模拟器本体来自 Google 开源的 [Android Emulator](https://android.googlesource.com/platform/external/qemu/)。我们改了其中的 QEMU、gfxstream（图形转发）和 Crashpad（崩溃处理），改动以补丁形式公开（`patches/`）。
-- adb 和安卓系统镜像属于 Google，受《Android 软件开发套件许可协议》约束，不能由我们分发，所以不在 Release 里，由管理器的「补全组件」（或命令行 `tools\modavd.exe components fetch`）在你的电脑上从官方渠道下载。
+- 用管理器带窗口启动，或用命令行无窗口运行。
+- 复制出来的实例也带着原来的游戏、登录状态和设置。
+- 每台实例都可以单独选择分辨率和横竖屏方向。
+- 在模拟器窗口里，可以直接用 Windows 输入法打字。
+- 更新 ModAVD 时会保留已有的实例、游戏和登录状态。
+- ModAVD 可以接入 AUTO-MAS、MAA 等自动化工具。
 
-和官方模拟器相比，已发布的 0.39.0 构建不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘可以改大；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，让一部分只有 arm64 版本的游戏也能跑，其他只有 arm64 的游戏仍需逐个验证。实测过哪些游戏见[已实测的游戏](#已实测的游戏)。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+| 复制实例 | 每台实例的显示设置 | 更新后接着用 |
+| --- | --- | --- |
+| ![](assets/readme/clone.png) | ![](assets/readme/display.png) | ![](assets/readme/retain.png) |
 
-版本号写成 `0.<Y>.<Z>`，0 表示还在内测。从 `0.32.1` 到 0.40，Y 就是模拟器构建号 mas-N、Z 是重新打包次数；0.40.2 起中间那位只在模拟器重新编译时加，只换管理器、截图库这些组件时加最后一位；构建号只记在包里的 `modavd-manifest.json`。
+<!-- 管理器实例列表截图待补。 -->
 
-这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)。
+| 实例设置 | 模拟器窗口 |
+| --- | --- |
+| ![管理器里的分辨率、DPI 和横竖屏设置](assets/readme/manager-settings.png) | ![打开安卓系统设置的模拟器窗口，标题栏上有截图、旋转、最大化和音量按钮](assets/readme/instance-window.png) |
+
+和官方模拟器相比，已发布的 0.43.0 不再向 Google 上传使用统计和崩溃报告，也不向 Google 检查更新、下载特性开关；write-through 降低强行结束时 qcow2 元数据损坏的风险，但仍应先执行 `sync`；安卓释放的内存还给 Windows；数据盘默认 256 GB、电脑上只按实际写入占空间，也可以改成指定大小；明日方舟、终末地下资源走单独的下载盘，不再被频繁落盘拖慢；带窗口时标题栏有最大化、截图、旋转按钮，开了声音的实例还有音量按钮；修了一批图形、网络和 WHPX 的问题；0.36.0 起带 arm64 执行桥，让一部分只有 arm64 版本的游戏也能跑，其他只有 arm64 的游戏仍需逐个验证。实测过哪些游戏见[已实测的游戏](#已实测的游戏)。逐项说明见文档站的[和官方模拟器有什么不同](https://modavd.github.io/guide/changes)，逐个补丁见 `patches/`。
+
+版本号写成 `0.<Y>.<Z>`，0 表示还在内测。中间那位只在模拟器重新编译时加，只换管理器、截图库这些组件时加最后一位。0.42.0 起模拟器构建号就写成那次重编的版本号（如 `0.42.0`）；0.41 及以前的构建号是 mas-N，中间那位就是 N。
+
+这个仓库放的是模拟器补丁、arm64 执行桥（[bridge/](bridge/)）和随包脚本（[package/](package/)）。管理器和命令行在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager)，宿主输入法在 [ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME)，截图库在 [ModAVDExtras](https://github.com/ModAVD/ModAVDExtras)。
 
 ## 已实测的游戏
 
@@ -45,14 +55,14 @@
 
 | 游戏 | 最近一次 | 测了什么 | 要注意的 |
 |---|---|---|---|
-| 《明日方舟》 | 0.39.0 | 从零下完 12.8 GB 资源；MAA 启动游戏、打 1-7；主界面和基建 59.8 fps（游戏锁 60） | 下资源只有约 9 MB/s（[#35](https://github.com/ModAVD/ModAVD/issues/35)）；偶尔启动时资源初始化失败、整包重下（[#89](https://github.com/ModAVD/ModAVD/issues/89)） |
-| 《重返未来：1999》 | 0.39.0（4.0.0） | 冷启动进主界面；0.38.0 时 M9A 打常规作战，战斗中 54.7–59.1 fps | — |
-| 《崩坏：星穹铁道》 | 0.39.0（4.5.0） | 冷启动；0.38.0 时 StarRailCopilot 跑模拟宇宙 15 分钟，帧率中位数 42.8 fps | 要用普通模式（Vulkan）：首次安装时默认的兼容模式（GLES）会在启动画面闪退；冷启动约 3 分钟（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
-| 《明日方舟：终末地》 | 0.38.0 | MaaEnd 拜访好友、基建，帧率中位数 34.7 fps | 冷启动到标题要 1 分钟以上（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
+| 《明日方舟》 | 0.43.0 | MAA 启动游戏、跑集成战略 15 分钟，没有报错，帧率中位数 57.6 fps（游戏锁 60）；0.39.0 时从零下完 12.8 GB 资源 | 偶尔启动时资源初始化失败、整包重下（[#89](https://github.com/ModAVD/ModAVD/issues/89)） |
+| 《重返未来：1999》 | 0.42.0（4.1.0） | 冷启动进游戏；0.38.0 时 M9A 打常规作战，战斗中 54.7–59.1 fps | — |
+| 《崩坏：星穹铁道》 | 0.43.0 | 冷启动到标题页，没有闪退；0.38.0 时 StarRailCopilot 跑模拟宇宙 15 分钟，帧率中位数 42.8 fps | 冷启动约 3 分钟（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
+| 《明日方舟：终末地》 | 0.43.0 | MaaEnd 启动游戏、拜访好友、基建，帧率中位数 24.0 fps（游戏里上限设为 30） | 冷启动到标题要 1 分钟以上（[#42](https://github.com/ModAVD/ModAVD/issues/42)） |
 | 《阴阳师》官服 | 0.38.0 | 装 arm64 执行桥；MaaYYs 进庭院、打 3 场御魂，庭院 59.7 fps、战斗约 58 fps | 冷启动偶尔卡在「正在获取音频列表...」，关掉重开即可（[#36](https://github.com/ModAVD/ModAVD/issues/36)）；其他渠道包在执行桥的名单里，没逐个测 |
 | 《如鸢》国服 | 0.37.0 | 装 arm64 执行桥；连续冷启动 20 次都正常，MaaYuan 日常能跑 | 配合 MaaYuan 跑时宿主内存会涨（[#156](https://github.com/ModAVD/ModAVD/issues/156)） |
-| 《崩坏3》 | 0.39.0（9.1.0） | 只测了冷启动到「下载资源」确认框，没进游戏 | — |
-| World of Airports | 0.39.0（3.7.3） | 装 arm64 执行桥和 Google Play 商店，开「报告 GLES 3.2」；在机场玩 13 分钟，30 fps（游戏锁 30） | 设置步骤见 [0.39.0 的发布说明](https://github.com/ModAVD/ModAVD/releases/tag/v0.39.0)（[#131](https://github.com/ModAVD/ModAVD/issues/131)） |
+| 《崩坏3》 | 0.41.0 | 只测了冷启动到「下载资源」确认框，没进游戏 | — |
+| World of Airports | 0.41.0 | 装 arm64 执行桥和 Google Play 商店，开「报告 GLES 3.2」；带窗口进机场，30 fps（游戏锁 30）；0.39.0 时在机场玩了 13 分钟 | 设置步骤见 [0.39.0 的发布说明](https://github.com/ModAVD/ModAVD/releases/tag/v0.39.0)（[#131](https://github.com/ModAVD/ModAVD/issues/131)） |
 
 ## 适用环境
 
@@ -62,7 +72,7 @@
 | CPU | x86_64（Intel / AMD），BIOS 里开着虚拟化（Intel VT-x / AMD SVM） |
 | Windows 功能 | 「Windows 虚拟机监控程序平台」（WHPX） |
 | 显卡 | 支持 Vulkan 的独立显卡或较新的集成显卡 |
-| 内存 | 每台实例默认 6 GB（可选 3–6 GB），开机时电脑要再空出约 1.5 GB |
+| 内存 | 每台实例默认 6 GB（可选 3、4、5、6、8 GB），开机时电脑要再空出约 1.5 GB |
 | 硬盘 | 放在 NTFS 盘。补全组件时要约 6.5 GB 可用；每台实例第一次开机要 10 GB 以上可用，之后随游戏数据增长，一个游戏通常几十 GB |
 | 路径 | 只含英文、数字的路径，例如 `D:\ModAVD` |
 | AUTO-MAS（可选） | 用 AUTO-MAS 管理实例时，请查看所用 ModAVD 版本的发布说明，确认兼容的 AUTO-MAS 版本 |
@@ -71,14 +81,18 @@
 
 1. 从[最新发布页](../../releases/latest)下载 Windows x64 整包 `ModAVD-<版本>-win-x64.zip`。
 2. 右键「全部解压缩」（压缩包里没有外层文件夹，不要用「解压到当前文件夹」），把得到的文件夹放到一个只含英文、数字的路径，例如 `D:\ModAVD`。
-3. 双击文件夹里的 `ModAVD.exe`（管理器），点上方提示里的「补全组件」，选好下载源、同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。也可以在这个文件夹里运行 `tools\modavd.exe components fetch`。0.38.1 及更早的包里是双击「补全组件.bat」。
-4. 用管理器 `ModAVD.exe` 或命令行 `tools\modavd.exe` 新建并启动实例。如果用 AUTO-MAS，在「模拟器管理」→「管理模拟器」→「添加魔改 AVD（内测）」中选择解压后的文件夹。
+3. 双击文件夹里的 `ModAVD.exe`（管理器），点上方提示里的「补全组件」，选好下载源、同意 Google 的许可协议后，它下载 adb 和 Android 14 系统镜像（约 1.5 GB）。也可以在这个文件夹里运行 `tools\modavd.exe components fetch`。
+4. 用管理器 `ModAVD.exe` 或命令行 `tools\modavd.exe` 新建并启动实例。如果用 AUTO-MAS，在它的模拟器管理里添加 ModAVD，选择解压后的文件夹。
 
 详细步骤、开启虚拟化和常见问题见文档站的[安装](https://modavd.github.io/guide/install)。
 
 ## 升级
 
-关掉所有实例，稍等半分钟，把新包整个解压到旧的根目录、覆盖同名文件。实例、游戏和登录状态都在 `avd\` 里，不会被动到。退回 0.36.0 以前的版本之前，要先卸掉每台实例上的 arm64 执行桥。逐项说明见文档站的[升级](https://modavd.github.io/guide/upgrade)。
+0.39.1 起可以在管理器的「设置」里点「更新」：它下载、核对新版，正常关掉开着的实例后换包，换好自动重新打开管理器。更新源可以选 GitHub 或 Mirror 酱（要 CDK）。命令行是 `tools\modavd.exe update install`，要先关掉所有实例和管理器。
+
+也可以手动换：关掉所有实例，稍等半分钟，把新包整个解压到旧的根目录、覆盖同名文件。
+
+两种办法都不动 `avd\`，实例、游戏和登录状态都在里面。退回 0.36.0 以前的版本之前，要先卸掉每台实例上的 arm64 执行桥。逐项说明见文档站的[升级](https://modavd.github.io/guide/upgrade)。
 
 ## 许可证与源码
 
@@ -88,7 +102,7 @@
   - arm64 执行桥（`sdk\emulator\resources\modavd\`，0.36.0 起）：本仓库的 [bridge/](bridge/)，许可证全文见 [bridge/LICENSE](bridge/LICENSE)；也在同一个 Release 的源码包里（见下面「源码」一条）。
   - 管理器 `ModAVD.exe` 和命令行 `tools\modavd.exe`（0.36.0 起）：在 [ModAVD/ModAVDManager](https://github.com/ModAVD/ModAVDManager) 仓库。
   - 宿主输入法 `components\modavd-ime.apk`（0.36.0 起）：在 [ModAVD/ModAVDHostIME](https://github.com/ModAVD/ModAVDHostIME) 仓库。
-- **截图库** `extras\modavd_extras.dll`（0.39.0 起）：ModAVD 自己写的，但不是 AGPL，按 GNU Lesser General Public License 第 3 版或更新版本（LGPL-3.0-or-later）发布。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) 仓库，也在同一个 Release 的源码包里。
+- **截图库** `extras\modavd_extras.dll`（0.39.0 起）和 MuMu 兼容外壳 `mumu-shim\`（0.40.1 起）：ModAVD 自己写的，但不是 AGPL，按 GNU Lesser General Public License 第 3 版或更新版本（LGPL-3.0-or-later）发布。源码在 [ModAVD/ModAVDExtras](https://github.com/ModAVD/ModAVDExtras) 仓库，也在同一个 Release 的源码包里。
 - **补丁**：每个补丁按它所改文件的许可证发布，与上游文件头一致：
   - QEMU 仓库（`platform/external/qemu`）里，改 QEMU 本体文件的、改带 GPL-2.0 文件头的文件的，按 GPL-2.0；改带 Apache-2.0 文件头的文件的（`android/`、`android-qemu2-glue/` 下的一部分），按 Apache License 2.0。逐个补丁的许可证见 [patches/BASE.md](patches/BASE.md)。
   - gfxstream 和 Crashpad 的补丁按 Apache License 2.0 发布，与它们本身相同。
