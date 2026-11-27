@@ -753,6 +753,91 @@ void CheckInheritedLoaderMutex() {
   child_notify_fd = -1;
 }
 
+int proxy_fork_calls = 0;
+bool proxy_fork_saw_held = false;
+long proxy_prepare_ns = 0;
+
+// Stands in for Bionic fork() without forking: run the registered handlers' work.
+pid_t FakeProxyFork() {
+  ++proxy_fork_calls;
+  proxy_fork_saw_held = g_fork_held.load() && g_fork_owner.load() == gettid();
+  const long begin = MonoNs();
+  ForkPrepare();
+  proxy_prepare_ns = MonoNs() - begin;
+  ForkParentAtFork();
+  errno = fake_errno;
+  return 4242;
+}
+
+pid_t ProxyForkThenNotify() {
+  ++proxy_fork_calls;
+  proxy_fork_saw_held = g_fork_held.load() && g_fork_owner.load() == gettid();
+  const pid_t result = fork();
+  if (result == 0) {
+    signal(SIGALRM, &ChildLoaderTimeout);
+    alarm(2);  // A child left holding the loader mutex exits 39 instead of hanging.
+    const char byte = 'c';
+    write(child_notify_fd, &byte, 1);
+  }
+  return result;
+}
+
+void CheckProxyFork() {
+  CHECK(*CachedTidWord() == KernelTid());
+  ResetTestTranslations();
+  g_real_proxy_fork = reinterpret_cast<void*>(&FakeProxyFork);
+  // Guard off: the wrapper is a plain call.
+  g_fork_safety.store(false);
+  proxy_fork_calls = 0;
+  errno = 0;
+  CHECK(ProxyForkWrapper() == 4242 && errno == fake_errno && proxy_fork_calls == 1 &&
+        !proxy_fork_saw_held);
+  g_fork_safety.store(true);
+  // Guard on: the locks are taken under the loader lock and prepare does not
+  // try them again on the same thread; the parent handler releases them.
+  const int misses = g_fork_misses.load();
+  CHECK(ProxyForkWrapper() == 4242 && errno == fake_errno && proxy_fork_calls == 2 &&
+        proxy_fork_saw_held && proxy_prepare_ns < kForkLockWaitNs / 2);
+  CHECK(g_fork_misses.load() == misses && !g_fork_held.load() && g_fork_owner.load() == 0);
+  CheckUnlocked();
+
+  // Real Bionic fork while another thread sits in the loader: the fork waits for
+  // it, and the child releases its own loader level (cached tid put back for the
+  // unlock) so that it can dlopen and iterate modules again.
+  int pipe_fds[2];
+  const int pipe_error = pipe(pipe_fds);
+  CHECK(pipe_error == 0);
+  if (pipe_error != 0) return;
+  HeldLoaderTest test{pipe_fds[0]};
+  child_notify_fd = pipe_fds[1];
+  pthread_t worker;
+  const int thread_error = pthread_create(&worker, nullptr, &HoldLoader, &test);
+  CHECK(thread_error == 0);
+  if (thread_error == 0) {
+    while (!test.ready.load()) sched_yield();
+    ResetTestTranslations();
+    g_real_proxy_fork = reinterpret_cast<void*>(&ProxyForkThenNotify);
+    const pid_t parent_tid = KernelTid();
+    const pid_t child = ProxyForkWrapper();
+    if (child == 0) {
+      const bool ok = ChildCanResumeTranslation() && gettid() == KernelTid() &&
+                      *CachedTidWord() == KernelTid() && KernelTid() != parent_tid;
+      alarm(0);
+      syscall(SYS_exit, ok ? 37 : 38);
+      __builtin_unreachable();
+    }
+    CHECK(proxy_fork_saw_held);
+    CheckParentAfterChild(child);
+    CHECK(gettid() == parent_tid && *CachedTidWord() == parent_tid);
+    CHECK(pthread_join(worker, nullptr) == 0);
+    CHECK(test.poll_result == 0 && g_fork_misses.load() == misses);
+  }
+  close(pipe_fds[0]);
+  close(pipe_fds[1]);
+  child_notify_fd = -1;
+  g_real_proxy_fork = nullptr;
+}
+
 }  // namespace
 
 int main() {
@@ -898,6 +983,7 @@ int main() {
     }
     CheckParentAfterChild(child);
     CHECK(pthread_join(worker, nullptr) == 0);
+    CheckProxyFork();
   }
   for (auto& mutex : locks) pthread_mutex_destroy(&mutex);
   std::printf("raw clone ABI, loader locks and cache quiescence: %s (%d failures)\n",

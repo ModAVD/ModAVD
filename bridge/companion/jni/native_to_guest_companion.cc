@@ -1552,6 +1552,8 @@ int NdkMprotectWrapper(void* addr, size_t len, int prot) {
   return rc;
 }
 
+void MaybeInstallProxyFork();
+
 void* NdkAndroidDlopenExtWrapper(const char* filename, int flags, const void* extinfo) {
   AndroidDlopenExtFn real = g_real_ndk_android_dlopen_ext;
   if (real == nullptr) return nullptr;
@@ -1565,6 +1567,7 @@ void* NdkAndroidDlopenExtWrapper(const char* filename, int flags, const void* ex
     g_in_trigger = true;
     RefreshHookedSlotTableIfModulesGrew();  // a new module brings new watched slots
     MaybeReassertSegv();
+    MaybeInstallProxyFork();  // the guest libc's proxy library loads after arming
     g_in_trigger = false;
   }
   return result;
@@ -1583,6 +1586,7 @@ void* NdkDlopenWrapper(const char* filename, int flags) {
     g_in_trigger = true;
     RefreshHookedSlotTableIfModulesGrew();  // a new module brings new watched slots
     MaybeReassertSegv();
+    MaybeInstallProxyFork();
     g_in_trigger = false;
   }
   return result;
@@ -2026,6 +2030,8 @@ void YieldForkAttempt(ForkAttempt result) {
 
 void ForkPrepare() {
   if (!g_fork_safety.load(std::memory_order_acquire)) return;
+  // ProxyForkWrapper already took every lock on this thread under the loader lock.
+  if (g_fork_held.load() && g_fork_owner.load() == gettid()) return;
   const long deadline = MonoNs() + kForkLockWaitNs;
   for (;;) {
     const ForkAttempt result = TryForkLocks();
@@ -2121,6 +2127,7 @@ void InstallForkSafety(uintptr_t base) {
   g_fork_safety.store(true, std::memory_order_release);
   LOGI("fork safety: holding %d translator locks across fork(); cache quiescence enabled; "
        "detailed diagnostics=%d", kNumForkLocks, g_fork_diagnostics.load());
+  MaybeInstallProxyFork();
 }
 
 struct RawCloneCall {
@@ -2206,6 +2213,124 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
   }
   errno = call.saved_errno;
   return call.result;
+}
+
+// --- host fork() under the loader lock (ModAVD#102) ----------------------------
+// The guest's libc fork() reaches the host through the proxy library's thunk
+// DoThunk___clone_for_fork: host Bionic fork() via the proxy's own fork@LIBC GOT
+// slot, then ResetCurrentGuestThreadAfterFork in the child, which dlopens the
+// exec-region library. The atfork handlers above carry the translator locks across
+// that fork but not the loader's global recursive mutex. If another thread was in
+// dlopen or dl_iterate_phdr at the fork, the child inherits that mutex locked and
+// waits in its dlopen forever (futex_wait on linker64's g_dl_mutex, value 0x4002;
+// about one launch in twenty of the guest_fork fixture).
+//
+// The proxy's slot now points at a wrapper that forks inside a dl_iterate_phdr
+// callback, as the raw clone guard does, so no other thread is in the loader at
+// that moment; the translator locks are tried once inside, never waited for there.
+// One difference from the raw clone: Bionic fork() has the kernel store the child's
+// new tid in this thread's cached tid (CLONE_CHILD_SETTID), while the recursive
+// unlock in dl_iterate_phdr checks that cached tid against the recorded owner, the
+// parent, and fails with EPERM. Measured on the fixture: without a correction the
+// child then hangs in its next dlopen exactly as before. So the child puts the
+// parent's tid back for that single unlock and restores its own right after. The
+// cached tid is pthread_internal_t::tid, right after the two list pointers; the
+// wrapper checks that word against the kernel's tid before each use and otherwise
+// forks exactly as before.
+using ForkFn = pid_t (*)();
+void* g_real_proxy_fork = nullptr;  // Written before the slot points at the wrapper.
+std::atomic<bool> g_proxy_fork_installed{false};
+std::atomic<bool> g_proxy_fork_layout_logged{false};
+constexpr uintptr_t kCachedTidOffset = 2 * sizeof(void*);
+
+pid_t* CachedTidWord() {
+  return reinterpret_cast<pid_t*>(static_cast<uintptr_t>(pthread_self()) + kCachedTidOffset);
+}
+
+pid_t KernelTid() { return static_cast<pid_t>(syscall(SYS_gettid)); }
+
+struct HostForkCall {
+  ForkFn real;
+  pid_t parent_tid;
+  int incoming_errno;
+  ForkAttempt attempt = ForkAttempt::kDisabled;
+  bool forked = false;
+  bool child_tid_swapped = false;
+  pid_t result = -1;
+  int saved_errno = 0;
+};
+
+int HostForkUnderLoaderLock(struct dl_phdr_info*, size_t, void* opaque) {
+  auto& call = *static_cast<HostForkCall*>(opaque);
+  call.attempt = TryForkLocks();
+  if (call.attempt != ForkAttempt::kReady) return 1;  // Retry outside the loader scope.
+  // ForkPrepare sees the locks held by this thread; the atfork parent and child
+  // handlers release them as for any other fork.
+  errno = call.incoming_errno;
+  call.result = call.real();
+  call.saved_errno = errno;
+  call.forked = true;
+  if (call.result == 0 && __atomic_load_n(CachedTidWord(), __ATOMIC_RELAXED) == KernelTid()) {
+    __atomic_store_n(CachedTidWord(), call.parent_tid, __ATOMIC_RELAXED);
+    call.child_tid_swapped = true;
+  }
+  return 1;  // Release exactly this loader-lock level, as the recorded owner.
+}
+
+pid_t ProxyForkWrapper() {
+  const int incoming_errno = errno;
+  ForkFn real = reinterpret_cast<ForkFn>(__atomic_load_n(&g_real_proxy_fork, __ATOMIC_ACQUIRE));
+  if (real == nullptr) real = &fork;
+  const pid_t parent_tid = KernelTid();
+  const bool layout_ok = __atomic_load_n(CachedTidWord(), __ATOMIC_RELAXED) == parent_tid;
+  if (!layout_ok && !g_proxy_fork_layout_logged.exchange(true)) {
+    LOGE("fork safety: cached tid not found where expected; host fork runs without the loader lock");
+  }
+  if (!layout_ok || !g_fork_safety.load(std::memory_order_acquire)) {
+    errno = incoming_errno;
+    return real();
+  }
+  HostForkCall call{real, parent_tid, incoming_errno};
+  const long begin = MonoNs();
+  const long deadline = begin + kForkLockWaitNs;
+  for (;;) {
+    dl_iterate_phdr(&HostForkUnderLoaderLock, &call);
+    if (call.forked) break;
+    if (call.attempt == ForkAttempt::kUnknown || call.attempt == ForkAttempt::kDisabled ||
+        MonoNs() >= deadline) {
+      // As before this wrapper: an ordinary fork whose prepare handler makes its
+      // own attempt, or none once the guard is off.
+      errno = incoming_errno;
+      return real();
+    }
+    YieldForkAttempt(call.attempt);
+  }
+  if (call.result == 0) {
+    if (call.child_tid_swapped) __atomic_store_n(CachedTidWord(), KernelTid(), __ATOMIC_RELAXED);
+  } else if (g_fork_diagnostics.load(std::memory_order_relaxed)) {
+    LOGI("host fork loader guard: result=%d wait_us=%ld", call.result, (MonoNs() - begin) / 1000);
+  }
+  errno = call.saved_errno;
+  return call.result;
+}
+
+// The public loader scope serialises installers, as for the translator's slots.
+int InstallProxyForkLocked(struct dl_phdr_info*, size_t, void*) {
+  if (g_detached.load(std::memory_order_acquire) ||
+      g_proxy_fork_installed.load(std::memory_order_acquire)) return 1;
+  if (PatchOneGotSlot("libndk_translation_proxy_libc.so", "fork",
+                      reinterpret_cast<void*>(&ProxyForkWrapper), &g_real_proxy_fork,
+                      "proxy_libc!fork")) {
+    g_proxy_fork_installed.store(true, std::memory_order_release);
+  }
+  return 1;
+}
+
+void MaybeInstallProxyFork() {
+  if (g_fork_safety.load(std::memory_order_acquire) &&
+      !g_proxy_fork_installed.load(std::memory_order_acquire)) {
+    dl_iterate_phdr(&InstallProxyForkLocked, nullptr);
+  }
 }
 
 }  // namespace
