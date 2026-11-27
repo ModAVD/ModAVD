@@ -957,15 +957,19 @@ int main() {
   // must inherit an already-quiescent cache and see every mutex unlocked before
   // the translator's reset work begins. Neither cache copy may be rewritten.
   modavd_original_syscall = &syscall;
+  android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_FATAL);
   for (long flags : {static_cast<long>(SIGCHLD), static_cast<long>(CLONE_VFORK | SIGCHLD)}) {
     ResetTestTranslations();
     const long child = ModavdSyscallWrapper(SYS_clone, flags, 0L, 0L, 0L, 0L);
     if (child == 0) {
-      const bool ok = ChildCanResumeTranslation();
+      // Like a Bionic fork() child, the protected raw clone child runs without fdsan.
+      const bool ok = ChildCanResumeTranslation() &&
+                      android_fdsan_get_error_level() == ANDROID_FDSAN_ERROR_LEVEL_DISABLED;
       syscall(SYS_exit, ok ? 37 : 38);
       __builtin_unreachable();
     }
     CheckParentAfterChild(child);
+    CHECK(android_fdsan_get_error_level() == ANDROID_FDSAN_ERROR_LEVEL_FATAL);
   }
   CheckRecursiveLoaderScope();
   CheckInheritedLoaderMutex();

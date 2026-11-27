@@ -56,6 +56,7 @@
 #include <sched.h>
 #include <time.h>
 #include <sys/syscall.h>
+#include <android/fdsan.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "ModAvdGate", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ModAvdGate", __VA_ARGS__)
@@ -2200,6 +2201,11 @@ extern "C" __attribute__((used, visibility("hidden"))) long ModavdGuardClone(lon
   // leaves the host cached tid unchanged, so its recursive unlock used the same
   // owner in both. Bionic fork's atfork handlers never take this loader scope.
   if (call.result == 0) {
+    // As Bionic fork() does in its child (libc/bionic/fork.cpp). The kernel copies
+    // the fd table before the memory, so an fd another parent thread opened in
+    // between is closed here but still owned in the fdsan table; the linker's
+    // close of a library file that reuses that number would abort this child.
+    android_fdsan_set_error_level(ANDROID_FDSAN_ERROR_LEVEL_DISABLED);
     ForkChild();  // Also release another prepare's inherited locks on fallback.
   } else {
     ForkParent();
