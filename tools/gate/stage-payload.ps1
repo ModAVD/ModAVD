@@ -74,7 +74,7 @@ if ($Payload) {
     $sources["$PackageDir/modavd_bridge.rc"] = $Rc
 }
 $missing = @($sources.GetEnumerator() | Where-Object { -not (Test-Path -LiteralPath $_.Value -PathType Leaf) } | ForEach-Object { $_.Value })
-if ($missing) { throw ("载荷源文件不存在：`n  " + ($missing -join "`n  ") + "`n（-Payload 指一个已冻结的目录，或者 -Bridge / -Gate / -Rc 分别指）") }
+if ($missing) { throw ("载荷源文件不存在 / Payload source files are missing:`n  " + ($missing -join "`n  ") + "`n（-Payload 指一个已冻结的目录，或者 -Bridge / -Gate / -Rc 分别指 / Point -Payload at a frozen directory, or give -Bridge / -Gate / -Rc one by one）") }
 
 $actual = [ordered]@{}
 foreach ($kv in $sources.GetEnumerator()) { $actual[$kv.Key] = Sha $kv.Value }
@@ -98,35 +98,35 @@ if ($UpdateSums) {
     return
 }
 
-if (-not (Test-Path -LiteralPath $Sums)) { throw "找不到固定哈希文件：$Sums（第一次固定用 -UpdateSums）" }
+if (-not (Test-Path -LiteralPath $Sums)) { throw "找不到固定哈希文件：$Sums（第一次固定用 -UpdateSums） / Pinned hash file not found: $Sums (use -UpdateSums to pin for the first time)" }
 $pinned = [ordered]@{}
 foreach ($line in [IO.File]::ReadAllText($Sums, [Text.UTF8Encoding]::new($false)).Split("`n")) {
     $t = $line.Trim("`r", ' ')
     if (-not $t) { continue }
     $m = [regex]::Match($t, '^([0-9a-f]{64})  (.+)$')
-    if (-not $m.Success) { throw "固定哈希文件里有读不懂的行：$t" }
-    if ($pinned.Contains($m.Groups[2].Value)) { throw "固定哈希文件里有重复的路径：$($m.Groups[2].Value)" }
+    if (-not $m.Success) { throw "固定哈希文件里有读不懂的行 / Unreadable line in the pinned hash file: $t" }
+    if ($pinned.Contains($m.Groups[2].Value)) { throw "固定哈希文件里有重复的路径 / Duplicate path in the pinned hash file: $($m.Groups[2].Value)" }
     $pinned[$m.Groups[2].Value] = $m.Groups[1].Value
 }
 $bad = @()
 foreach ($k in $actual.Keys) {
-    if (-not $pinned.Contains($k)) { $bad += "$k 没有被固定" }
-    elseif ($pinned[$k] -ne $actual[$k]) { $bad += "$k 和固定值不同：固定 $($pinned[$k])，实际 $($actual[$k])" }
+    if (-not $pinned.Contains($k)) { $bad += "$k 没有被固定 / $k is not pinned" }
+    elseif ($pinned[$k] -ne $actual[$k]) { $bad += "$k 和固定值不同：固定 $($pinned[$k])，实际 $($actual[$k]) / $k differs from the pinned value: pinned $($pinned[$k]), actual $($actual[$k])" }
 }
-foreach ($k in $pinned.Keys) { if (-not $actual.Contains($k)) { $bad += "$k 被固定了，但这次没有这个文件" } }
+foreach ($k in $pinned.Keys) { if (-not $actual.Contains($k)) { $bad += "$k 被固定了，但这次没有这个文件 / $k is pinned but this run has no such file" } }
 if ($bad) {
-    throw ("载荷和 $Sums 对不上：`n  " + ($bad -join "`n  ") +
-        "`n重编过载荷就跑一次 `"stage-payload.ps1 -UpdateSums`" 重新固定，让这次换二进制在 git diff 里看得见。")
+    throw ("载荷和 $Sums 对不上 / The payload does not match ${Sums}:`n  " + ($bad -join "`n  ") +
+        "`n重编过载荷就跑一次 `"stage-payload.ps1 -UpdateSums`" 重新固定，让这次换二进制在 git diff 里看得见。/ After rebuilding the payload, run `"stage-payload.ps1 -UpdateSums`" once to pin it again, so that the binary change shows in git diff.")
 }
 Write-Host "载荷与 $Sums 一致（$($actual.Count) 个文件）"
 
 if ($CheckOnly) { return }
 
 # ---- 放进 SDK 树
-if (-not $Sdk) { throw '要 -Sdk（sdk-0.N.0 / sdk-masN 根目录），或者用 -CheckOnly / -UpdateSums' }
+if (-not $Sdk) { throw '要 -Sdk（sdk-0.N.0 / sdk-masN 根目录），或者用 -CheckOnly / -UpdateSums / -Sdk is required (the sdk-0.N.0 / sdk-masN root), or use -CheckOnly / -UpdateSums' }
 $sdkRoot = [IO.Path]::GetFullPath($Sdk)
 $emu = Join-Path $sdkRoot 'emulator'
-if (-not (Test-Path -LiteralPath (Join-Path $emu 'emulator.exe'))) { throw "不像是 SDK 根目录（找不到 emulator\emulator.exe）：$sdkRoot" }
+if (-not (Test-Path -LiteralPath (Join-Path $emu 'emulator.exe'))) { throw "不像是 SDK 根目录（找不到 emulator\emulator.exe）/ Not an SDK root (emulator\emulator.exe not found): $sdkRoot" }
 $dest = Join-Path $emu ($PackageDir -replace '/', '\')
 if (-not $PSCmdlet.ShouldProcess($dest, "放 $($actual.Count) 个载荷文件")) { return }
 if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
@@ -136,10 +136,10 @@ foreach ($kv in $sources.GetEnumerator()) {
     Copy-Item -LiteralPath $kv.Value -Destination $target -Force
     # 拷完再算一遍：源文件可能在中间被重编过
     $got = Sha $target
-    if ($got -ne $actual[$kv.Key]) { throw "拷过去的 $name 哈希不对：$got（期望 $($actual[$kv.Key])）" }
+    if ($got -ne $actual[$kv.Key]) { throw "拷过去的 $name 哈希不对：$got（期望 $($actual[$kv.Key])） / Wrong hash for the copied ${name}: $got (expected $($actual[$kv.Key]))" }
     Write-Host "  + $target"
 }
 # 多出来的文件会让发版的全等判定直接停，所以这里就报出来
 $extra = @(Get-ChildItem -LiteralPath $dest -File | Where-Object { $Names -notcontains $_.Name } | ForEach-Object { $_.Name })
-if ($extra) { throw ("$dest 里有不该有的文件：" + ($extra -join '、') + "`n（发版的 SDK 文件集是全等判定，多一个就停）") }
+if ($extra) { throw ("$dest 里有不该有的文件 / Unexpected files in ${dest}: " + ($extra -join '、') + "`n（发版的 SDK 文件集是全等判定，多一个就停 / The release SDK file set must match exactly; one extra file stops it）") }
 Write-Host "载荷已就位：$dest"

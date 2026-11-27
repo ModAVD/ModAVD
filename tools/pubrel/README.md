@@ -1,5 +1,9 @@
 # ModAVD 发版框架
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 入口以 PowerShell 7 运行，辅助代码只用 Python 3.12 标准库；需要 Git、7-Zip，创建草稿时另需已登录的 `gh`。
 发版检查清单见仓库根目录的 [RELEASING.md](../../RELEASING.md)，这里是工具本身的说明。
 

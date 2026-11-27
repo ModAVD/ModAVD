@@ -1,6 +1,10 @@
 <!-- Copyright 2026 Ji Mao Cai -->
 # ARM64 guest fork fixture
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 只在自己的独立、空闲 API 34 测试实例运行。包名固定为 `org.modavd.tests.guestfork`，APK 只含 ARM64 JNI 库；不向游戏注入代码。每次启动各做 3 轮 imported libc fork、显式 guest `SYS_clone(0x1200011)`、`SYS_clone(0x1300011)`，共 9 个 case。子进程只经 pipe 返回检查信息后退出，不返回 ART；raw tid 输出使用两侧 PROT_NONE 的独立 mmap 页。fixture 自身的 poll/wait 有期限，仍需外部超时限制启动和观察。
 
 ## 构建

@@ -13,7 +13,7 @@ function Get-Local {
         if (Test-Path -LiteralPath $script:ModAVDLocalFile -PathType Leaf) {
             $script:ModAVDLocal = Import-PowerShellDataFile -LiteralPath $script:ModAVDLocalFile
         } elseif ($env:MODAVD_TOOLS_CONFIG) {
-            throw "MODAVD_TOOLS_CONFIG 指的本机配置不存在：$($env:MODAVD_TOOLS_CONFIG)"
+            throw "MODAVD_TOOLS_CONFIG 指的本机配置不存在 / The local config named by MODAVD_TOOLS_CONFIG does not exist: $($env:MODAVD_TOOLS_CONFIG)"
         } else {
             $script:ModAVDLocal = @{}
         }
@@ -31,7 +31,7 @@ function Use-Local([string]$Key, $Value, [string]$Param, [switch]$Optional) {
     }
     if ($null -ne $v -and "$v" -ne '') { return $v }
     if ($Optional) { return $null }
-    throw "没有 $Key：给 $Param，或者写进本机配置 $($script:ModAVDLocalFile)（照 tools\local.example.psd1）"
+    throw "没有 ${Key}：给 $Param，或者写进本机配置 $($script:ModAVDLocalFile)（照 tools\local.example.psd1） / No ${Key}: pass $Param, or put it in the local config $($script:ModAVDLocalFile) (see tools\local.example.psd1)"
 }
 
 # $Path 是 $Roots 里某一个本身或在它下面时返回那一个（不分大小写，不解析链接），否则返回 $null
