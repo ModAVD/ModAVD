@@ -1,5 +1,9 @@
 # gate：把 arm64 执行桥的载荷放进 SDK
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 执行桥是什么、为什么要它、怎么装进实例，见 [bridge/README.md](../../bridge/README.md)。这里只管发版时的一步：
 把桥的三个载荷文件放进 SDK 树，让它们随 `sdk\emulator` 一起进包。
 
