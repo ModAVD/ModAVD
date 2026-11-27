@@ -10,12 +10,12 @@ The pre-release regression (end-to-end tests) lives in a separate repository, [M
 | Directory | What it does |
 | --- | --- |
 | [`build/`](build/) | `build-sdk.ps1`: incrementally builds `sdk-0.N.0` (`sdk-masN` up to 0.41) from the AOSP emulator source tree, records the commit of each repository at build time, and puts it into the execution bridge payload |
-| [`gate/`](gate/README.md) | `stage-payload.ps1`: checks the pinned hashes of the three arm64 execution bridge payload files and puts them into the SDK tree |
+| [`gate/`](gate/README.en.md) | `stage-payload.ps1`: checks the pinned hashes of the three arm64 execution bridge payload files and puts them into the SDK tree |
 | [`installer/`](installer/README.md) | `build-installer.ps1`: builds the Inno Setup installer `ModAVD-<version>-win-x64-setup.exe` from the release zip (not yet part of the release flow) |
-| [`pubrel/`](pubrel/README.md) | `release.ps1`: assembles the package, exports and replays patches, builds the source bundle and the Release notes, runs the privacy scan, and can optionally create a GitHub draft |
+| [`pubrel/`](pubrel/README.en.md) | `release.ps1`: assembles the package, exports and replays patches, builds the source bundle and the Release notes, runs the privacy scan, and can optionally create a GitHub draft |
 
 The checks used by CI (`checks.py`, `privacy.py`, the allowlist) are in [`scripts/`](../scripts/) in this repository, and the release tools use that same copy directly.
-The release checklist is in [RELEASING.md](../RELEASING.md).
+The release checklist is in [RELEASING.en.md](../RELEASING.en.md).
 
 ## Local configuration
 

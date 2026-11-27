@@ -1,5 +1,9 @@
 # ModAVD 发版检查清单
 
+**简体中文** | [English](RELEASING.en.md)
+
+<!-- RELEASING.md 和 RELEASING.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 构建和包装入口在本仓库的 [`tools/`](tools/README.md)：`tools/build/build-sdk.ps1`、`tools/pubrel/release.ps1`（说明见 [tools/pubrel/README.md](tools/pubrel/README.md)）；发版前回归在 [ModAVDE2E](https://github.com/ModAVD/ModAVDE2E)。
 本机路径（源码树、临时目录、外部输入）用参数或本机配置给，见 [tools/README.md](tools/README.md)「本机配置」；外部构建方法见文档站的[从源码构建](https://modavd.github.io/develop/build)。
 
