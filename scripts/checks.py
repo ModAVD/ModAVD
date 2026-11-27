@@ -334,6 +334,16 @@ def check_base_row(base_text, s):
         raise ValueError(f"series.json and BASE.md patch counts differ: {s['dir']}")
 
 
+def check_platforms(s):
+    """Every exported patch has a valid platform list."""
+    platforms = s.get("platforms")
+    allowed = {"windows", "macos", "linux", "all"}
+    if not isinstance(platforms, list) or len(platforms) != int(s["count"]):
+        raise ValueError(f"series.json platforms must have one entry per patch: {s['dir']}")
+    if any(not isinstance(item, list) or not item or any(value not in allowed for value in item) for item in platforms):
+        raise ValueError(f"Invalid patch platform: {s['dir']}")
+
+
 def replay(root, work):
     if work.exists():
         raise ValueError("Replay workspace already exists; choose a fresh directory")
@@ -344,6 +354,7 @@ def replay(root, work):
     for s in series:
         if not re.fullmatch(r"platform/[a-zA-Z0-9_/-]+", s["upstream"]) or any(not re.fullmatch(r"[0-9a-f]{40}", s[k]) for k in ["base", "head", "tree"]):
             raise ValueError("Invalid AOSP project/base")
+        check_platforms(s)
         check_base_row(base_text, s)
         directory = s["dir"]
         # from 0.42 new series directories are named after the version (qemu/0.42.0): the second part may have dots,

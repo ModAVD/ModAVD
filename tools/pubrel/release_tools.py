@@ -1229,6 +1229,24 @@ def upstream_pick(repo, commit):
     return bool(checks.UPSTREAM_PICK.search(message)) and author_email.strip().lower() != committer_email.strip().lower()
 
 
+def patch_platforms(path):
+    """Classify one exported patch from the files it changes."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    paths = []
+    for match in re.finditer(r"^diff --git a/(.*?) b/(.*?)$", text, re.MULTILINE):
+        paths.extend(match.groups())
+    found = set()
+    for changed in paths:
+        name = changed.lower()
+        if any(part in name for part in ("win32", "windows", "whpx", "wgl", "winres")):
+            found.add("windows")
+        if any(part in name for part in ("darwin", "macos", "hvf")):
+            found.add("macos")
+        if "linux-user" in name:
+            found.add("linux")
+    return sorted(found) or ["all"]
+
+
 def export_patches(args):
     out = Path(args.output)
     data = load(out / "snapshot.json")
@@ -1273,7 +1291,8 @@ def export_patches(args):
             if len(re.findall(rb"(?m)^From: ", mail)) != 1 or not author or re.search(rb"(?i)co-authored-by:", header):
                 raise ValueError(f"Patch author/trailer check failed: {f.name}")
             (dest / f.name).write_bytes(header + diff)
-        entry = dict(series, count=len(files), tree=git(repo, "rev-parse", head + "^{tree}"),
+        platforms = [patch_platforms(f) for f in files]
+        entry = dict(series, count=len(files), platforms=platforms, tree=git(repo, "rev-parse", head + "^{tree}"),
                      trees=[git(repo, "rev-parse", c + "^{tree}") for c in originals], authors=authors,
                      path="patches/" + series["dir"])
         series_log.append(entry)
@@ -1308,8 +1327,8 @@ def export_patches(args):
     else:
         lines = [f"# ModAVD {data['build']} 补丁", "", "按文件名顺序 git am --keep-cr；代码补丁许可证按所改文件的文件头。",
                  "图片和图标的版权与授权限制见仓库 README；不因代码的许可证而获得图片授权。新增补丁的许可证须在发版前逐项复核。", "",
-                 "| 目录 | AOSP 仓库 | 基准 | 补丁数 | 原分支头 |", "| --- | --- | --- | --- | --- |"]
-        lines += [f"| `{s['dir']}` | `{s['upstream']}` | `{s['base']}` | {s['count']} | `{s['head']}` |" for s in series_log]
+                 "| 目录 | AOSP 仓库 | 基准 | 补丁数 | 平台 | 原分支头 |", "| --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| `{s['dir']}` | `{s['upstream']}` | `{s['base']}` | {s['count']} | {' / '.join(dict.fromkeys(p for item in s['platforms'] for p in item))} | `{s['head']}` |" for s in series_log]
         (out / "patches/BASE.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

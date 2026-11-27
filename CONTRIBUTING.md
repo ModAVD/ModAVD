@@ -31,7 +31,7 @@ issue、PR、评论和提交说明用中文或英文都可以。
 - 中英两版：README、这份说明和 AGENTS 都有中文（`README.md`、`CONTRIBUTING.md`、`AGENTS.md`）和英文（`README.en.md`、`CONTRIBUTING.en.md`、`AGENTS.en.md`）两份，逐节对应，中文是主语言。改了一份，就在同一个 PR 里把另一份也改了；只会写一种语言的，在 PR 里说一声，由维护者补上。文档站的英文页也是这样，见[文档和本站](https://modavd.github.io/develop/docs)。
 - 随包脚本 `package/`：可以提 PR，合进来后随下一版发出。写法见 [package/README.md](package/README.md)。补全组件、收集问题信息、复制配置信息在 [ModAVDManager](https://github.com/ModAVD/ModAVDManager) 里改。
 - arm64 执行桥 `bridge/`：改动先开 issue 商量。它直接影响游戏能不能启动，每一版都要在装了桥的实例上实跑游戏回归。
-- 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。
+- 模拟器补丁：先开 issue，再按[模拟器本体](https://modavd.github.io/develop/emulator)导出 `.patch`，附在 issue 里或开一个只加 `incoming/<主题>/*.patch` 的 PR。补丁直接就是要收的样子：测试脚本别放进补丁本身（写在 PR 说明里，或放 `incoming/<主题>/tests/`）。审过就合并，合并即收录，原样随下一版发出，署名保留。不要求你会编译或跑回归。只对某个平台有效的补丁，标题用平台前缀（Windows 的 `whpx:`、`file-win32:`，mac 的 `hvf:`、`macos:`），`incoming/` 的主题名也带上平台。
 - `patches/`、`manifests/`、`release/` 是发版工具（`tools/pubrel/`）导出的：PR 不直接改这些，有问题先开 issue。
 - 发版和编译工具 `tools/`，以及 CI 检查 `scripts/`（发版工具也用这一份）：改动先开 issue 商量。本机路径不写进仓库，用参数或本机配置，见 [tools/README.md](tools/README.md)；改了 `tools/pubrel/` 或 `scripts/` 要在本地跑 `python -I tools/pubrel/test_release.py --work <全新临时目录>`。
 - `scripts/privacy.py`、`scripts/repo_checks.py`（提交作者检查）和 `scripts/test_repo_checks.py` 在 ModAVD、ModAVDManager、ModAVDHostIME、ModAVDE2E、modavd.github.io、ModAVDExtras 里是逐字节相同的一份，各仓库的 CI 会拿它和这里的 main 比。要改先改这里，再原样复制到其余仓库。
