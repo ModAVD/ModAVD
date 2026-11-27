@@ -286,7 +286,7 @@ class CloseIssues(unittest.TestCase):
         s = Scenario()
         code, lines = s.run(dry_run=True)
         self.assertEqual((code, s.gh.calls), (0, []))
-        self.assertIn("| #201 Issue 201 | ModAVDManager#130 | 关掉，附发布链接，去掉 pending-release |", "\n".join(lines))
+        self.assertIn("| #201 Issue 201 | ModAVDManager#130 | 关掉，附发布链接，去掉 !pending-release |", "\n".join(lines))
 
     def test_release_must_be_published(self):
         for release in [None, {"tag_name": TAG, "draft": True}]:
