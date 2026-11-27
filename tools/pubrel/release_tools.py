@@ -168,10 +168,15 @@ OWN_SOURCES_EXTRAS_TEXT = """\
 """
 # changelog-collect: this version's 更新内容 comes from the changelog.d files of the public repositories (see
 # checks.fragment_item), one item each: the ones a repository has now and did not have at its previous release.
-# (argument with the checkout, GitHub repository, what goes before #N in an item's reference)
+# (argument with the checkout, GitHub repository, what goes before #N in an item's reference, where the component
+# writes its version: (file, pattern), as its release workflow checks the tag against it; ModAVDHostIME writes none)
 RELEASE_REPO = "ModAVD/ModAVD"
-FRAGMENT_REPOS = (("repository", "ModAVD", ""), ("manager_repo", "ModAVDManager", "ModAVD/ModAVDManager"),
-                  ("extras_repo", "ModAVDExtras", "ModAVD/ModAVDExtras"), ("ime_repo", "ModAVDHostIME", "ModAVD/ModAVDHostIME"))
+MANAGER_VERSION_FILE = "internal/buildinfo/buildinfo.go"
+MANAGER_VERSION_RE = r'(?m)^(?:var|const)\s+Version\s*=\s*"([^"]+)"'
+FRAGMENT_REPOS = (("repository", "ModAVD", "", None),
+                  ("manager_repo", "ModAVDManager", "ModAVD/ModAVDManager", (MANAGER_VERSION_FILE, MANAGER_VERSION_RE)),
+                  ("extras_repo", "ModAVDExtras", "ModAVD/ModAVDExtras", (EXTRAS_VERSION_FILE, EXTRAS_VERSION_RE)),
+                  ("ime_repo", "ModAVDHostIME", "ModAVD/ModAVDHostIME", None))
 # Written by hand (changelog-collect --note, with its English --note-en): what the user has to do for this version.
 # Kept when collecting again.
 NOTE_CATEGORY = "说明"
@@ -351,12 +356,43 @@ def sdk_upstream(sdk):
     return m[1]
 
 
-def previous_release(repo, commit):
-    """The nearest release tag (v*) that `commit` descends from, the commit's own when it is tagged; None without one."""
-    try:
-        return git(repo, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", commit)
-    except RuntimeError:
-        return None
+def release_tags(repo):
+    """{tag: (version as numbers, commit)} of the release tags of `repo`: exactly v<X>.<Y>.<Z> (checks.version_key).
+    Any other v* tag (ModAVD's legacy v37.2.10-mas32, a pre-release or other suffix) is no release here."""
+    tags = {}
+    for tag in git(repo, "for-each-ref", "--format=%(refname:strip=2)", "refs/tags/v*").splitlines():
+        try:
+            key = checks.version_key(tag)
+        except ValueError:
+            continue
+        tags[tag] = (key, git(repo, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"))
+    return tags
+
+
+def previous_release(repo, commit, version=None):
+    """The release tag that `commit` (a full commit id), released as `version`, is compared with: by version, not by
+    ancestry. With squash merges only, a release commit made on release/<X>.<Y> never comes back to main, so the next
+    release branch, cut from main, does not descend from it (ModAVD#277). It is the release tag (release_tags) of the
+    highest version below `version`; when the version is not known (a component that writes none), the highest one
+    that is not on `commit` itself. None without one.
+    A release tag above the chosen one that is not on `commit` means `commit` is not the newest release of its
+    repository: this version was already released from another commit, or a newer one exists. That is refused, so a
+    wrong previous release is never compared against silently."""
+    tags = release_tags(repo)
+    if version is None:
+        below = [t for t, (_, at) in tags.items() if at != commit]
+    else:
+        key = checks.version_key("v" + version)
+        below = [t for t, (k, _) in tags.items() if k < key]
+    since = max(below, key=lambda t: tags[t][0], default=None)
+    floor = tags[since][0] if since else ()
+    above = sorted((t for t, (k, at) in tags.items() if k > floor and at != commit), key=lambda t: tags[t][0])
+    if above:
+        raise ValueError(f"{repo}: {', '.join(above)} 比上一版 {since or '（没有）'} 新，却不在要汇总的提交 {commit[:12]} 上："
+                         f"这一版已经从别的提交发过，或者已有更新的版本 / {', '.join(above)} is newer than the previous "
+                         f"release {since or '(none)'} but not on the commit being collected ({commit[:12]}): this version "
+                         f"was already released from another commit, or a newer one exists")
+    return since
 
 
 def fragment_blobs(repo, ref):
@@ -373,16 +409,17 @@ def fragment_blobs(repo, ref):
     return blobs
 
 
-def new_fragments(repo, commit, prefix):
+def new_fragments(repo, commit, prefix, version=None):
     """([(category, Chinese item, English item), ...] by file name, the previous release's tag or None) for the
-    changelog.d files `commit` has and the previous release (previous_release) did not have. The items are the file's
-    two lines; a line that names no issue or pull request itself gets the reference of the Chinese line, or else the
-    pull request whose squash merge added the file, as `(<prefix>#N)`.
+    changelog.d files `commit` (released as `version`, None when not known) has and the previous release
+    (previous_release) did not have. The items are the file's two lines; a line that names no issue or pull request
+    itself gets the reference of the Chinese line, or else the pull request whose squash merge added the file, as
+    `(<prefix>#N)`.
     A file the previous release had is not announced again, so a later change takes a new name: one whose Chinese line
     differs from then is refused, like a file that is not a valid fragment. Its English line may be added or changed
     (files released when they had only the Chinese line got one later)."""
     commit = git(repo, "rev-parse", "--verify", "--quiet", commit + "^{commit}")
-    since = previous_release(repo, commit)
+    since = previous_release(repo, commit, version)
     now, before = fragment_blobs(repo, commit), (fragment_blobs(repo, since) if since else {})
     blob = lambda name, ref: run("git", "-C", repo, "--no-optional-locks", "cat-file", "blob", ref[name])
     items, bad = [], []
@@ -468,23 +505,40 @@ def collect_changelog(path, version, number, changes, notes=None, min_automas=..
     return entry
 
 
-def collect_sources(args):
-    """[(GitHub repository, checkout, commit, reference prefix), ...] changelog-collect reads: the ModAVD release
-    checkout at HEAD (--repository; default: the checkout these tools are in), and each component checkout that is
-    given at the head of upstream's --release-branch. A component without that branch is not rebuilt for this release
-    and adds nothing."""
+def version_at(repo, commit, version_file, version_pattern):
+    """The version a component writes in `version_file` at `commit`; exactly one, or it stops."""
+    try:
+        found = re.findall(version_pattern, git(repo, "show", f"{commit}:{version_file}"))
+    except RuntimeError:
+        found = []
+    if len(found) != 1:
+        raise ValueError(f"{repo}: {version_file} at {commit[:12]} says {found or 'no version'}")
+    return found[0]
+
+
+def collect_sources(args, version):
+    """[(GitHub repository, checkout, commit, reference prefix, version it is released as), ...] changelog-collect
+    reads: the ModAVD release checkout at HEAD (--repository; default: the checkout these tools are in) as `version`,
+    and each component checkout that is given at the head of upstream's --release-branch. A component without that
+    branch is not rebuilt for this release and adds nothing; nor does one whose version file says another version
+    there (a component rebuilt for a release takes that release's version, see check_component_versions). The host IME
+    writes no version: its release branch is there only when it is rebuilt, and its version is not known."""
     sources, branch = [], getattr(args, "release_branch", None)
-    for argument, name, prefix in FRAGMENT_REPOS:
+    for argument, name, prefix, version_file in FRAGMENT_REPOS:
         repo = getattr(args, argument, None)
         if argument == "repository":
-            sources.append((name, repo or str(HERE.parent.parent), "HEAD", prefix))
+            sources.append((name, repo or str(HERE.parent.parent), "HEAD", prefix, version))
         elif repo and branch:
             try:
                 head = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/upstream/{branch}^{{commit}}")
             except RuntimeError:
                 print(f"{name}: no upstream/{branch} in {repo}, taken as not rebuilt for this release")
                 continue
-            sources.append((name, repo, head, prefix))
+            at = version_at(repo, head, *version_file) if version_file else None
+            if version_file and at != version:
+                print(f"{name}: upstream/{branch} is at {at}, not {version}, taken as not rebuilt for this release")
+                continue
+            sources.append((name, repo, head, prefix, at))
     return sources
 
 
@@ -494,8 +548,8 @@ def collect_command(args):
     hand-written 说明 item (with its English --note-en), --min-automas sets the AUTO-MAS version."""
     version = public_version(args)
     changes = {}
-    for name, repo, commit, prefix in collect_sources(args):
-        items, since = new_fragments(repo, commit, prefix)
+    for name, repo, commit, prefix, released_as in collect_sources(args, version):
+        items, since = new_fragments(repo, commit, prefix, released_as)
         for category, zh, en in items:
             changes.setdefault(category, []).append((zh, en))
         silent = commits_without_fragment(repo, since, commit)
@@ -796,8 +850,7 @@ def manager_release(zip_path, repo, branch=None):
     if not path.is_file():
         raise FileNotFoundError(path)
     version = m[1]
-    commit, tag, is_tagged = component_ref(repo, version, branch, "internal/buildinfo/buildinfo.go",
-                                           r'(?m)^(?:var|const)\s+Version\s*=\s*"([^"]+)"')
+    commit, tag, is_tagged = component_ref(repo, version, branch, MANAGER_VERSION_FILE, MANAGER_VERSION_RE)
     try:
         # read at the commit, not by name: the name is only for messages
         listed = parse_sums(git(repo, "show", f"{commit}:release/{version}.SHA256SUMS.txt"), f"{tag}:release/{version}.SHA256SUMS.txt")
