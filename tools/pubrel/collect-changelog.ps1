@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# 把上一版以后各仓库 changelog.d 里新加的说明文件汇总成 config\changelog.json 最前面本版那一条（公告的「更新内容」）。
+# 把上一版以后各仓库 changelog.d 里新加的说明文件汇总成 config\changelog.json 最前面本版那一条（公告的「更新内容」和分隔行以下的英文 What's new）。
 # 组件仓库的路径和 release.ps1 一样取参数或本机配置；先在各仓库里 git fetch upstream --tags。说明见 README.md「发版」。
 [CmdletBinding()]
 param(
@@ -15,6 +15,8 @@ param(
     [string]$Changelog = (Join-Path $PSScriptRoot 'config\changelog.json'),
     # hand-written 说明 items: what the user has to do for this version
     [string[]]$Note = @(),
+    # the English of each -Note, in the same order (What's new below the separator)
+    [string[]]$NoteEn = @(),
     # the AUTO-MAS version this release needs ('none' = no requirement); default: the previous version's
     [string]$MinAutoMas,
     [string]$Python
@@ -38,6 +40,7 @@ if ($ManagerRepo) { $arguments += @('--manager-repo', $ManagerRepo) }
 if ($ExtrasRepo) { $arguments += @('--extras-repo', $ExtrasRepo) }
 if ($ImeRepo) { $arguments += @('--ime-repo', $ImeRepo) }
 foreach ($item in $Note) { $arguments += @('--note', $item) }
+foreach ($item in $NoteEn) { $arguments += @('--note-en', $item) }
 if ($MinAutoMas) { $arguments += @('--min-automas', $MinAutoMas) }
 & $Python -I -X utf8 (Join-Path $PSScriptRoot 'release_tools.py') @arguments
 if ($LASTEXITCODE -ne 0) { throw "release_tools.py 返回 $LASTEXITCODE" }

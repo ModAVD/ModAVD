@@ -17,13 +17,13 @@ AI tools working in this repository (Codex, Claude Code and others) read this fi
 - The manager and the CLI are in ModAVDManager, the host IME is in ModAVDHostIME, and the pre-release regression is in ModAVDE2E; change those in their own repositories. Issues for every component are opened in this repository.
 - Workflows: pin third-party actions to a full 40-character commit SHA, do not use `pull_request_target`, and do not use self-hosted runners; keep `mirrorchyan_*.yml` as it is.
 - Do not write local paths into the repository; use arguments or the local configuration (see `tools/README.en.md`).
-- For a change users can see, add a file `changelog.d/<name>.<feat|fix|change|remove>.md` in the same PR with one line written for users (see `changelog.d/README.md`); changes that only touch development, tests, CI or documentation need none.
+- For a change users can see, add a file `changelog.d/<name>.<feat|fix|change|remove>.md` in the same PR with two lines written for users, Chinese first, then English (see `changelog.d/README.md`); changes that only touch development, tests, CI or documentation need none.
 
 ## Which language to write in
 
 - Issues, PRs, comments and commit messages: write Chinese if the person you work for writes Chinese, and English if they write English; do not mix the two in one PR. This file being in Chinese does not mean you have to write Chinese.
 - Change both files of a document pair (`X.md` in Chinese, `X.en.md` in English). If the person you work for writes only one of the two languages, write the other one yourself from the meaning, and say in the PR which file you translated so that someone can check it.
-- The line in `changelog.d` is in Chinese (the release notes are in Chinese). If the person you work for does not write Chinese, put their meaning into Chinese and include the English sentence in the PR description.
+- A file in `changelog.d` has a Chinese line first and an English line second (the Chinese goes into the notes that MirrorChyan and AUTO-MAS show, the English only onto the GitHub release page). If the person you work for writes only one of the two languages, write the other line yourself from the meaning, and say in the PR which line you translated so that someone can check it.
 - Take terms from the [table of terms](https://github.com/ModAVD/ModAVDManager/blob/main/internal/i18n/README.md#terms); for a word that is not in the table, use the name in the code or the original word rather than inventing a translation. The product is called ModAVD in every language.
 - Identifiers in code are English. Comments follow the language the file already uses; a new file can use Chinese or English, but not both in one file.
 
