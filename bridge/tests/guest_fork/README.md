@@ -105,6 +105,15 @@ try:
         (name, r) for name in names for r in range(3)}
     assert all(code == "0" and case_pid == pid for _, _, code, case_pid in cases)
     assert log.count("host fork atfork parent: held=1") == 3
+    # Every imported fork round passed the loader guard: one marker before its case line.
+    log_lines, previous, guarded = log.splitlines(), 0, 0
+    for index, line in enumerate(log_lines):
+        if "case=" not in line:
+            continue
+        window, previous = log_lines[previous:index], index + 1
+        if "case=imported-libc-fork " in line:
+            guarded += sum(bool(re.search(r"host fork loader guard: result=[1-9]\d* ", w)) for w in window) == 1
+    assert guarded == 3
     for flags in ["1200011", "1300011"]:
         assert log.count("raw clone tid outputs: flags=" + flags + " safe=1 ") == 3
         assert len(re.findall(r"raw clone guard: flags=" + flags +
@@ -121,10 +130,10 @@ finally:
             cleanup_errors.append(error)
     if cleanup_errors:
         raise RuntimeError("test package/property cleanup incomplete")
-print("PASS: ARM64, one PID, 9 functional cases, host-atfork=3, raw1200011=3, raw1300011=3")
+print("PASS: ARM64, one PID, 9 functional cases, host-atfork=3, loader-guard=3, raw1200011=3, raw1300011=3")
 ```
 
-验收必须联合功能与日志：imported fork 的 3 条独立 host-atfork held=1；显式 1200011 与 1300011 各 3 条 checker safe=1 和 raw held=1，并逐 case/round 关联同 PID。公共 `fork` 的 dladdr 在 guest libc 不代表其内部一定走 raw GOT。本 API 34 实物 proxy 的 `__clone_for_fork` thunk 转到宿主 Bionic fork；普通 imported fork 不能计为 raw GOT 覆盖。隔离 mmap 通过也不代表所有 guest pthread/tid 地址都通过保守 TLS/pthread/host-stack VMA 检查。
+验收必须联合功能与日志：imported fork 的 3 条独立 host-atfork held=1，且每轮在它的 case 行之前恰有一条 `host fork loader guard: result=<子进程>`（宿主 fork 在 loader 锁里发出，见 [bridge/README](../../README.md)）；显式 1200011 与 1300011 各 3 条 checker safe=1 和 raw held=1，并逐 case/round 关联同 PID。公共 `fork` 的 dladdr 在 guest libc 不代表其内部一定走 raw GOT。本 API 34 实物 proxy 的 `__clone_for_fork` thunk 转到宿主 Bionic fork；普通 imported fork 不能计为 raw GOT 覆盖。隔离 mmap 通过也不代表所有 guest pthread/tid 地址都通过保守 TLS/pthread/host-stack VMA 检查。
 
 ## 已有记录与边界
 

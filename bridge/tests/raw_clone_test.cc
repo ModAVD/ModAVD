@@ -838,6 +838,102 @@ void CheckProxyFork() {
   g_real_proxy_fork = nullptr;
 }
 
+uint64_t CurrentSignalMask() {
+  uint64_t mask = 0;
+  syscall(SYS_rt_sigprocmask, SIG_BLOCK, nullptr, &mask, sizeof(mask));
+  return mask;
+}
+
+// An atfork child handler registered after the companion's: it enters the loader.
+std::atomic<bool> child_handler_active{false};
+bool child_handler_loader_ok = false;
+uint64_t child_handler_mask = 0;
+void ChildHandlerEntersLoader() {
+  if (!child_handler_active.load()) return;
+  signal(SIGALRM, &ChildLoaderTimeout);
+  alarm(2);  // Waiting on its own inherited loader level would exit 39.
+  int modules = 0;
+  dl_iterate_phdr(&CountOneModule, &modules);
+  void* handle = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
+  child_handler_loader_ok = modules == 1 && handle != nullptr;
+  child_handler_mask = CurrentSignalMask();
+  alarm(0);
+}
+
+void CheckProxyForkChildHandlers() {
+  CHECK(HostLibsAre(kHostLibcBuildId, kHostLinkerBuildId));
+  CHECK(!HostLibsAre(kExpectedBuildId, kHostLinkerBuildId));
+  CHECK(!HostLibsAre(kHostLibcBuildId, kExpectedBuildId));
+  CHECK(pthread_atfork(nullptr, nullptr, &ChildHandlerEntersLoader) == 0);
+  ResetTestTranslations();
+  g_real_proxy_fork = nullptr;  // The wrapper calls Bionic fork() itself.
+  const uint64_t parent_mask = CurrentSignalMask();
+  const pid_t parent_tid = KernelTid();
+  child_handler_active.store(true);
+  const pid_t child = ProxyForkWrapper();
+  if (child == 0) {
+    // The later handler ran with asynchronous signals blocked and could use the
+    // loader; afterwards tid and mask are the child's own again.
+    const bool ok = child_handler_loader_ok && child_handler_mask != parent_mask &&
+                    CurrentSignalMask() == parent_mask && gettid() == KernelTid() &&
+                    KernelTid() != parent_tid && ChildCanResumeTranslation() &&
+                    g_proxy_fork_thread.load() == 0 && g_proxy_fork_parent_tid.load() == 0;
+    syscall(SYS_exit, ok ? 37 : 38);
+    __builtin_unreachable();
+  }
+  child_handler_active.store(false);
+  CheckParentAfterChild(child);
+  CHECK(CurrentSignalMask() == parent_mask && gettid() == parent_tid);
+  CHECK(g_proxy_fork_thread.load() == 0 && g_proxy_fork_parent_tid.load() == 0);
+}
+
+// Wrapped forks against unwrapped Bionic forks and loader users on other threads,
+// in a separate process bounded by an alarm: any lock-order cycle among the loader
+// mutex, the atfork list mutex and the translator locks shows up as exit 39.
+std::atomic<bool> stress_stop{false};
+void* StressPlainFork(void*) {
+  for (int i = 0; i < 100 && !stress_stop.load(); ++i) {
+    const pid_t child = fork();
+    if (child == 0) syscall(SYS_exit_group, 0);
+    if (child > 0) waitpid(child, nullptr, 0);
+  }
+  return nullptr;
+}
+void* StressLoader(void*) {
+  for (int i = 0; !stress_stop.load(); ++i) {
+    int modules = 0;
+    dl_iterate_phdr(&CountOneModule, &modules);
+    void* handle = dlopen("libc.so", RTLD_NOW | RTLD_LOCAL);
+    if (handle != nullptr) dlclose(handle);
+    if (i < 200) pthread_atfork(nullptr, nullptr, nullptr);  // Takes the atfork list mutex.
+  }
+  return nullptr;
+}
+void TesterTimeout(int) { syscall(SYS_exit_group, 39); }
+void CheckProxyForkLockOrder() {
+  const pid_t tester = fork();
+  if (tester == 0) {
+    signal(SIGALRM, &TesterTimeout);
+    alarm(30);
+    ResetTestTranslations();
+    pthread_t threads[2];
+    pthread_create(&threads[0], nullptr, &StressPlainFork, nullptr);
+    pthread_create(&threads[1], nullptr, &StressLoader, nullptr);
+    int bad = 0;
+    for (int i = 0; i < 100; ++i) {
+      const pid_t child = ProxyForkWrapper();
+      if (child == 0) syscall(SYS_exit_group, 0);
+      int status = 0;
+      if (child < 0 || waitpid(child, &status, 0) != child || !WIFEXITED(status)) ++bad;
+    }
+    pthread_join(threads[0], nullptr);
+    stress_stop.store(true);
+    pthread_join(threads[1], nullptr);
+    syscall(SYS_exit_group, bad == 0 ? 37 : 38);
+  }
+  CheckParentAfterChild(tester);
+}
+
 }  // namespace
 
 int main() {
@@ -988,6 +1084,8 @@ int main() {
     CheckParentAfterChild(child);
     CHECK(pthread_join(worker, nullptr) == 0);
     CheckProxyFork();
+    CheckProxyForkChildHandlers();
+    CheckProxyForkLockOrder();
   }
   for (auto& mutex : locks) pthread_mutex_destroy(&mutex);
   std::printf("raw clone ABI, loader locks and cache quiescence: %s (%d failures)\n",
