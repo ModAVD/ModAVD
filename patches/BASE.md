@@ -1,6 +1,8 @@
 # ModAVD 补丁
 
 ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库从 AOSP 基准到编译时分支头的完整 `git format-patch` 输出，按文件名顺序用 `git am --keep-cr` 回放。各版本用的目录：
+`series.json` 的 `platforms` 按补丁文件名排序，一项对应一个补丁；取值是 `windows`、`macos`、`linux` 或 `all`。目录表的「平台」是这一列的汇总。
+
 
 | 版本 | qemu | gfxstream | Crashpad |
 | --- | --- | --- | --- |
@@ -16,26 +18,35 @@ ModAVD 在 AOSP `emu-main-dev` 上改了三个仓库。每个目录是该仓库�
 | 37.2.10-mas32（`Pkg.BuildId=mas-32`；0.32.1 相同） | qemu/mas32 | gfxstream/fixq28 | crashpad/module-version22 |
 | 37.2.10-mas30（`Pkg.BuildId=mas-30`） | qemu/fixq30 | gfxstream/fixq28 | crashpad/module-version22 |
 
-| 目录 | AOSP 仓库 | 基准（AOSP 公开提交） | 补丁数 | 回放后的树 = 编译时分支头 | 许可证 |
-| --- | --- | --- | --- | --- | --- |
-| `qemu/0.43.0` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 116 | `30139c404f59c9f312292466c2fc5fcc65efeae0` | 按所改文件，见下文：73 个 GPL-2.0，24 个 Apache-2.0，19 个两者都有；0055 里的图片另见下文 |
-| `qemu/0.42.0` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 110 | `0bb19e599a66c71d0ffbbbdadad52c1c12c9c5b1` | 按所改文件，见下文：73 个 GPL-2.0，23 个 Apache-2.0，14 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas41` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 105 | `60c619f9ecfe01ccde23907b04d92bdb3fb7643e` | 按所改文件，见下文：73 个 GPL-2.0，20 个 Apache-2.0，12 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas40` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 101 | `5d99d72b2b08f35249d66d929ee4277accd533f7` | 按所改文件，见下文：71 个 GPL-2.0，19 个 Apache-2.0，11 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas39` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 98 | `ac8b73bd8bb327cf875f4570d0c644825bc16eef` | 按所改文件，见下文：71 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas38` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 95 | `caab5653c46bdf480a5eb1dac15816bd00014711` | 按所改文件，见下文：68 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas37` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 80 | `3419edeb1ee3f69c4a12c4215aba032d3bee4c57` | 按所改文件，见下文：60 个 GPL-2.0，14 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas36` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 65 | `a46fc099df1403d982c601f2f53329e8332a2f6a` | 按所改文件，见下文：46 个 GPL-2.0，13 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas35` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 60 | `a1e36334f096ce5268a7df2b750f1a4a09b83c52` | 按所改文件，见下文：43 个 GPL-2.0，11 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
-| `qemu/mas32` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 57 | `bc694d86d778732785a75364479fc03fad0250bc` | 按所改文件，见下文：42 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
-| `qemu/fixq30` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 55 | `5aedc70819651ef386cef810afa6c2be3c028467` | 按所改文件，见下文：40 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
-| `gfxstream/0.42.0` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 45 | `baf0fd5600360307fe799083118d214dadf1b4be` | Apache-2.0 |
-| `gfxstream/mas41` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 43 | `32813e91da98b992967b78496b895f69e96a4bf3` | Apache-2.0 |
-| `gfxstream/mas38` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 42 | `eb1565574a7ab64457ae0f6794ad0cb6a8b76726` | Apache-2.0 |
-| `gfxstream/mas37` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 25 | `2afcb7b95a3011a3858ce0b813b215e0be21c1be` | Apache-2.0 |
-| `gfxstream/mas35` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 23 | `28437bb6c4b3fdef705d1919813467af465a718d` | Apache-2.0 |
-| `gfxstream/fixq28` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 22 | `d027890c4799a8537ce1e981fec784a99a269ade` | Apache-2.0 |
-| `crashpad/module-version22` | `platform/external/crashpad` | `dd7db6790d73210abaef36a04f2a2bd52cf22b89` | 1 | `377d2d398368c38d43f4ecbca084c89a68c10530` | Apache-2.0 |
+| 目录 | AOSP 仓库 | 基准（AOSP 公开提交） | 补丁数 | 平台 | 回放后的树 = 编译时分支头 | 许可证 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `qemu/0.43.0` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 116 | windows / all | `30139c404f59c9f312292466c2fc5fcc65efeae0` | 按所改文件，见下文：73 个 GPL-2.0，24 个 Apache-2.0，19 个两者都有；0055 里的图片另见下文 |
+| `qemu/0.42.0` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 110 | windows / all | `0bb19e599a66c71d0ffbbbdadad52c1c12c9c5b1` | 按所改文件，见下文：73 个 GPL-2.0，23 个 Apache-2.0，14 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas41` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 105 | windows / all | `60c619f9ecfe01ccde23907b04d92bdb3fb7643e` | 按所改文件，见下文：73 个 GPL-2.0，20 个 Apache-2.0，12 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas40` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 101 | windows / all | `5d99d72b2b08f35249d66d929ee4277accd533f7` | 按所改文件，见下文：71 个 GPL-2.0，19 个 Apache-2.0，11 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas39` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 98 | windows / all | `ac8b73bd8bb327cf875f4570d0c644825bc16eef` | 按所改文件，见下文：71 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas38` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 95 | windows / all | `caab5653c46bdf480a5eb1dac15816bd00014711` | 按所改文件，见下文：68 个 GPL-2.0，18 个 Apache-2.0，9 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas37` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 80 | windows / all | `3419edeb1ee3f69c4a12c4215aba032d3bee4c57` | 按所改文件，见下文：60 个 GPL-2.0，14 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas36` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 65 | windows / all | `a46fc099df1403d982c601f2f53329e8332a2f6a` | 按所改文件，见下文：46 个 GPL-2.0，13 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas35` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 60 | windows / all | `a1e36334f096ce5268a7df2b750f1a4a09b83c52` | 按所改文件，见下文：43 个 GPL-2.0，11 个 Apache-2.0，6 个两者都有；0055 里的图片另见下文 |
+| `qemu/mas32` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 57 | windows / all | `bc694d86d778732785a75364479fc03fad0250bc` | 按所改文件，见下文：42 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
+| `qemu/fixq30` | `platform/external/qemu` | `f0c183f1cc7456ecd6f3607f2f47893768ae4334` | 55 | windows / all | `5aedc70819651ef386cef810afa6c2be3c028467` | 按所改文件，见下文：40 个 GPL-2.0，11 个 Apache-2.0，4 个两者都有；0055 里的图片另见下文 |
+| `gfxstream/0.42.0` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 45 | windows / all | `baf0fd5600360307fe799083118d214dadf1b4be` | Apache-2.0 |
+| `gfxstream/mas41` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 43 | windows / all | `32813e91da98b992967b78496b895f69e96a4bf3` | Apache-2.0 |
+| `gfxstream/mas38` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 42 | windows / all | `eb1565574a7ab64457ae0f6794ad0cb6a8b76726` | Apache-2.0 |
+| `gfxstream/mas37` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 25 | windows / all | `2afcb7b95a3011a3858ce0b813b215e0be21c1be` | Apache-2.0 |
+| `gfxstream/mas35` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 23 | windows / all | `28437bb6c4b3fdef705d1919813467af465a718d` | Apache-2.0 |
+| `gfxstream/fixq28` | `platform/hardware/google/gfxstream` | `04d0287b04f72d908c621a919fa2ea5c563b1a66` | 22 | windows / all | `d027890c4799a8537ce1e981fec784a99a269ade` | Apache-2.0 |
+| `crashpad/module-version22` | `platform/external/crashpad` | `dd7db6790d73210abaef36a04f2a2bd52cf22b89` | 1 | windows | `377d2d398368c38d43f4ecbca084c89a68c10530` | Apache-2.0 |
+
+
+## 平台判断和待实测
+
+补丁平台按实际改动的文件标注。Windows 专用改动标为 `windows`，明确跨平台的改动标为 `all`；同一系列同时含两类时，目录表汇总为 `windows / all`。
+
+以下判断仍需在对应平台实测后确认，先保留在清单中：
+- QEMU 各系列的 0035、0060 以及 gfxstream 各系列的 0042、0043，标注按源码判断，留待对应平台回归。
+- gfxstream 中涉及 Vulkan、GuestVulkanOnly 或 Vulkan 内存分配的补丁，先按 `all` 记录，留待 Vulkan 主机回归。
 
 - `qemu/0.43.0` 的 0001–0110 与 `qemu/0.42.0` 是同一批提交（补丁文件头里的序号不同），0111–0116 是 0.43.0 新增的：最大化 / 还原按钮点过以后悬停高亮会消掉（ModAVD/ModAVD#214）（0111），精简窗口的标题栏加旋转按钮，在横屏和竖屏之间切换，窗口跟着转（ModAVD/ModAVD#225）（0112），开机时按 `hw.initialOrientation` 写回客体的 `user_rotation`、点 × 关机前先复位，按钮以初始方向为基准（0113），安卓开机完成前旋转按钮置灰，点击先写客体的 `user_rotation`、写成了才转窗口（0114），实例没有 `skin.name` 时自动生成的同尺寸皮肤保留 config 里的方向，竖屏实例的窗口一开始就是竖的（ModAVD/ModAVD#247）（0115），竖屏实例开机动画期间窗口先横着、动画结束再转成竖的，开机动画不再侧着（0116）。
 - 0.43.0 的 gfxstream 补丁和已发布的 `gfxstream/0.42.0` 是同一批提交（基准、分支头都相同），沿用这个目录；0.43.0 清单注释里写的也是这个目录。

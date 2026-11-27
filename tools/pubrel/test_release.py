@@ -50,6 +50,15 @@ class ReleaseChecks(unittest.TestCase):
         finally:
             privacy.use_rules(previous)
 
+    def test_patch_platforms_from_changed_paths(self):
+        root = self.folder()
+        windows = root / "windows.patch"
+        windows.write_text("diff --git a/block/file-win32.c b/block/file-win32.c\n", encoding="utf-8")
+        generic = root / "generic.patch"
+        generic.write_text("diff --git a/ui/console.c b/ui/console.c\n", encoding="utf-8")
+        self.assertEqual(release.patch_platforms(windows), ["windows"])
+        self.assertEqual(release.patch_platforms(generic), ["all"])
+
     def test_relative_paths_cannot_escape(self):
         for value in ["../other", "a/../../other", "C:/source", "/source", "a\\other"]:
             with self.assertRaises(ValueError):
