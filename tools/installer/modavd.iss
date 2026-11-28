@@ -175,9 +175,12 @@ end;
 
 { ---- 目录校验 ---------------------------------------------------------------------------------- }
 
+{ 去掉首尾空白和结尾的 \，/ 换成 \（Windows 把两者当成同一个分隔符）。只改写法，不展开 . 和 ..，见 CanonicalDir。 }
 function NormalizeDir(Dir: String): String;
 begin
-  Result := RemoveBackslash(Trim(Dir));
+  Result := Trim(Dir);
+  StringChangeEx(Result, '/', '\', True);
+  Result := RemoveBackslash(Result);
 end;
 
 { Path 是 Base 本身或在它下面（不分大小写）。Base 为空时不算。 }
@@ -215,6 +218,53 @@ begin
     exit;
   C := Uppercase(Copy(P, 1, 1))[1];
   Result := (C >= 'A') and (C <= 'Z') and (P[2] = ':') and ((Length(P) = 2) or (P[3] = '\'));
+end;
+
+{ 盘符路径 P（NormalizeDir 过的）里第一个以空格或句点结尾的一级，没有时返回空。. 和 .. 这两种不算（CanonicalDir 展开）。
+  Windows 打开路径时会悄悄去掉某一级结尾的句点、去掉最后一级结尾的空格和句点（C:\Program Files.\x 就是
+  C:\Program Files\x），写出来的和实际用的就对不上，所以这种名字直接拦。 }
+function BadSegment(P: String): String;
+var
+  Rest, Part: String;
+  I: Integer;
+  Last: Char;
+begin
+  Result := '';
+  Rest := Copy(P, 4, Length(P));
+  while Rest <> '' do
+  begin
+    I := Pos('\', Rest);
+    if I = 0 then
+    begin
+      Part := Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Part := Copy(Rest, 1, I - 1);
+      Rest := Copy(Rest, I + 1, Length(Rest));
+    end;
+    if (Part <> '') and (Part <> '.') and (Part <> '..') then
+    begin
+      Last := Part[Length(Part)];
+      if (Last = ' ') or (Last = '.') then
+      begin
+        Result := Part;
+        exit;
+      end;
+    end;
+  end;
+end;
+
+{ 盘符路径（X:\ 开头）规整成 Windows 实际会用的那条：GetFullPathName（Inno 的 ExpandFileName）展开 . 和 ..、
+  合并重复的 \，再 NormalizeDir。C:\x\..\Program Files\ModAVD 就成了 C:\Program Files\ModAVD，不管 C:\x 在不在
+  （.. 是按字符串展开的，不看盘）。不是 X:\ 开头的（盘根 X:、相对路径、\\server、\\?\）原样返回，由调用方拦：
+  ExpandFileName 会拿当前目录去补它们。只算字符串，不碰磁盘。 }
+function CanonicalDir(Dir: String): String;
+begin
+  Result := NormalizeDir(Dir);
+  if IsDriveLetterPath(Result) and (Length(Result) > 2) then
+    Result := NormalizeDir(ExpandFileName(Result));
 end;
 
 { 系统目录、OneDrive：Dir 在其中某一个之下时返回 True，Hit 是命中的那个目录。 }
@@ -336,17 +386,33 @@ begin
     exit;
   end;
 
+  { 2a. 某一级以空格或句点结尾：Windows 会悄悄改掉它，写的和实际用的不是同一个文件夹。 }
+  Hit := BadSegment(P);
+  if Hit <> '' then
+  begin
+    Reason := FmtMessage(CustomMessage('ErrBadName'), [Hit]);
+    exit;
+  end;
+
+  { 2b. 长度按写的算：装的时候 Inno 用的是写的这条，展开以后只会更短，按它算更保守。 }
+  if Length(P) > MaxDirLen then
+  begin
+    Reason := FmtMessage(CustomMessage('ErrTooLong'), [IntToStr(MaxDirLen), IntToStr(Length(P))]);
+    exit;
+  end;
+
+  { 2c. 展开 . 和 ..、合并重复的 \：下面各项都看实际会用的这条路径，不看写法（ModAVD/ModAVD#268）。 }
+  P := CanonicalDir(P);
+  if not IsDriveLetterPath(P) then
+  begin
+    Reason := CustomMessage('ErrNotLocal');
+    exit;
+  end;
+
   { 3. 盘的根目录本身不行，要一个子文件夹。 }
   if Length(P) = 2 then
   begin
     Reason := FmtMessage(CustomMessage('ErrDriveRoot'), [P + '\']);
-    exit;
-  end;
-
-  { 4. 长度。 }
-  if Length(P) > MaxDirLen then
-  begin
-    Reason := FmtMessage(CustomMessage('ErrTooLong'), [IntToStr(MaxDirLen), IntToStr(Length(P))]);
     exit;
   end;
 
@@ -565,8 +631,8 @@ var
 begin
   Result := False;
   Why := '';
-  App := NormalizeDir(App);
-  if not IsDriveLetterPath(App) or (Length(App) <= 3) or IsUnder(App, ExpandConstant('{win}')) or
+  App := CanonicalDir(App);
+  if not IsDriveLetterPath(App) or (Length(App) <= 3) or (BadSegment(App) <> '') or IsUnder(App, ExpandConstant('{win}')) or
      IsUnder(App, ExpandConstant('{commonpf64}')) or IsUnder(App, ExpandConstant('{commonpf32}')) or
      IsUnder(App, ExpandConstant('{commonappdata}')) then
   begin
@@ -619,7 +685,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   App, Why: String;
 begin
-  App := NormalizeDir(ExpandConstant('{app}'));
+  App := CanonicalDir(ExpandConstant('{app}'));
   if CurUninstallStep = usUninstall then
   begin
     DeleteUserData := False;
@@ -692,6 +758,64 @@ begin
   Expect(Name, (not Ok) and (Reason = Want));
 end;
 
+{ \ 换成 /，给自检拼「全用 / 写」的路径。 }
+function ToSlashes(S: String): String;
+begin
+  Result := S;
+  StringChangeEx(Result, '\', '/', True);
+end;
+
+{ 同一个系统目录的各种写法（ModAVD/ModAVD#268）：. 和 ..、大小写、结尾的分隔符和空格、/ 和 \ 混用、重复的 \、
+  \\?\ 前缀、某一级结尾的空格和句点。D 是自检程序所在的盘根（X:\）。都只算字符串，不在盘上建东西。 }
+procedure RunNormalizeCases(D: String);
+var
+  PF, PFDrive, PFRest, Win, SysMsg, WinMsg, BadPF: String;
+begin
+  { 纯函数。 }
+  Expect('canonical ..', CanonicalDir('C:\x\..\Program Files\ModAVD') = 'C:\Program Files\ModAVD');
+  Expect('canonical . // and /', CanonicalDir('C:/a//b/./c/') = 'C:\a\b\c');
+  Expect('canonical .. above root', CanonicalDir('C:\..\..\a') = 'C:\a');
+  Expect('canonical .. to root', CanonicalDir('C:\a\..') = 'C:');
+  Expect('canonical drive only', CanonicalDir('C:') = 'C:');
+  Expect('canonical \\?\ kept', CanonicalDir('\\?\C:\a\..\b') = '\\?\C:\a\..\b');
+  Expect('canonical relative kept', CanonicalDir('a\..\b') = 'a\..\b');
+  Expect('bad segment space', BadSegment('C:\a \b') = 'a ');
+  Expect('bad segment period', BadSegment('C:\a\b.') = 'b.');
+  Expect('bad segment ...', BadSegment('C:\...\b') = '...');
+  Expect('bad segment . and .. ok', BadSegment('C:\.\..\a b\c') = '');
+  Expect('IsUnder forward slashes', IsUnder('C:/Program Files/ModAVD', 'C:\Program Files'));
+
+  { 校验：每种写法都要拦在系统目录那一条（或者写法本身那一条）上，不能落到后面的检查或者放行。 }
+  PF := NormalizeDir(ExpandConstant('{commonpf64}'));
+  PFDrive := Copy(PF, 1, 2);
+  PFRest := Copy(PF, 3, Length(PF));
+  Win := NormalizeDir(ExpandConstant('{win}'));
+  SysMsg := FmtMessage(CustomMessage('ErrSystemDir'), [PF]);
+  WinMsg := FmtMessage(CustomMessage('ErrSystemDir'), [Win]);
+  ExpectDirReason('.. via missing folder (#268)', PFDrive + '\mst-missing-268\..' + PFRest + '\ModAVD', SysMsg);
+  ExpectDirReason('.. via two missing folders', PFDrive + '\a\b\..\..' + PFRest + '\ModAVD', SysMsg);
+  ExpectDirReason('.. inside program files', PF + '\x\..\ModAVD', SysMsg);
+  ExpectDirReason('.. into windows', Copy(Win, 1, 2) + '\mst-missing-268\..' + Copy(Win, 3, Length(Win)) + '\ModAVD', WinMsg);
+  ExpectDirReason('. segment', PFDrive + '\.' + PFRest + '\ModAVD', SysMsg);
+  ExpectDirReason('case', Uppercase(PF) + '\modavd', SysMsg);
+  ExpectDirReason('trailing \ and spaces', '  ' + PF + '\ModAVD\  ', SysMsg);
+  ExpectDirReason('forward slashes', PFDrive + ToSlashes(PFRest) + '/ModAVD', SysMsg);
+  ExpectDirReason('mixed slashes', PF + '/ModAVD', SysMsg);
+  ExpectDirReason('doubled \', PFDrive + '\' + PFRest + '\\ModAVD', SysMsg);
+  BadPF := ExtractFileName(PF);
+  ExpectDirReason('trailing period on a folder', PF + '.\ModAVD', FmtMessage(CustomMessage('ErrBadName'), [BadPF + '.']));
+  ExpectDirReason('trailing space on a folder', PF + ' \ModAVD', FmtMessage(CustomMessage('ErrBadName'), [BadPF + ' ']));
+  ExpectDirReason('trailing period on the last folder', PF + '\ModAVD.', FmtMessage(CustomMessage('ErrBadName'), ['ModAVD.']));
+  ExpectDirReason('\\?\ prefix', '\\?\' + PF + '\ModAVD', CustomMessage('ErrNotLocal'));
+  ExpectDirReason('//?/ prefix', '//?/' + PFDrive + ToSlashes(PFRest) + '/ModAVD', CustomMessage('ErrNotLocal'));
+  ExpectDirReason('\\.\ prefix', '\\.\' + PF + '\ModAVD', CustomMessage('ErrNotLocal'));
+  ExpectDirReason('drive-relative', PFDrive + 'ModAVD', CustomMessage('ErrNotLocal'));
+  ExpectDirReason('.. back to the drive root', D + 'x\..', FmtMessage(CustomMessage('ErrDriveRoot'), [D]));
+  ExpectDir('.. that stays outside system folders ok', D + 'mst-missing-268\..\ModAVD-selftest', True);
+  ExpectDelete('delete: drive root via ..', D + 'x\..', False);
+  ExpectDelete('delete: program files via ..', PFDrive + '\mst-missing-268\..' + PFRest + '\ModAVD', False);
+end;
+
 function GetShortPathNameW(lpszLongPath: String; lpszShortPath: String; cchBuffer: Cardinal): Cardinal;
   external 'GetShortPathNameW@kernel32.dll stdcall';
 
@@ -742,7 +866,11 @@ begin
   if (S = '') or (Lowercase(S) = Lowercase(LongDir)) then
     Log('SELFTEST SKIP 8.3 alias: no 8.3 short names on this volume (' + LongDir + ' -> ' + S + ')')
   else
+  begin
     ExpectDirReason('8.3 alias', S + '\ModAVD', FmtMessage(CustomMessage('ErrShortName'), [S, LongDir]));
+    ExpectDirReason('8.3 alias behind ..', W + '\mst-missing\..\' + ExtractFileName(S) + '\ModAVD',
+      FmtMessage(CustomMessage('ErrShortName'), [W + '\' + ExtractFileName(S), LongDir]));
+  end;
   S := GetShortPath(ExpandConstant('{commonpf64}'));
   if (S = '') or (Lowercase(S) = Lowercase(ExpandConstant('{commonpf64}'))) then
     Log('SELFTEST SKIP 8.3 program files: no 8.3 short name for ' + ExpandConstant('{commonpf64}'))
@@ -782,6 +910,10 @@ begin
   begin
     ExpectDirReason('junction in path', W + '\jn\ModAVD', FmtMessage(CustomMessage('ErrReparse'), [W + '\jn']));
     ExpectDirReason('junction is the folder', W + '\jn', FmtMessage(CustomMessage('ErrReparse'), [W + '\jn']));
+    { .. 前面那一级不存在时，以前逐级看到那里就停了，看不到后面的联接（ModAVD/ModAVD#268）。 }
+    ExpectDirReason('junction behind ..', W + '\mst-missing\..\jn\ModAVD',
+      FmtMessage(CustomMessage('ErrReparse'), [W + '\jn']));
+    ExpectDirReason('junction via mixed slashes', W + '/jn/ModAVD', FmtMessage(CustomMessage('ErrReparse'), [W + '\jn']));
     ExpectDelete('delete: app folder is a junction', W + '\jn', False);
     ExpectDelete('delete: junction above app folder', W + '\jn\sub', False);
 
@@ -853,6 +985,7 @@ begin
   ExpectDir('too long', D + StringOfChar('a', 78), False);
   ExpectDir('max len ok', D + StringOfChar('a', 77), True);
   ExpectDir('program files', ExpandConstant('{commonpf64}') + '\ModAVD', False);
+  RunNormalizeCases(D);
   ExpectDelete('delete: drive root', D, False);
   ExpectDelete('delete: windows', ExpandConstant('{win}') + '\ModAVD', False);
 
