@@ -23,7 +23,7 @@ pwsh -NoProfile -File tools/installer/build-installer.ps1 `
   <输出目录>\ModAVD-0.43.0-win-x64-setup-selftest.exe /VERYSILENT /SUPPRESSMSGBOXES /LANG=en /LOG=<文件>
   ```
 
-  日志里逐条写 `SELFTEST PASS` / `FAIL` / `SKIP`，最后一行 `SELFTEST DONE failures=<个数>`，什么都不装（退出码是 1，因为它在开头就退出）。中文再跑一遍用 `/LANG=zh_cn`（拦下的原因要逐字对上当前语言的提示）。核对的是默认目录、目录校验（含目录联接、8.3 短名，以及同一个系统目录带 `.`、`..`、`/`、重复的 `\`、`\\?\` 前缀、大小写不同、结尾带空格或句点的各种写法）、卸载时认哪些顶层名字、删数据前的保险，以及 `DelTree` 碰到联接时的行为。要在盘上建目录的那些用例，工作目录建在自检程序所在盘的根下（`<盘>:\mst-<随机数>`，路径短，不会碰到 80 个字符的上限），核完无论成败都删掉。建不出目录联接（`mklink /J`）、或者那个盘关了 8.3 短名时，对应的用例记 `SKIP` 和原因，不算失败。
+  日志里逐条写 `SELFTEST PASS` / `FAIL` / `SKIP`，最后一行 `SELFTEST DONE failures=<个数>`，什么都不装（退出码是 1，因为它在开头就退出）。中文再跑一遍用 `/LANG=zh_cn`（拦下的原因要逐字对上当前语言的提示）。核对的是默认目录、目录校验（含目录联接、8.3 短名，以及同一个系统目录带 `.`、`..`、`/`、重复的 `\`、`\\?\` 前缀、大小写不同、结尾带空格或句点的各种写法，保留设备名，不许有的字符）、卸载时认哪些顶层名字、删数据前的保险（拦下时核对是哪一道拦的），以及 `DelTree` 碰到联接时的行为。要在盘上建目录的那些用例，工作目录建在自检程序所在盘的根下（`<盘>:\mst-<随机数>`，路径短，不会碰到 80 个字符的上限），核完无论成败都删掉。建不出目录联接（`mklink /J`）、或者那个盘关了 8.3 短名时，对应的用例记 `SKIP` 和原因，不算失败。
 
 ## 安装程序做什么
 
@@ -31,7 +31,7 @@ pwsh -NoProfile -File tools/installer/build-installer.ps1 `
 - 推荐目录：有 D 盘就 `D:\ModAVD`，没有 D 有 E 就 `E:\ModAVD`，都没有就 `C:\ModAVD`。只算本地固定硬盘（`GetDriveType` 是 3），U 盘、光驱、网络盘不算。
 - 选目录页写明程序和实例、游戏数据都放在这里，并显示所选盘还剩多少空间。
 - 下面这些目录直接拦住，说清原因：`Program Files`、`Program Files (x86)`、`Windows`、`ProgramData` 之下；盘的根目录；路径里有非 ASCII 字符；路径超过 80 个字符；不是本地固定硬盘；OneDrive 同步目录（环境变量 `OneDrive`、`OneDriveConsumer`、`OneDriveCommercial`）之下；目录里已经有一份 ModAVD（`modavd-manifest.json`，或 `mas-avd.json` 加 `ModAVD.exe`），或者只剩以前留下的数据（`mas-avd.json`）；已经存在、里面放着别的东西的文件夹（要选空文件夹或新文件夹，免得卸载时「连数据一起删」把别的东西也删掉）；路径上已经存在的某一级是目录联接、符号链接或挂载的盘（重解析点，实际会装到它指向的地方）；用了 8.3 短名（比如 `C:\PROGRA~1`，已经存在的那几级用 `GetLongPathName` 换回长名，和写的不一样就拦，否则会绕过系统目录的检查）。
-  - 比之前先把写的路径规整成 Windows 实际会用的那条：`/` 换成 `\`，用 `GetFullPathName`（Inno 的 `ExpandFileName`）展开 `.` 和 `..`、合并重复的 `\`，上面各项都看规整以后的路径（`C:\不存在\..\Program Files\ModAVD` 就是 `C:\Program Files\ModAVD`，照样拦）。某一级以空格或句点结尾的（`C:\Program Files.\ModAVD`）直接拦：Windows 会悄悄去掉它们，写的和实际用的对不上。`\\?\`、`\\.\` 开头的和网络路径一样不算本机盘符路径。卸载时「连数据一起删」的保险也先这样规整再判断。
+  - 比之前先把写的路径规整成 Windows 实际会用的那条：`/` 换成 `\`，用 `GetFullPathName`（Inno 的 `ExpandFileName`）展开 `.` 和 `..`、合并重复的 `\`，上面各项都看规整以后的路径（`C:\不存在\..\Program Files\ModAVD` 就是 `C:\Program Files\ModAVD`，照样拦）。某一级以空格或句点结尾的（`C:\Program Files.\ModAVD`）直接拦：Windows 会悄悄去掉它们，写的和实际用的对不上（被后面的 `..` 退掉的那几级不算，`E:\foo.\..\ModAVD` 就是 `E:\ModAVD`）。某一级是 Windows 保留的设备名（`CON`、`PRN`、`AUX`、`NUL`、`COM0`–`COM9`、`LPT0`–`LPT9`，带扩展名也算）的拦，这种文件夹建不出来。盘符后面再有 `: * ? " < > |` 的拦（`E:\ModAVD:x` 是备用数据流的写法，不是文件夹）。`\\?\`、`\\.\` 开头的和网络路径一样不算本机盘符路径。卸载时「连数据一起删」的保险也先这样规整再判断。
   - 校验是一个函数 `ValidateInstallDir`：交互时在选目录页点「下一步」时调，静默安装时也会调，`PrepareToInstall` 里再调一次兜底；不合格就失败，原因写进日志，都在写文件之前。
 - 装完可以勾「运行 ModAVD」；静默安装一律不启动。
 
