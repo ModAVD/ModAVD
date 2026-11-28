@@ -18,3 +18,6 @@ UninstDeleteData=Also delete your instances and game data?%n%nYes: delete the wh
 ErrNotEmpty=This folder already has other things in it. Please choose an empty folder or a new one, for example D:\ModAVD.
 ErrReparse=%1 in this path is a junction or symbolic link that points to another folder, so the files would actually end up somewhere else. Please choose a regular folder, for example D:\ModAVD.
 ErrShortName=%1 in this path is an abbreviated (8.3 short) folder name; the full name is %2. Please type the full name, or choose another path, for example D:\ModAVD.
+ErrBadName=The folder name "%1" in this path ends in a space or a period, which Windows silently drops, so the files would end up in a different folder. Please remove the trailing spaces and periods, for example D:\ModAVD.
+ErrReservedName=The folder name "%1" in this path is a name Windows reserves for devices (CON, PRN, AUX, NUL, COM0 to COM9, LPT0 to LPT9, also with an extension), so this folder cannot be created. Please choose another name, for example D:\ModAVD.
+ErrBadChars=The path cannot contain any of these characters: : * ? " < > | (a colon is only allowed right after the drive letter). Please choose another path, for example D:\ModAVD.

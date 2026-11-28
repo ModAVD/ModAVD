@@ -18,3 +18,6 @@ UninstDeleteData=要不要把实例和游戏数据也一起删掉？%n%n选「�
 ErrNotEmpty=这个文件夹里已经有别的东西了。请选一个空文件夹或新文件夹，比如 D:\ModAVD。
 ErrReparse=路径里的 %1 是目录联接或符号链接，指向别的文件夹，装进去的文件实际会放到别处。请换一个普通的文件夹，比如 D:\ModAVD。
 ErrShortName=路径里的 %1 是缩写的文件夹名（8.3 短名），完整的名字是 %2。请写完整的名字，或者换一个路径，比如 D:\ModAVD。
+ErrBadName=路径里的文件夹名「%1」以空格或句点结尾，Windows 会悄悄去掉它们，实际装到的不是写的这个文件夹。请去掉结尾的空格和句点，比如 D:\ModAVD。
+ErrReservedName=路径里的文件夹名「%1」是 Windows 留给设备用的名字（CON、PRN、AUX、NUL、COM0–COM9、LPT0–LPT9，带扩展名也算），建不出这个文件夹。请换一个名字，比如 D:\ModAVD。
+ErrBadChars=路径里不能有这些字符：: * ? " < > |（冒号只能紧跟在盘符后面）。请换一个路径，比如 D:\ModAVD。
